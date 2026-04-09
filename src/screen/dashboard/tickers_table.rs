@@ -65,6 +65,8 @@ fn available_markets(venue: Venue) -> &'static [MarketKind] {
         // Skip metadata fetch for Mexc spot as it requires protobuf for websocket
         // TODO: include after protobuf implementation and Mexc spot markets ready to stream
         Venue::Mexc => &[MarketKind::LinearPerps, MarketKind::InversePerps],
+        // 立花証券は日本株 (Spot) のみ
+        Venue::Tachibana => &[MarketKind::Spot],
     }
 }
 

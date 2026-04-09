@@ -15,6 +15,7 @@ pub mod bybit;
 pub mod hyperliquid;
 pub mod mexc;
 pub mod okex;
+pub mod tachibana;
 
 /// Buffer trades and flush in this interval
 const TRADE_BUCKET_INTERVAL: Duration = Duration::from_micros(33_333);
@@ -455,15 +456,17 @@ pub enum Venue {
     Hyperliquid,
     Okex,
     Mexc,
+    Tachibana,
 }
 
 impl Venue {
-    pub const ALL: [Venue; 5] = [
+    pub const ALL: [Venue; 6] = [
         Venue::Bybit,
         Venue::Binance,
         Venue::Hyperliquid,
         Venue::Okex,
         Venue::Mexc,
+        Venue::Tachibana,
     ];
 }
 
@@ -478,6 +481,7 @@ impl std::fmt::Display for Venue {
                 Venue::Hyperliquid => "Hyperliquid",
                 Venue::Okex => "OKX",
                 Venue::Mexc => "MEXC",
+                Venue::Tachibana => "Tachibana",
             }
         )
     }
@@ -497,6 +501,8 @@ impl FromStr for Venue {
             Ok(Self::Okex)
         } else if s.eq_ignore_ascii_case("mexc") {
             Ok(Self::Mexc)
+        } else if s.eq_ignore_ascii_case("tachibana") {
+            Ok(Self::Tachibana)
         } else {
             Err(format!("Invalid venue: {}", s))
         }
@@ -519,6 +525,8 @@ pub enum Exchange {
     MexcLinear,
     MexcInverse,
     MexcSpot,
+    /// 立花証券 e支店（日本株）
+    Tachibana,
 }
 
 impl std::fmt::Display for Exchange {
@@ -552,7 +560,7 @@ impl FromStr for Exchange {
 }
 
 impl Exchange {
-    pub const ALL: [Exchange; 14] = [
+    pub const ALL: [Exchange; 15] = [
         Exchange::BinanceLinear,
         Exchange::BinanceInverse,
         Exchange::BinanceSpot,
@@ -567,6 +575,7 @@ impl Exchange {
         Exchange::MexcLinear,
         Exchange::MexcInverse,
         Exchange::MexcSpot,
+        Exchange::Tachibana,
     ];
 
     pub fn from_venue_and_market(venue: Venue, market: MarketKind) -> Option<Self> {
@@ -590,7 +599,8 @@ impl Exchange {
             | Exchange::BybitSpot
             | Exchange::HyperliquidSpot
             | Exchange::OkexSpot
-            | Exchange::MexcSpot => MarketKind::Spot,
+            | Exchange::MexcSpot
+            | Exchange::Tachibana => MarketKind::Spot,
         }
     }
 
@@ -603,6 +613,7 @@ impl Exchange {
             Exchange::HyperliquidLinear | Exchange::HyperliquidSpot => Venue::Hyperliquid,
             Exchange::OkexLinear | Exchange::OkexInverse | Exchange::OkexSpot => Venue::Okex,
             Exchange::MexcLinear | Exchange::MexcInverse | Exchange::MexcSpot => Venue::Mexc,
+            Exchange::Tachibana => Venue::Tachibana,
         }
     }
 
@@ -645,6 +656,8 @@ impl Exchange {
                 Timeframe::KLINE.contains(&tf)
                     && !matches!(tf, Timeframe::M3 | Timeframe::H2 | Timeframe::H12)
             }
+            // 立花証券は日足のみ
+            Venue::Tachibana => matches!(tf, Timeframe::D1),
         }
     }
 
@@ -755,6 +768,8 @@ pub async fn fetch_ticker_metadata(
         }
         Venue::Okex => okex::fetch_ticker_metadata(markets).await,
         Venue::Mexc => mexc::fetch_ticker_metadata(markets).await,
+        // 立花証券は CLMIssueMstKabu で銘柄情報を取得（TODO: Phase 3 で実装）
+        Venue::Tachibana => Ok(HashMap::default()),
     }
 }
 
@@ -791,6 +806,8 @@ pub async fn fetch_ticker_stats(
         }
         Venue::Okex => okex::fetch_ticker_stats(markets).await,
         Venue::Mexc => mexc::fetch_ticker_stats(markets, contract_sizes.as_ref()).await,
+        // 立花証券は現在値を CLMMfdsGetMarketPrice で取得（TODO: Phase 3 で実装）
+        Venue::Tachibana => Ok(HashMap::default()),
     }
 }
 
@@ -805,6 +822,10 @@ pub async fn fetch_klines(
         Venue::Hyperliquid => hyperliquid::fetch_klines(ticker_info, timeframe, range).await,
         Venue::Okex => okex::fetch_klines(ticker_info, timeframe, range).await,
         Venue::Mexc => mexc::fetch_klines(ticker_info, timeframe, range).await,
+        // 立花証券は CLMMfdsGetMarketPriceHistory で日足取得（TODO: Phase 3 で実装）
+        Venue::Tachibana => Err(AdapterError::InvalidRequest(
+            "立花証券の日足データは fetch_daily_history() を使用してください".to_string(),
+        )),
     }
 }
 
@@ -828,5 +849,48 @@ pub async fn fetch_open_interest(
         _ => Err(AdapterError::InvalidRequest(format!(
             "Open interest data not available for {exchange}"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── Phase 2: Tachibana Exchange variant ───────────────────────────────────
+
+    #[test]
+    fn tachibana_exchange_has_tachibana_venue() {
+        assert_eq!(Exchange::Tachibana.venue(), Venue::Tachibana);
+    }
+
+    #[test]
+    fn tachibana_exchange_display_contains_name() {
+        let display = format!("{}", Exchange::Tachibana);
+        assert!(
+            display.contains("Tachibana") || display.contains("立花"),
+            "Display must include exchange name: {display}"
+        );
+    }
+
+    #[test]
+    fn tachibana_venue_parses_from_str() {
+        let venue = "tachibana".parse::<Venue>().unwrap();
+        assert_eq!(venue, Venue::Tachibana);
+    }
+
+    #[test]
+    fn tachibana_exchange_is_not_perps() {
+        assert!(
+            !Exchange::Tachibana.is_perps(),
+            "Tachibana は先物市場ではない"
+        );
+    }
+
+    #[test]
+    fn tachibana_exchange_included_in_all() {
+        assert!(
+            Exchange::ALL.contains(&Exchange::Tachibana),
+            "Exchange::ALL に Tachibana が含まれていない"
+        );
     }
 }

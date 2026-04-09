@@ -44,6 +44,8 @@ pub fn depth_stream(config: &StreamConfig<TickerInfo>) -> BoxStream<'static, Eve
         }
         Venue::Okex => adapter::okex::connect_depth_stream(ticker, push_freq).boxed(),
         Venue::Mexc => adapter::mexc::connect_depth_stream(ticker, push_freq).boxed(),
+        // 立花証券は板情報を EVENT I/F 経由で取得（TODO: Phase 3 で実装）
+        Venue::Tachibana => futures::stream::empty().boxed(),
     }
 }
 
@@ -59,6 +61,8 @@ pub fn trade_stream(config: &StreamConfig<Vec<TickerInfo>>) -> BoxStream<'static
         }
         Venue::Okex => adapter::okex::connect_trade_stream(tickers, market_kind).boxed(),
         Venue::Mexc => adapter::mexc::connect_trade_stream(tickers, market_kind).boxed(),
+        // 立花証券はティックデータを EVENT I/F 経由で取得（TODO: Phase 3 で実装）
+        Venue::Tachibana => futures::stream::empty().boxed(),
     }
 }
 
@@ -76,6 +80,8 @@ pub fn kline_stream(
         }
         Venue::Okex => adapter::okex::connect_kline_stream(streams, market_kind).boxed(),
         Venue::Mexc => adapter::mexc::connect_kline_stream(streams, market_kind).boxed(),
+        // 立花証券は日足のみ・REST ポーリング（TODO: Phase 3 で実装）
+        Venue::Tachibana => futures::stream::empty().boxed(),
     }
 }
 
