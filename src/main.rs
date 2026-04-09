@@ -164,10 +164,11 @@ impl Flowsurface {
 
         (
             state,
-            open_login_window
-                .discard()
-                .chain(launch_sidebar.map(Message::Sidebar))
-                .chain(restore_task),
+            Task::batch([
+                open_login_window.discard(),
+                launch_sidebar.map(Message::Sidebar),
+                restore_task,
+            ]),
         )
     }
 
@@ -198,7 +199,7 @@ impl Flowsurface {
                         connector::auth::persist_session(&session);
                         let dashboard_task = self.transition_to_dashboard();
                         let master_task = Self::start_master_download(session);
-                        return dashboard_task.chain(master_task);
+                        return Task::batch([dashboard_task, master_task]);
                     }
                     Err(error_msg) => {
                         log::warn!("Login failed: {error_msg}");
@@ -212,7 +213,7 @@ impl Flowsurface {
                     connector::auth::store_session(session.clone());
                     let dashboard_task = self.transition_to_dashboard();
                     let master_task = Self::start_master_download(session);
-                    return dashboard_task.chain(master_task);
+                    return Task::batch([dashboard_task, master_task]);
                 }
                 return Task::none();
             }
