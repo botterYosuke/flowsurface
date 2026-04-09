@@ -46,24 +46,43 @@ pub struct TachibanaSession {
 
 /// CLMAuthLoginRequest リクエスト。
 /// sCLMID フィールドは常に "CLMAuthLoginRequest" 固定。
+///
+/// `sJsonOfmt: "5"` は必須。これがないと応答が数値キー形式になる。
+/// "5" = bit1 ON（見やすい形式）+ bit3 ON（引数項目名称で応答）。
 #[derive(Debug, Serialize)]
 pub struct LoginRequest {
+    /// リクエスト通番（ログイン時は "1"）
+    pub p_no: String,
+    /// リクエスト送信日時 (YYYY.MM.DD-hh:mm:ss.sss)
+    pub p_sd_date: String,
     #[serde(rename = "sCLMID")]
     pub clm_id: &'static str,
     #[serde(rename = "sUserId")]
     pub user_id: String,
     #[serde(rename = "sPassword")]
     pub password: String,
+    /// 応答の表示形式。"5" = 項目名称付きJSON
+    #[serde(rename = "sJsonOfmt")]
+    pub json_ofmt: &'static str,
 }
 
 impl LoginRequest {
     pub fn new(user_id: String, password: String) -> Self {
         Self {
+            p_no: "1".to_string(),
+            p_sd_date: current_p_sd_date(),
             clm_id: "CLMAuthLoginRequest",
             user_id,
             password,
+            json_ofmt: "5",
         }
     }
+}
+
+/// 現在時刻を p_sd_date 形式 (YYYY.MM.DD-hh:mm:ss.sss) で返す。
+fn current_p_sd_date() -> String {
+    let now = chrono::Local::now();
+    now.format("%Y.%m.%d-%H:%M:%S%.3f").to_string()
 }
 
 /// CLMAuthLoginAck 応答。
@@ -71,9 +90,15 @@ impl LoginRequest {
 /// sKinsyouhouMidokuFlg が "1" の場合、仮想URLは空で利用不可。
 #[derive(Debug, Deserialize)]
 pub struct LoginResponse {
-    #[serde(rename = "sCLMID")]
+    #[serde(rename = "sCLMID", default)]
     pub clm_id: String,
-    #[serde(rename = "sResultCode")]
+    /// API共通エラーコード。"0" = 正常。
+    #[serde(default)]
+    pub p_errno: String,
+    /// API共通エラーメッセージ。
+    #[serde(default)]
+    pub p_err: String,
+    #[serde(rename = "sResultCode", default)]
     pub result_code: String,
     #[serde(rename = "sUrlRequest", default)]
     pub url_request: String,
@@ -96,7 +121,15 @@ impl TryFrom<LoginResponse> for TachibanaSession {
     type Error = TachibanaError;
 
     fn try_from(resp: LoginResponse) -> Result<Self, Self::Error> {
-        if resp.result_code != "0" {
+        // p_errno チェック（API共通エラー）
+        if !resp.p_errno.is_empty() && resp.p_errno != "0" {
+            return Err(TachibanaError::LoginFailed(format!(
+                "code={}, p_err={}",
+                resp.p_errno, resp.p_err
+            )));
+        }
+        // sResultCode チェック
+        if !resp.result_code.is_empty() && resp.result_code != "0" {
             return Err(TachibanaError::LoginFailed(format!(
                 "code={}, message={}",
                 resp.result_code, resp.result_text
@@ -142,6 +175,8 @@ pub fn build_api_url_from<T: Serialize>(
 /// 最大120銘柄まで同時取得可能。
 #[derive(Debug, Serialize)]
 pub struct MarketPriceRequest {
+    pub p_no: String,
+    pub p_sd_date: String,
     #[serde(rename = "sCLMID")]
     pub clm_id: &'static str,
     /// カンマ区切りの銘柄コード (例: "6501,7203")
@@ -150,6 +185,8 @@ pub struct MarketPriceRequest {
     /// カンマ区切りの情報コード
     #[serde(rename = "sTargetColumn")]
     pub target_columns: String,
+    #[serde(rename = "sJsonOfmt")]
+    pub json_ofmt: &'static str,
 }
 
 impl MarketPriceRequest {
@@ -158,9 +195,12 @@ impl MarketPriceRequest {
 
     pub fn new(issue_codes: &[&str]) -> Self {
         Self {
+            p_no: "1".to_string(),
+            p_sd_date: current_p_sd_date(),
             clm_id: "CLMMfdsGetMarketPrice",
             target_issue_codes: issue_codes.join(","),
             target_columns: Self::DEFAULT_COLUMNS.to_string(),
+            json_ofmt: "5",
         }
     }
 }
@@ -204,6 +244,8 @@ pub struct MarketPriceResponse {
 /// 1リクエスト1銘柄、最大約20年分のデータを取得可能。
 #[derive(Debug, Serialize)]
 pub struct DailyHistoryRequest {
+    pub p_no: String,
+    pub p_sd_date: String,
     #[serde(rename = "sCLMID")]
     pub clm_id: &'static str,
     #[serde(rename = "sIssueCode")]
@@ -211,6 +253,8 @@ pub struct DailyHistoryRequest {
     /// 市場コード (東証: "00")
     #[serde(rename = "sSizyouC")]
     pub market_code: String,
+    #[serde(rename = "sJsonOfmt")]
+    pub json_ofmt: &'static str,
 }
 
 impl DailyHistoryRequest {
@@ -219,9 +263,12 @@ impl DailyHistoryRequest {
 
     pub fn new(issue_code: &str) -> Self {
         Self {
+            p_no: "1".to_string(),
+            p_sd_date: current_p_sd_date(),
             clm_id: "CLMMfdsGetMarketPriceHistory",
             issue_code: issue_code.to_string(),
             market_code: Self::TSE_MARKET_CODE.to_string(),
+            json_ofmt: "5",
         }
     }
 }
@@ -279,6 +326,14 @@ pub const BASE_URL_DEMO: &str = "https://demo-kabuka.e-shiten.jp/e_api_v4r8/";
 /// 認証エンドポイントのパス
 pub const AUTH_PATH: &str = "auth/";
 
+/// レスポンスボディを Shift-JIS からデコードする。
+/// 立花証券 API のレスポンスは Shift-JIS エンコーディング。
+async fn decode_response_body(resp: reqwest::Response) -> Result<String, TachibanaError> {
+    let bytes = resp.bytes().await?;
+    let (cow, _, _) = encoding_rs::SHIFT_JIS.decode(&bytes);
+    Ok(cow.into_owned())
+}
+
 /// ログイン処理。
 /// 成功時は `TachibanaSession` を返す。
 /// 未読書面がある場合は `TachibanaError::UnreadNotices`。
@@ -292,8 +347,14 @@ pub async fn login(
     let auth_url = format!("{}{}", base_url, AUTH_PATH);
     let url = build_api_url_from(&auth_url, &req)?;
 
+    log::debug!("Tachibana login URL: {url}");
+
     let resp = client.get(&url).send().await?;
-    let text = resp.text().await?;
+    let status = resp.status();
+    let text = decode_response_body(resp).await?;
+
+    log::debug!("Tachibana login response (status={status}): {text}");
+
     let login_resp: LoginResponse = serde_json::from_str(&text)?;
     TachibanaSession::try_from(login_resp)
 }
@@ -309,7 +370,7 @@ pub async fn fetch_market_prices(
     let url = build_api_url_from(&session.url_price, &req)?;
 
     let resp = client.get(&url).send().await?;
-    let text = resp.text().await?;
+    let text = decode_response_body(resp).await?;
     let price_resp: MarketPriceResponse = serde_json::from_str(&text)?;
     Ok(price_resp.records)
 }
@@ -324,7 +385,7 @@ pub async fn fetch_daily_history(
     let url = build_api_url_from(&session.url_price, &req)?;
 
     let resp = client.get(&url).send().await?;
-    let text = resp.text().await?;
+    let text = decode_response_body(resp).await?;
     let hist_resp: DailyHistoryResponse = serde_json::from_str(&text)?;
     Ok(hist_resp.records)
 }
@@ -482,6 +543,8 @@ mod tests {
     fn session_created_from_successful_login() {
         let response = LoginResponse {
             clm_id: "CLMAuthLoginAck".to_string(),
+            p_errno: "0".to_string(),
+            p_err: String::new(),
             result_code: "0".to_string(),
             url_request: "https://req.example.com/".to_string(),
             url_master: "https://master.example.com/".to_string(),
@@ -500,6 +563,8 @@ mod tests {
     fn session_creation_fails_on_login_error() {
         let response = LoginResponse {
             clm_id: "CLMAuthLoginAck".to_string(),
+            p_errno: "0".to_string(),
+            p_err: String::new(),
             result_code: "10001".to_string(),
             url_request: String::new(),
             url_master: String::new(),
@@ -520,6 +585,8 @@ mod tests {
     fn session_creation_fails_when_unread_notices_flag_set() {
         let response = LoginResponse {
             clm_id: "CLMAuthLoginAck".to_string(),
+            p_errno: "0".to_string(),
+            p_err: String::new(),
             result_code: "0".to_string(),
             // 未読書面があると仮想URLが空になる
             url_request: String::new(),
