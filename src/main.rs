@@ -117,15 +117,6 @@ impl Flowsurface {
     fn new() -> (Self, Task<Message>) {
         let saved_state = layout::load_saved_state();
 
-        // ログインウィンドウを最初に開く（小さい固定サイズ）
-        let (login_window_id, open_login_window) = window::open(window::Settings {
-            size: iced::Size::new(900.0, 560.0),
-            position: window::Position::Centered,
-            resizable: false,
-            exit_on_close_request: true,
-            ..Default::default()
-        });
-
         // メインウィンドウIDをダミーで用意（起動はログイン後）
         let dummy_main_id = window::Id::unique();
 
@@ -134,7 +125,7 @@ impl Flowsurface {
         let saved_main_window_spec = saved_state.main_window;
 
         let mut state = Self {
-            login_window: Some(login_window_id),
+            login_window: None,
             login_screen: LoginScreen::new(),
             saved_main_window_spec,
             main_window: window::Window::new(dummy_main_id),
@@ -157,6 +148,7 @@ impl Flowsurface {
                 .push(Toast::error(format!("Audio disabled: {err}")));
         }
 
+        // 起動時にまずセッション復元を試行する（ウィンドウはまだ開かない）
         let restore_task = Task::perform(
             connector::auth::try_restore_session(),
             Message::SessionRestoreResult,
@@ -165,7 +157,6 @@ impl Flowsurface {
         (
             state,
             Task::batch([
-                open_login_window.discard(),
                 launch_sidebar.map(Message::Sidebar),
                 restore_task,
             ]),
@@ -210,12 +201,22 @@ impl Flowsurface {
             }
             Message::SessionRestoreResult(result) => {
                 if let Some(session) = result {
+                    // 再ログイン成功 → メイン画面を直接表示
                     connector::auth::store_session(session.clone());
                     let dashboard_task = self.transition_to_dashboard();
                     let master_task = Self::start_master_download(session);
                     return Task::batch([dashboard_task, master_task]);
                 }
-                return Task::none();
+                // 再ログイン失敗 → ログイン画面を表示
+                let (login_window_id, open_login_window) = window::open(window::Settings {
+                    size: iced::Size::new(900.0, 560.0),
+                    position: window::Position::Centered,
+                    resizable: false,
+                    exit_on_close_request: true,
+                    ..Default::default()
+                });
+                self.login_window = Some(login_window_id);
+                return open_login_window.discard();
             }
             Message::MarketWsEvent(event) => {
                 let main_window_id = self.main_window.id;

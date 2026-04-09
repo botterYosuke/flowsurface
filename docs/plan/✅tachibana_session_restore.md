@@ -26,14 +26,18 @@
 ### フロー
 
 ```
-起動
+起動（ウィンドウなし）
  ├─ keyring から TachibanaSession を復元
  │    ├─ 復元成功 → セッション検証（url_price へ軽量リクエスト）
- │    │    ├─ 有効（p_errno=0）→ store_session() → ダッシュボード直行
- │    │    └─ 失効（p_errno=2）→ keyring から削除 → ログイン画面
- │    └─ 復元失敗 / 保存なし → ログイン画面（従来どおり）
+ │    │    ├─ 有効（p_errno=0）→ store_session() → メイン画面を直接表示
+ │    │    └─ 失効（p_errno=2）→ keyring から削除 → ログイン画面を表示
+ │    └─ 復元失敗 / 保存なし → ログイン画面を表示
  └─ ログイン成功時 → keyring にセッションを保存
 ```
+
+**ポイント**: 起動直後はウィンドウを一切開かず、まずセッション復元を試行する。
+セッションが有効ならログイン画面を経由せずメイン画面を直接表示する。
+セッション復元は ~100ms で完了するため、ウィンドウなしの期間はユーザーに気付かれない。
 
 ### 保存先
 
@@ -154,21 +158,17 @@ pub fn persist_session(session: &TachibanaSession) {
 
 /// keyring から保存済みセッションを復元し、有効性を検証する。
 /// 有効なセッションがあれば返す。失効/未保存なら None。
+/// マスタダウンロードはここでは行わず、main.rs 側で別タスクとして実行する。
 pub async fn try_restore_session() -> Option<TachibanaSession> {
     let session = data::config::tachibana::load_session()?;
     let client = reqwest::Client::new();
     match exchange::adapter::tachibana::validate_session(&client, &session).await {
         Ok(()) => {
-            log::info!("Restored valid tachibana session from keyring");
-            // マスタキャッシュも再初期化
-            let client_for_master = reqwest::Client::new();
-            if let Err(e) = tachibana::init_issue_master(&client_for_master, &session).await {
-                log::error!("Tachibana master download failed on restore: {e}");
-            }
+            log::info!("Tachibana session validated successfully, restoring");
             Some(session)
         }
         Err(e) => {
-            log::info!("Saved tachibana session expired or invalid: {e}");
+            log::warn!("Tachibana session restore failed: {e}");
             data::config::tachibana::delete_session();
             None
         }
@@ -189,18 +189,25 @@ enum Message {
 }
 ```
 
-#### 5-2. new() でセッション復元を試行
+#### 5-2. new() でセッション復元を試行（ウィンドウなし）
+
+起動直後はウィンドウを開かず、セッション復元の結果に応じてウィンドウを決定する。
 
 ```rust
 fn new() -> (Self, Task<Message>) {
     let saved_state = layout::load_saved_state();
 
-    // ログインウィンドウを開く（従来通り）
-    let (login_window_id, open_login_window) = window::open(/* ... */);
+    // メインウィンドウIDをダミーで用意（起動はログイン後）
+    let dummy_main_id = window::Id::unique();
 
     // ... 既存の初期化 ...
 
-    // セッション復元を非同期で試行
+    let mut state = Self {
+        login_window: None,  // ← 起動時はウィンドウなし
+        // ...
+    };
+
+    // 起動時にまずセッション復元を試行する（ウィンドウはまだ開かない）
     let restore_task = Task::perform(
         connector::auth::try_restore_session(),
         Message::SessionRestoreResult,
@@ -208,31 +215,35 @@ fn new() -> (Self, Task<Message>) {
 
     (
         state,
-        open_login_window
-            .discard()
-            .chain(launch_sidebar.map(Message::Sidebar))
-            .chain(restore_task),
+        Task::batch([
+            launch_sidebar.map(Message::Sidebar),
+            restore_task,
+        ]),
     )
 }
 ```
 
-#### 5-3. SessionRestoreResult ハンドラを追加
+#### 5-3. SessionRestoreResult ハンドラ
 
 ```rust
 Message::SessionRestoreResult(result) => {
-    match result {
-        Some(session) => {
-            // セッション有効 → LoginCompleted(Ok(session)) と同じ処理
-            connector::auth::store_session(session);
-            // ログインウィンドウを閉じてダッシュボードを開く
-            // （既存の LoginCompleted::Ok と同じロジックを呼ぶ）
-            return self.transition_to_dashboard();
-        }
-        None => {
-            // 復元失敗 → ログイン画面のまま（何もしない）
-        }
+    if let Some(session) = result {
+        // 再ログイン成功 → メイン画面を直接表示
+        connector::auth::store_session(session.clone());
+        let dashboard_task = self.transition_to_dashboard();
+        let master_task = Self::start_master_download(session);
+        return Task::batch([dashboard_task, master_task]);
     }
-    Task::none()
+    // 再ログイン失敗 → ログイン画面を表示
+    let (login_window_id, open_login_window) = window::open(window::Settings {
+        size: iced::Size::new(900.0, 560.0),
+        position: window::Position::Centered,
+        resizable: false,
+        exit_on_close_request: true,
+        ..Default::default()
+    });
+    self.login_window = Some(login_window_id);
+    return open_login_window.discard();
 }
 ```
 
@@ -244,7 +255,9 @@ Message::SessionRestoreResult(result) => {
 Ok(session) => {
     connector::auth::store_session(session.clone());
     connector::auth::persist_session(&session);  // ← 追加
-    // ... 既存のダッシュボード遷移 ...
+    let dashboard_task = self.transition_to_dashboard();
+    let master_task = Self::start_master_download(session);
+    return Task::batch([dashboard_task, master_task]);
 }
 ```
 
@@ -252,6 +265,7 @@ Ok(session) => {
 
 `LoginCompleted(Ok)` と `SessionRestoreResult(Some)` で同じ遷移処理を使うため、
 ログインウィンドウを閉じてメインウィンドウを開くロジックを `fn transition_to_dashboard()` に切り出す。
+`login_window` が `None`（セッション復元成功パス）の場合は close タスクをスキップする。
 
 ### Step 6: ログアウト時のクリーンアップ
 
@@ -274,12 +288,13 @@ pub fn clear_session() {
 
 | シナリオ | 挙動 |
 |----------|------|
-| 初回起動 / セッション未保存 | 通常のログイン画面 |
-| 同日中の再起動 | ログイン画面が一瞬表示 → 自動でダッシュボードへ遷移 |
-| 翌日の起動（セッション失効） | ログイン画面が表示される（失敗ログが出る） |
-| ネットワークエラー | 検証リクエスト失敗 → ログイン画面にフォールバック |
+| 初回起動 / セッション未保存 | セッション復元試行（~100ms）→ ログイン画面を表示 |
+| 同日中の再起動 | セッション復元試行（~100ms）→ メイン画面を直接表示（ログイン画面を経由しない） |
+| 翌日の起動（セッション失効） | セッション復元試行 → 検証失敗 → ログイン画面を表示 |
+| ネットワークエラー | 検証リクエスト失敗 → ログイン画面を表示 |
 
-復元チェック中はログイン画面に「セッション復元中...」などの表示があると良い（任意）。
+起動直後はウィンドウを一切開かず、セッション復元結果に応じて適切なウィンドウを表示する。
+復元は ~100ms で完了するため、ウィンドウなしの期間はユーザーに気付かれない。
 
 ---
 

@@ -2,7 +2,8 @@
   "permissions": {
     "allow": [
       "Bash(tasklist)",
-      "Bash(taskkill //PID 25136 //F)"
+      "Bash(taskkill //PID 25136 //F)",
+      "Bash(powershell -Command \"cmdkey /delete:flowsurface.tachibana 2>&1; echo 'Done'\")"
     ],
     "additionalDirectories": [
       "C:\\Users\\sasai\\Documents\\marimo\\.claude\\plans"

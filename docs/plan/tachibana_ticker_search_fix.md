@@ -1,7 +1,7 @@
 # 立花証券 銘柄検索が表示されない問題 — 修正プラン
 
 **作成日**: 2026-04-09
-**更新日**: 2026-04-09 (v5: レビュー反映)
+**更新日**: 2026-04-10 (v6: 起動時再ログイン仕様変更)
 **対象**: "Search for a ticker" モーダルで Tachibana の銘柄が0件
 
 ---
@@ -445,3 +445,86 @@ Phase 2.5（本修正）
 2. **display 切り捨ての安全化**: `d[..28]` のバイト切り捨て前に `.is_ascii()` チェックを追加し、非 ASCII 混入時は `display = None` にフォールバック。panic 防止のため対応推奨。
 3. **`spawn_init_issue_master()` の削除**: `exchange/src/adapter/tachibana.rs:708-715` に存在するが未使用のデッドコード。
 4. **`reqwest::Client` の再利用**: `src/connector/auth.rs:57` で `reqwest::Client::new()` を新規作成しているが、ログイン用の `client`（49行目）を再利用すれば接続プールを共有できる。
+
+---
+
+## 12. UX改善: 起動時再ログイン + マスタダウンロードの非同期化（2026-04-10）
+
+### 問題
+
+ログイン時（手動・自動ともに）に `init_issue_master`（約21MB、12秒）を `await` で同期待ちしていたため、
+ダッシュボードへの遷移がブロックされ、ログイン画面が長時間表示される UX 問題があった。
+
+加えて、起動タスクが `chain`（直列）で構成されていたため、セッション復元タスクが
+Sidebar の全取引所メタデータ取得完了（Binance で最大3.5秒）を待ってから開始されていた。
+
+### 計測結果（タイミングログによる実測）
+
+#### Before（chain + await）
+
+```
++0.0s  new() — tasks queued: open_login_window → launch_sidebar → restore_task
++1.4s  ログインウィンドウ表示（GPU初期化完了）
++5.0s  Sidebar 全取引所メタデータ取得完了（Binance が 3.5s）
++5.0s  try_restore_session START（Sidebar 完了待ちで 4.8s 遅延）
++5.1s  validate_session OK（131ms）
++5.1s  transition_to_dashboard
++6.6s  start_master_download BEGIN（window 起動待ちで 1.5s 遅延）
++18.7s master download complete（12s）→ UpdateMetadata Tachibana: 4208
+```
+
+- ログイン画面表示時間: **約4秒**
+- セッション復元開始遅延: **4.8秒**
+
+#### After（batch 並列化 + ログインウィンドウ遅延表示）
+
+```
++0.0s  new() — tasks queued: batch[launch_sidebar, restore_task]（ウィンドウなし）
++0.0s  try_restore_session START（即時開始）
++0.1s  validate_session OK（95ms）
++0.1s  SessionRestoreResult(Some) → transition_to_dashboard（ログイン画面を経由しない）
++0.8s  start_master_download BEGIN（dashboard と並列）
++12.8s master download complete → UpdateMetadata Tachibana: 4208
+```
+
+- ログイン画面表示時間: **0秒**（セッション有効時はログイン画面を表示しない）
+- セッション復元開始遅延: **0秒**
+
+#### セッション無効時
+
+```
++0.0s  new() — tasks queued: batch[launch_sidebar, restore_task]（ウィンドウなし）
++0.0s  try_restore_session START
++0.1s  validate_session FAILED / No saved session
++0.1s  SessionRestoreResult(None) → ログインウィンドウを開く
++1.5s  ログインウィンドウ表示（GPU初期化完了）
+```
+
+### 起動仕様
+
+```
+起動 → セッション復元試行（ウィンドウなし、~100ms）
+  ├─ 成功 → メイン画面を直接表示（ログイン画面を経由しない）
+  └─ 失敗 → ログイン画面を表示
+```
+
+1. 起動直後にウィンドウを開かず、まず `try_restore_session()` で再ログインを試行する
+2. 再ログイン失敗（セッション未保存 or 失効）→ ログイン画面を表示
+3. 再ログイン成功 → メイン画面を直接表示（ログイン画面は一切表示されない）
+
+### 修正内容
+
+| 変更 | Before | After | 効果 |
+|------|--------|-------|------|
+| 起動タスク構成 (`new()`) | `chain`（直列: login window → sidebar → restore） | `Task::batch`（sidebar + restore の2タスク並列、**ウィンドウなし**） | セッション復元が即時開始、ログイン画面を経由しない |
+| ログインウィンドウ表示 | `new()` で常に開く | `SessionRestoreResult(None)` 時のみ開く | セッション有効時はログイン画面が一切表示されない |
+| ダッシュボード遷移+マスタDL | `chain`（直列: dashboard → master） | `Task::batch`（2タスク並列） | マスタDLが遷移と同時開始、**-0.9s** |
+| `init_issue_master` の呼び出し元 | `auth.rs`（ログイン関数内で `await`） | `main.rs` の `start_master_download()`（バックグラウンド `Task::perform`） | ログイン完了がマスタDLをブロックしない |
+| マスタDL完了後の反映 | なし（ログイン前に完了済み前提） | `UpdateMetadata(Tachibana, metadata)` メッセージ経由で TickersTable に反映 | ダッシュボード表示後にティッカーが非同期で追加される |
+
+### 変更ファイル一覧
+
+| ファイル | 変更内容 |
+|---------|---------|
+| `src/main.rs` | `new()`: ログインウィンドウを開かず `login_window: None` で開始。`SessionRestoreResult(None)` でログインウィンドウを遅延表示。`LoginCompleted`/`SessionRestoreResult(Some)`: ダッシュボード遷移とマスタDLを `Task::batch` で並列化。`start_master_download()` ヘルパー追加 |
+| `src/connector/auth.rs` | `perform_login_with_base_url()`, `try_restore_session()` から `init_issue_master` の await を削除。未使用 import `self` を削除 |
