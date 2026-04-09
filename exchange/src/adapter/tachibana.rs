@@ -42,7 +42,7 @@ pub enum TachibanaError {
 
 /// ログイン成功後に取得するセッション固有の仮想URL群。
 /// セッション毎に異なる（1日間有効）。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TachibanaSession {
     pub url_request: String,
     pub url_master: String,
@@ -438,6 +438,36 @@ pub async fn fetch_market_prices(
     let api_resp: ApiResponse<MarketPriceResponse> = serde_json::from_str(&text)?;
     let data = api_resp.check()?;
     Ok(data.records)
+}
+
+/// 保存済みセッションの仮想URLがまだ有効か確認する。
+/// url_price に対して軽量リクエストを送り、p_errno で判定する。
+/// 有効なら Ok(()), 失効（p_errno="2"）なら Err を返す。
+pub async fn validate_session(
+    client: &reqwest::Client,
+    session: &TachibanaSession,
+) -> Result<(), TachibanaError> {
+    log::debug!("Validating tachibana session: url_price={}", session.url_price);
+    let req = MarketPriceRequest::new(&["0000"]);
+    let json_body = serialize_request(&req)?;
+    let text = post_request(client, &session.url_price, &json_body).await?;
+    log::debug!("validate_session response: {}", &text[..text.len().min(500)]);
+    let api_resp: ApiResponse<serde_json::Value> = serde_json::from_str(&text)?;
+    // p_errno="2" はセッション失効を示す。それ以外（"0" や空文字）は有効。
+    if api_resp.p_errno == "2" {
+        return Err(TachibanaError::ApiError {
+            code: api_resp.p_errno,
+            message: api_resp.p_err,
+        });
+    }
+    if !api_resp.p_errno.is_empty() && api_resp.p_errno != "0" {
+        log::warn!(
+            "validate_session: unexpected p_errno={}, p_err={} (treating as valid)",
+            api_resp.p_errno,
+            api_resp.p_err,
+        );
+    }
+    Ok(())
 }
 
 /// 日足履歴取得（最大約20年分）。
@@ -1597,5 +1627,80 @@ mod tests {
 
         let close_f32 = kline.close.to_f32();
         assert!((close_f32 - 3250.0).abs() < 1.0, "調整後終値は 3250 であるべき: {close_f32}");
+    }
+
+    // ── Cycle S1: TachibanaSession の JSON ラウンドトリップ ─────────────────────
+
+    #[test]
+    fn tachibana_session_json_roundtrip_preserves_all_fields() {
+        let session = TachibanaSession {
+            url_request: "https://virt.test/request/".to_string(),
+            url_master: "https://virt.test/master/".to_string(),
+            url_price: "https://virt.test/price/".to_string(),
+            url_event: "https://virt.test/event/".to_string(),
+            url_event_ws: "wss://virt.test/ws/".to_string(),
+        };
+
+        let json = serde_json::to_string(&session).expect("serialize すべき");
+        let restored: TachibanaSession =
+            serde_json::from_str(&json).expect("deserialize すべき");
+
+        assert_eq!(session.url_request, restored.url_request);
+        assert_eq!(session.url_master, restored.url_master);
+        assert_eq!(session.url_price, restored.url_price);
+        assert_eq!(session.url_event, restored.url_event);
+        assert_eq!(session.url_event_ws, restored.url_event_ws);
+    }
+
+    // ── Cycle V1: validate_session — セッション有効 ────────────────────────────
+
+    #[tokio::test]
+    async fn validate_session_returns_ok_when_session_valid() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("POST", mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"p_errno":"0","p_err":"","sResultCode":"0","sResultText":""}"#)
+            .create_async()
+            .await;
+
+        let session = TachibanaSession {
+            url_request: String::new(),
+            url_master: String::new(),
+            url_price: server.url(),
+            url_event: String::new(),
+            url_event_ws: String::new(),
+        };
+
+        let client = reqwest::Client::new();
+        let result = validate_session(&client, &session).await;
+        assert!(result.is_ok(), "有効なセッションは Ok を返すべき");
+    }
+
+    // ── Cycle V2: validate_session — セッション失効 ────────────────────────────
+
+    #[tokio::test]
+    async fn validate_session_returns_err_when_session_expired() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("POST", mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"p_errno":"2","p_err":"セッション失効","sResultCode":"","sResultText":""}"#)
+            .create_async()
+            .await;
+
+        let session = TachibanaSession {
+            url_request: String::new(),
+            url_master: String::new(),
+            url_price: server.url(),
+            url_event: String::new(),
+            url_event_ws: String::new(),
+        };
+
+        let client = reqwest::Client::new();
+        let result = validate_session(&client, &session).await;
+        assert!(result.is_err(), "失効セッションは Err を返すべき");
     }
 }

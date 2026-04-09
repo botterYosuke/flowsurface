@@ -22,11 +22,14 @@ pub fn store_session(session: TachibanaSession) {
     }
 }
 
-/// セッションをクリアする。
+/// セッションをクリアする（メモリ + keyring）。
+/// 現時点ではログアウト機能未実装のため未使用。
+#[allow(dead_code)]
 pub fn clear_session() {
     if let Ok(mut guard) = SESSION.write() {
         *guard = None;
     }
+    data::config::tachibana::delete_session();
 }
 
 /// ログイン実行。Task::perform から呼び出される非同期関数。
@@ -60,6 +63,39 @@ pub async fn perform_login_with_base_url(
     }
 
     Ok(session)
+}
+
+/// ログイン成功後にセッションを keyring に永続化する。
+pub fn persist_session(session: &TachibanaSession) {
+    data::config::tachibana::save_session(session);
+}
+
+/// keyring から保存済みセッションを復元し、有効性を検証する。
+/// 有効なセッションがあれば返す。失効/未保存なら None。
+pub async fn try_restore_session() -> Option<TachibanaSession> {
+    log::info!("Attempting to restore tachibana session from keyring");
+    let session = match data::config::tachibana::load_session() {
+        Some(s) => s,
+        None => {
+            log::info!("No saved tachibana session found in keyring");
+            return None;
+        }
+    };
+    let client = reqwest::Client::new();
+    match exchange::adapter::tachibana::validate_session(&client, &session).await {
+        Ok(()) => {
+            log::info!("Tachibana session validated successfully, restoring");
+            if let Err(e) = tachibana::init_issue_master(&client, &session).await {
+                log::error!("Tachibana master download failed on restore: {e}");
+            }
+            Some(session)
+        }
+        Err(e) => {
+            log::warn!("Tachibana session restore failed: {e}");
+            data::config::tachibana::delete_session();
+            None
+        }
+    }
 }
 
 /// TachibanaError をユーザー向けメッセージに変換する。
@@ -137,6 +173,27 @@ mod tests {
         store_session(session);
         clear_session();
         assert!(get_session().is_none(), "clear 後は None であるべき");
+    }
+
+    // ── Cycle P1: persist_session → keyring に保存される ──────────────────
+
+    #[test]
+    fn persist_session_saves_to_keyring() {
+        let session = TachibanaSession {
+            url_request: "https://persist.test/request/".to_string(),
+            url_master: "https://persist.test/master/".to_string(),
+            url_price: "https://persist.test/price/".to_string(),
+            url_event: "https://persist.test/event/".to_string(),
+            url_event_ws: "wss://persist.test/ws/".to_string(),
+        };
+
+        persist_session(&session);
+        let loaded = data::config::tachibana::load_session()
+            .expect("persist 後は keyring から load できるべき");
+        assert_eq!(session.url_price, loaded.url_price);
+
+        // クリーンアップ
+        data::config::tachibana::delete_session();
     }
 
     // ── Cycle C4: perform_login 成功 ────────────────────────────────────────

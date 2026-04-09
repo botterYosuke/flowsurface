@@ -110,6 +110,7 @@ enum Message {
     Layouts(modal::layout_manager::Message),
     AudioStream(modal::audio::Message),
     LoginCompleted(Result<exchange::adapter::tachibana::TachibanaSession, String>),
+    SessionRestoreResult(Option<exchange::adapter::tachibana::TachibanaSession>),
 }
 
 impl Flowsurface {
@@ -156,9 +157,17 @@ impl Flowsurface {
                 .push(Toast::error(format!("Audio disabled: {err}")));
         }
 
+        let restore_task = Task::perform(
+            connector::auth::try_restore_session(),
+            Message::SessionRestoreResult,
+        );
+
         (
             state,
-            open_login_window.discard().chain(launch_sidebar.map(Message::Sidebar)),
+            open_login_window
+                .discard()
+                .chain(launch_sidebar.map(Message::Sidebar))
+                .chain(restore_task),
         )
     }
 
@@ -185,50 +194,21 @@ impl Flowsurface {
             Message::LoginCompleted(result) => {
                 match result {
                     Ok(session) => {
-                        connector::auth::store_session(session);
-
-                        let login_win = self.login_window.take();
-
-                        // メインウィンドウを開く（最大化）
-                        let (main_window_id, open_main) = {
-                            let (position, size) = (
-                                window::Position::Centered,
-                                self.saved_main_window_spec
-                                    .map_or_else(crate::window::default_size, |w| w.size()),
-                            );
-                            window::open(window::Settings {
-                                size,
-                                position,
-                                exit_on_close_request: false,
-                                ..window::settings()
-                            })
-                        };
-
-                        self.main_window = window::Window::new(main_window_id);
-
-                        let active_layout_id = self.layout_manager.active_layout_id().unwrap_or(
-                            &self
-                                .layout_manager
-                                .layouts
-                                .first()
-                                .expect("No layouts available")
-                                .id,
-                        );
-                        let load_layout = self.load_layout(active_layout_id.unique, main_window_id);
-
-                        let close_login = login_win
-                            .map(|id| window::close::<Message>(id))
-                            .unwrap_or_else(Task::none);
-
-                        return close_login
-                            .chain(open_main.discard())
-                            .chain(iced::window::maximize(main_window_id, true))
-                            .chain(load_layout);
+                        connector::auth::store_session(session.clone());
+                        connector::auth::persist_session(&session);
+                        return self.transition_to_dashboard();
                     }
                     Err(error_msg) => {
                         log::warn!("Login failed: {error_msg}");
                         self.login_screen.set_error(Some(error_msg));
                     }
+                }
+                return Task::none();
+            }
+            Message::SessionRestoreResult(result) => {
+                if let Some(session) = result {
+                    connector::auth::store_session(session);
+                    return self.transition_to_dashboard();
                 }
                 return Task::none();
             }
@@ -828,6 +808,47 @@ impl Flowsurface {
             .get_mut(active_layout.unique)
             .map(|layout| &mut layout.dashboard)
             .expect("No active dashboard")
+    }
+
+    /// ログインウィンドウを閉じてメインウィンドウ（ダッシュボード）を開く。
+    /// LoginCompleted(Ok) と SessionRestoreResult(Some) の共通処理。
+    fn transition_to_dashboard(&mut self) -> Task<Message> {
+        let login_win = self.login_window.take();
+
+        let (main_window_id, open_main) = {
+            let (position, size) = (
+                window::Position::Centered,
+                self.saved_main_window_spec
+                    .map_or_else(crate::window::default_size, |w| w.size()),
+            );
+            window::open(window::Settings {
+                size,
+                position,
+                exit_on_close_request: false,
+                ..window::settings()
+            })
+        };
+
+        self.main_window = window::Window::new(main_window_id);
+
+        let active_layout_id = self.layout_manager.active_layout_id().unwrap_or(
+            &self
+                .layout_manager
+                .layouts
+                .first()
+                .expect("No layouts available")
+                .id,
+        );
+        let load_layout = self.load_layout(active_layout_id.unique, main_window_id);
+
+        let close_login = login_win
+            .map(|id| window::close::<Message>(id))
+            .unwrap_or_else(Task::none);
+
+        close_login
+            .chain(open_main.discard())
+            .chain(iced::window::maximize(main_window_id, true))
+            .chain(load_layout)
     }
 
     fn load_layout(&mut self, layout_uid: uuid::Uuid, main_window: window::Id) -> Task<Message> {

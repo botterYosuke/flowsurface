@@ -3,6 +3,9 @@
     "allow": [
       "Bash(tasklist)",
       "Bash(taskkill //PID 25136 //F)"
+    ],
+    "additionalDirectories": [
+      "C:\\Users\\sasai\\Documents\\marimo\\.claude\\plans"
     ]
   }
 }
