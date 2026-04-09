@@ -1,4 +1,4 @@
-use exchange::adapter::{self, AdapterError, Exchange, StreamKind};
+use exchange::adapter::{self, AdapterError, Exchange, StreamKind, Venue};
 use exchange::{Kline, OpenInterest, TickerInfo, Trade};
 use iced::{
     Task,
@@ -399,37 +399,94 @@ pub fn kline_fetch_task(
         StreamKind::Kline {
             ticker_info,
             timeframe,
-        } => Task::perform(
-            iced::futures::TryFutureExt::map_err(
-                adapter::fetch_klines(ticker_info, timeframe, range),
-                |err| {
-                    log::error!("Kline fetch failed: {err}");
-                    err.ui_message()
-                },
-            ),
-            move |result| match result {
-                Ok(klines) => {
-                    let data = FetchedData::Klines {
-                        data: klines,
-                        req_id,
-                    };
-                    FetchUpdate::Data {
-                        layout_id,
-                        pane_id,
-                        data,
-                        stream,
-                    }
-                }
-                Err(err) => FetchUpdate::Error {
-                    pane_id,
-                    error: err,
-                },
-            },
-        ),
+        } => {
+            if ticker_info.ticker.exchange.venue() == Venue::Tachibana {
+                // 立花証券: セッション経由で日足データを取得
+                let (issue_code, _) = ticker_info.ticker.to_full_symbol_and_type();
+                Task::perform(
+                    async move {
+                        fetch_tachibana_daily_klines(&issue_code).await
+                    },
+                    move |result| match result {
+                        Ok(klines) => {
+                            let data = FetchedData::Klines {
+                                data: klines,
+                                req_id,
+                            };
+                            FetchUpdate::Data {
+                                layout_id,
+                                pane_id,
+                                data,
+                                stream,
+                            }
+                        }
+                        Err(err) => FetchUpdate::Error {
+                            pane_id,
+                            error: err,
+                        },
+                    },
+                )
+            } else {
+                Task::perform(
+                    iced::futures::TryFutureExt::map_err(
+                        adapter::fetch_klines(ticker_info, timeframe, range),
+                        |err| {
+                            log::error!("Kline fetch failed: {err}");
+                            err.ui_message()
+                        },
+                    ),
+                    move |result| match result {
+                        Ok(klines) => {
+                            let data = FetchedData::Klines {
+                                data: klines,
+                                req_id,
+                            };
+                            FetchUpdate::Data {
+                                layout_id,
+                                pane_id,
+                                data,
+                                stream,
+                            }
+                        }
+                        Err(err) => FetchUpdate::Error {
+                            pane_id,
+                            error: err,
+                        },
+                    },
+                )
+            }
+        }
         _ => Task::none(),
     };
 
     update_status.chain(fetch_task)
+}
+
+/// 立花証券の日足履歴を取得して Kline に変換する。
+/// セッションは `connector::auth` のグローバルストアから取得する。
+pub async fn fetch_tachibana_daily_klines(issue_code: &str) -> Result<Vec<Kline>, String> {
+    let session = super::auth::get_session()
+        .ok_or_else(|| "セッションが存在しません。再ログインしてください。".to_string())?;
+
+    let client = reqwest::Client::new();
+    let records =
+        exchange::adapter::tachibana::fetch_daily_history(&client, &session, issue_code)
+            .await
+            .map_err(|e| {
+                log::error!("Tachibana daily history fetch failed: {e}");
+                format!("日足データ取得エラー: {e}")
+            })?;
+
+    let klines: Vec<Kline> = records
+        .iter()
+        .filter_map(|r| exchange::adapter::tachibana::daily_record_to_kline(r, true))
+        .collect();
+
+    log::info!(
+        "Tachibana: fetched {} daily klines for {issue_code}",
+        klines.len()
+    );
+    Ok(klines)
 }
 
 pub fn fetch_trades_batched(
@@ -460,4 +517,73 @@ pub fn fetch_trades_batched(
 
         Ok(())
     })
+}
+
+// ── テスト ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use exchange::adapter::tachibana::TachibanaSession;
+
+    // ── Cycle D1: セッション未設定時にエラーを返す ───────────────────────────
+
+    #[tokio::test]
+    async fn fetch_tachibana_klines_returns_error_without_session() {
+        super::super::auth::clear_session();
+        let result = fetch_tachibana_daily_klines("6501").await;
+        let err = result.expect_err("セッション未設定時はエラーが返るべき");
+        assert!(
+            err.contains("セッション"),
+            "セッション関連のエラーメッセージであるべき: {err}"
+        );
+    }
+
+    // ── Cycle D2: mockito で日足データを取得して Kline に変換 ────────────────
+
+    #[tokio::test]
+    async fn fetch_tachibana_klines_converts_daily_history_to_klines() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                    "aCLMMfdsGetMarketPriceHistory": [
+                        {"sDate":"20240101","pDOP":"3200","pDHP":"3280","pDLP":"3150","pDPP":"3250","pDV":"1500000",
+                         "pDOPxK":"3200","pDHPxK":"3280","pDLPxK":"3150","pDPPxK":"3250","pDVxK":"1500000"},
+                        {"sDate":"20240102","pDOP":"3250","pDHP":"3300","pDLP":"3230","pDPP":"3280","pDV":"1200000",
+                         "pDOPxK":"3250","pDHPxK":"3300","pDLPxK":"3230","pDPPxK":"3280","pDVxK":"1200000"}
+                    ]
+                }"#,
+            )
+            .create_async()
+            .await;
+
+        // セッションにモックサーバーのURLを設定
+        let session = TachibanaSession {
+            url_request: String::new(),
+            url_master: String::new(),
+            url_price: format!("{}/price/", server.url()),
+            url_event: String::new(),
+            url_event_ws: String::new(),
+        };
+        super::super::auth::store_session(session);
+
+        let klines = fetch_tachibana_daily_klines("6501")
+            .await
+            .expect("日足データの取得に成功するべき");
+
+        assert_eq!(klines.len(), 2, "2件の日足データが Kline に変換されるべき");
+
+        // 1件目の終値が 3250 であることを確認
+        let close_f32 = klines[0].close.to_f32();
+        assert!(
+            (close_f32 - 3250.0).abs() < 1.0,
+            "1件目の終値は 3250 であるべき: {close_f32}"
+        );
+
+        super::super::auth::clear_session();
+    }
 }

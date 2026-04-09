@@ -109,6 +109,7 @@ enum Message {
     NetworkManager(modal::network_manager::Message),
     Layouts(modal::layout_manager::Message),
     AudioStream(modal::audio::Message),
+    LoginCompleted(Result<exchange::adapter::tachibana::TachibanaSession, String>),
 }
 
 impl Flowsurface {
@@ -166,7 +167,26 @@ impl Flowsurface {
             Message::Login(msg) => {
                 match msg {
                     login::Message::LoginSubmit => {
-                        // モック: パスワード不問でログイン
+                        // ログインエラーをクリアして非同期ログインを開始
+                        self.login_screen.set_error(None);
+                        let user_id = self.login_screen.user_id.clone();
+                        let password = self.login_screen.password.clone();
+                        let is_demo = self.login_screen.is_demo;
+
+                        return Task::perform(
+                            connector::auth::perform_login(user_id, password, is_demo),
+                            Message::LoginCompleted,
+                        );
+                    }
+                    other => self.login_screen.update(other),
+                }
+                return Task::none();
+            }
+            Message::LoginCompleted(result) => {
+                match result {
+                    Ok(session) => {
+                        connector::auth::store_session(session);
+
                         let login_win = self.login_window.take();
 
                         // メインウィンドウを開く（最大化）
@@ -196,7 +216,6 @@ impl Flowsurface {
                         );
                         let load_layout = self.load_layout(active_layout_id.unique, main_window_id);
 
-                        // ログインウィンドウを閉じてメインを開く
                         let close_login = login_win
                             .map(|id| window::close::<Message>(id))
                             .unwrap_or_else(Task::none);
@@ -206,7 +225,10 @@ impl Flowsurface {
                             .chain(iced::window::maximize(main_window_id, true))
                             .chain(load_layout);
                     }
-                    other => self.login_screen.update(other),
+                    Err(error_msg) => {
+                        log::warn!("Login failed: {error_msg}");
+                        self.login_screen.set_error(Some(error_msg));
+                    }
                 }
                 return Task::none();
             }

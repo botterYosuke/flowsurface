@@ -1,3 +1,4 @@
+pub mod auth;
 pub mod fetcher;
 pub mod proxy;
 pub mod stream;

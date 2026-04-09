@@ -329,6 +329,83 @@ pub async fn fetch_daily_history(
     Ok(hist_resp.records)
 }
 
+// ── 日足データ変換 ────────────────────────────────────────────────────────────
+
+use crate::{Kline, Volume};
+use crate::unit::{MinTicksize, qty::Qty};
+
+/// `DailyHistoryRecord` を `Kline` に変換する。
+///
+/// - `use_adjusted`: `true` のとき株式分割調整値（`*xK` フィールド）を使用。
+/// - OHLCV のいずれかが `"*"`（未取得）の場合は `None` を返す。
+/// - `time` は当日の 0:00:00 JST (UTC+9) を Unix epoch ミリ秒で表す。
+pub fn daily_record_to_kline(record: &DailyHistoryRecord, use_adjusted: bool) -> Option<Kline> {
+    let (open_s, high_s, low_s, close_s, volume_s) = if use_adjusted {
+        (
+            &record.open_adj,
+            &record.high_adj,
+            &record.low_adj,
+            &record.close_adj,
+            &record.volume_adj,
+        )
+    } else {
+        (
+            &record.open,
+            &record.high,
+            &record.low,
+            &record.close,
+            &record.volume,
+        )
+    };
+
+    // "*" は未取得を意味する
+    let parse = |s: &str| -> Option<f32> {
+        if s == "*" || s.is_empty() { None } else { s.parse().ok() }
+    };
+
+    let open = parse(open_s)?;
+    let high = parse(high_s)?;
+    let low = parse(low_s)?;
+    let close = parse(close_s)?;
+    let volume = parse(volume_s)?;
+
+    // "YYYYMMDD" → epoch ミリ秒 (JST 深夜0時 = UTC - 9h)
+    let time = date_str_to_epoch_ms(&record.date)?;
+
+    // 日本株は整数円なので min_ticksize = 10^0 = 1
+    let min_ticksize = MinTicksize::new(0);
+    let qty = Qty::from_f32(volume);
+
+    Some(Kline::new(
+        time,
+        open,
+        high,
+        low,
+        close,
+        Volume::TotalOnly(qty),
+        min_ticksize,
+    ))
+}
+
+/// "YYYYMMDD" 形式の日付文字列を JST 深夜0時の Unix epoch ミリ秒に変換する。
+fn date_str_to_epoch_ms(date: &str) -> Option<u64> {
+    if date.len() != 8 {
+        return None;
+    }
+    let year: i32 = date[0..4].parse().ok()?;
+    let month: u32 = date[4..6].parse().ok()?;
+    let day: u32 = date[6..8].parse().ok()?;
+
+    use chrono::NaiveDate;
+    let naive = NaiveDate::from_ymd_opt(year, month, day)?
+        .and_hms_opt(0, 0, 0)?;
+
+    // JST は UTC+9 なので -9h して UTC に変換
+    const JST_OFFSET_SECS: i64 = 9 * 3600;
+    let epoch_secs = naive.and_utc().timestamp() - JST_OFFSET_SECS;
+    Some((epoch_secs as u64) * 1000)
+}
+
 // ── テスト ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -771,5 +848,109 @@ mod tests {
         assert_eq!(records[0].date, "20240101");
         assert_eq!(records[1].date, "20240102");
         assert_eq!(records[1].close, "3280");
+    }
+
+    // ── Cycle A1: DailyHistoryRecord → Kline 変換 ────────────────────────────
+
+    #[test]
+    fn daily_record_converts_to_kline_with_correct_ohlcv() {
+        let record = DailyHistoryRecord {
+            date: "20240101".to_string(),
+            open: "3200".to_string(),
+            high: "3280".to_string(),
+            low: "3150".to_string(),
+            close: "3250".to_string(),
+            volume: "1500000".to_string(),
+            open_adj: String::new(),
+            high_adj: String::new(),
+            low_adj: String::new(),
+            close_adj: String::new(),
+            volume_adj: String::new(),
+        };
+
+        let kline = daily_record_to_kline(&record, false).expect("変換できるはず");
+
+        // 価格を f32 に戻して確認（Price は整数ベースなので近似比較）
+        let open_f32 = kline.open.to_f32();
+        let high_f32 = kline.high.to_f32();
+        let low_f32 = kline.low.to_f32();
+        let close_f32 = kline.close.to_f32();
+
+        assert!((open_f32 - 3200.0).abs() < 1.0, "open: {open_f32}");
+        assert!((high_f32 - 3280.0).abs() < 1.0, "high: {high_f32}");
+        assert!((low_f32 - 3150.0).abs() < 1.0, "low: {low_f32}");
+        assert!((close_f32 - 3250.0).abs() < 1.0, "close: {close_f32}");
+    }
+
+    // ── Cycle A2: "*" フィールドで None を返す ────────────────────────────────
+
+    #[test]
+    fn daily_record_returns_none_when_close_is_asterisk() {
+        let record = DailyHistoryRecord {
+            date: "20240101".to_string(),
+            open: "3200".to_string(),
+            high: "3280".to_string(),
+            low: "3150".to_string(),
+            close: "*".to_string(), // 未取得
+            volume: "1500000".to_string(),
+            open_adj: String::new(),
+            high_adj: String::new(),
+            low_adj: String::new(),
+            close_adj: String::new(),
+            volume_adj: String::new(),
+        };
+
+        let result = daily_record_to_kline(&record, false);
+        assert!(result.is_none(), "close が \"*\" の場合は None を返すべき");
+    }
+
+    // ── Cycle A3: 日付 YYYYMMDD → epoch ミリ秒 ───────────────────────────────
+
+    #[test]
+    fn daily_record_time_is_midnight_jst_of_given_date() {
+        let record = DailyHistoryRecord {
+            date: "20240101".to_string(),
+            open: "100".to_string(),
+            high: "110".to_string(),
+            low: "90".to_string(),
+            close: "105".to_string(),
+            volume: "1000".to_string(),
+            open_adj: String::new(),
+            high_adj: String::new(),
+            low_adj: String::new(),
+            close_adj: String::new(),
+            volume_adj: String::new(),
+        };
+
+        let kline = daily_record_to_kline(&record, false).expect("変換できるはず");
+
+        // 2024-01-01 00:00:00 JST = 2023-12-31 15:00:00 UTC
+        // UTC epoch: 2023-12-31 15:00:00 = 1704034800 seconds = 1704034800000 ms
+        let expected_ms: u64 = 1704034800000;
+        assert_eq!(kline.time, expected_ms, "time は JST 深夜0時の epoch ms であるべき");
+    }
+
+    // ── Cycle A4: 調整値を使用する ────────────────────────────────────────────
+
+    #[test]
+    fn daily_record_uses_adjusted_values_when_flag_is_true() {
+        let record = DailyHistoryRecord {
+            date: "20200101".to_string(),
+            open: "6400".to_string(),
+            high: "6560".to_string(),
+            low: "6300".to_string(),
+            close: "6500".to_string(),
+            volume: "750000".to_string(),
+            open_adj: "3200".to_string(),
+            high_adj: "3280".to_string(),
+            low_adj: "3150".to_string(),
+            close_adj: "3250".to_string(),
+            volume_adj: "1500000".to_string(),
+        };
+
+        let kline = daily_record_to_kline(&record, true).expect("変換できるはず");
+
+        let close_f32 = kline.close.to_f32();
+        assert!((close_f32 - 3250.0).abs() < 1.0, "調整後終値は 3250 であるべき: {close_f32}");
     }
 }

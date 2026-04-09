@@ -429,18 +429,20 @@ POST /auth/?{"sCLMID":"CLMAuthLoginRequest","sUserId":"...","sPassword":"..."}
 | 2 | connect.rs に Tachibana スタブ | exchange/src/connect.rs | ✅ |
 | 2 | style.rs venue_icon 対応 | src/style.rs | ✅ |
 | 2 | tickers_table.rs available_markets 対応 | src/screen/dashboard/tickers_table.rs | ✅ |
+| 2 | DailyHistoryRecord → Kline 変換 (daily_record_to_kline) | exchange/src/adapter/tachibana.rs | ✅ |
+| 3 | auth.rs: セッション管理（store/get/clear）+ perform_login | src/connector/auth.rs | ✅ |
+| 3 | main.rs: LoginSubmit → 非同期ログイン → LoginCompleted | src/main.rs | ✅ |
+| 3 | fetcher.rs: Tachibana 日足取得パス (fetch_tachibana_daily_klines) | src/connector/fetcher.rs | ✅ |
+| 4 | login.rs 改修: ユーザーID入力・デモ/本番切替・エラー表示・電話認証案内 | src/screen/login.rs | ✅ |
 
-**テスト総数**: 28テスト PASS（exchange crate 全体）
+**テスト総数**: 51テスト PASS（全 workspace: flowsurface 19 + exchange 32）
 
 ### 未完了（次の優先作業）
 
 | 優先度 | 作業 | フェーズ |
 |--------|------|----------|
-| 高 | login.rs スクリーン改修（電話認証案内、デモ/本番切替） | 4 |
-| 高 | auth.rs: セッション管理・自動再ログイン | 3 |
-| 高 | fetcher.rs: fetch_daily_history 接続 | 3 |
-| 中 | 日足データを既存の Kline 形式に変換 | 2 |
 | 中 | Ticker 型を4桁銘柄コードに適応 | 2 |
+| 中 | セッション切れ検出と自動再ログイン | 3 |
 | 低 | EVENT I/F WebSocket ストリーム実装 | 3 |
 | 低 | 旧取引所アダプター削除 | 5 |
 
@@ -463,3 +465,33 @@ POST /auth/?{"sCLMID":"CLMAuthLoginRequest","sUserId":"...","sPassword":"..."}
 
 6. **テスト戦略**: Rust の TDD は `#[cfg(test)] mod tests` をファイル内に配置。
    HTTP クライアントテストは `mockito` crate（dev-dependency に追加済み）。
+
+7. **Kline 変換の時刻処理**: `DailyHistoryRecord.date` は "YYYYMMDD" 形式。
+   JST 深夜0時 (UTC-9h) に変換する。`2024-01-01 JST` = `2023-12-31 15:00:00 UTC` = `1704034800000 ms`。
+   `date_str_to_epoch_ms()` 関数で実装済み（tachibana.rs 内）。
+
+8. **MinTicksize for 日本株**: 日本株価格は整数円なので `MinTicksize::new(0)` (10^0 = 1円単位)。
+   将来的に呼値の細かいルール（価格帯別tick）に対応が必要な場合はここを修正。
+
+9. **login.rs の Message 追加**: `UserIdChanged(String)`, `IsDemoProd(bool)` を追加。
+   main.rs の `LoginSubmit` ハンドラで `self.login_screen.user_id` と `self.login_screen.is_demo`
+   を参照してAPIに渡す実装が次のステップ。
+   `tachibana_error_message(code: &str)` で API エラーコードを日本語メッセージに変換できる。
+
+10. **セッション管理アーキテクチャ（Phase 3 で確立）**:
+    - `static RwLock<Option<TachibanaSession>>` でグローバルにセッションを保持
+    - `auth::store_session()` / `auth::get_session()` でアクセス
+    - ログイン成功時に `store_session` → fetcher.rs から `get_session` で参照
+    - `Ticker::as_str()` は private → `to_full_symbol_and_type()` で銘柄コードを取得
+    - `perform_login()` は `Result<TachibanaSession, String>` を返す（Iced の `Task::perform` 互換）
+
+11. **main.rs の LoginSubmit → LoginCompleted パターン**:
+    - `LoginSubmit` で `Task::perform(auth::perform_login(...), Message::LoginCompleted)` を発行
+    - `LoginCompleted(Ok(session))` → セッション保存 → メインウィンドウ起動
+    - `LoginCompleted(Err(msg))` → `login_screen.set_error(Some(msg))` でエラー表示
+    - `TachibanaError` → ユーザー向けメッセージ変換は `tachibana_error_to_message()` で実施
+
+12. **fetcher.rs の Tachibana 分岐**:
+    - `kline_fetch_task` 内で `Venue::Tachibana` を判定して専用パスに分岐
+    - `fetch_tachibana_daily_klines()` が `auth::get_session()` → `fetch_daily_history()` → `daily_record_to_kline()` の一連を実行
+    - 調整値（`*xK` フィールド）をデフォルトで使用（`use_adjusted: true`）
