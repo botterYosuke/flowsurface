@@ -8,6 +8,7 @@ mod logger;
 mod modal;
 mod notify;
 mod screen;
+use screen::login::{self, LoginScreen};
 mod style;
 mod version;
 mod widget;
@@ -62,6 +63,9 @@ fn main() {
 }
 
 struct Flowsurface {
+    login_window: Option<window::Id>,
+    login_screen: LoginScreen,
+    saved_main_window_spec: Option<data::layout::WindowSpec>,
     main_window: window::Window,
     sidebar: dashboard::Sidebar,
     layout_manager: LayoutManager,
@@ -78,6 +82,7 @@ struct Flowsurface {
 
 #[derive(Debug, Clone)]
 enum Message {
+    Login(login::Message),
     Sidebar(dashboard::sidebar::Message),
     MarketWsEvent(exchange::Event),
     Dashboard {
@@ -110,23 +115,27 @@ impl Flowsurface {
     fn new() -> (Self, Task<Message>) {
         let saved_state = layout::load_saved_state();
 
-        let (main_window_id, open_main_window) = {
-            let (position, size) = saved_state.window();
-            let config = window::Settings {
-                size,
-                position,
-                exit_on_close_request: false,
-                ..window::settings()
-            };
-            window::open(config)
-        };
+        // ログインウィンドウを最初に開く（小さい固定サイズ）
+        let (login_window_id, open_login_window) = window::open(window::Settings {
+            size: iced::Size::new(900.0, 560.0),
+            position: window::Position::Centered,
+            resizable: false,
+            exit_on_close_request: true,
+            ..Default::default()
+        });
+
+        // メインウィンドウIDをダミーで用意（起動はログイン後）
+        let dummy_main_id = window::Id::unique();
 
         let (sidebar, launch_sidebar) = dashboard::Sidebar::new(&saved_state);
-
         let (audio_stream, audio_init_err) = AudioStream::new(saved_state.audio_cfg);
+        let saved_main_window_spec = saved_state.main_window;
 
         let mut state = Self {
-            main_window: window::Window::new(main_window_id),
+            login_window: Some(login_window_id),
+            login_screen: LoginScreen::new(),
+            saved_main_window_spec,
+            main_window: window::Window::new(dummy_main_id),
             layout_manager: saved_state.layout_manager,
             theme_editor: ThemeEditor::new(saved_state.custom_theme),
             audio_stream,
@@ -146,27 +155,61 @@ impl Flowsurface {
                 .push(Toast::error(format!("Audio disabled: {err}")));
         }
 
-        let active_layout_id = state.layout_manager.active_layout_id().unwrap_or(
-            &state
-                .layout_manager
-                .layouts
-                .first()
-                .expect("No layouts available")
-                .id,
-        );
-        let load_layout = state.load_layout(active_layout_id.unique, main_window_id);
-
         (
             state,
-            open_main_window
-                .discard()
-                .chain(load_layout)
-                .chain(launch_sidebar.map(Message::Sidebar)),
+            open_login_window.discard().chain(launch_sidebar.map(Message::Sidebar)),
         )
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::Login(msg) => {
+                match msg {
+                    login::Message::LoginSubmit => {
+                        // モック: パスワード不問でログイン
+                        let login_win = self.login_window.take();
+
+                        // メインウィンドウを開く（最大化）
+                        let (main_window_id, open_main) = {
+                            let (position, size) = (
+                                window::Position::Centered,
+                                self.saved_main_window_spec
+                                    .map_or_else(crate::window::default_size, |w| w.size()),
+                            );
+                            window::open(window::Settings {
+                                size,
+                                position,
+                                exit_on_close_request: false,
+                                ..window::settings()
+                            })
+                        };
+
+                        self.main_window = window::Window::new(main_window_id);
+
+                        let active_layout_id = self.layout_manager.active_layout_id().unwrap_or(
+                            &self
+                                .layout_manager
+                                .layouts
+                                .first()
+                                .expect("No layouts available")
+                                .id,
+                        );
+                        let load_layout = self.load_layout(active_layout_id.unique, main_window_id);
+
+                        // ログインウィンドウを閉じてメインを開く
+                        let close_login = login_win
+                            .map(|id| window::close::<Message>(id))
+                            .unwrap_or_else(Task::none);
+
+                        return close_login
+                            .chain(open_main.discard())
+                            .chain(iced::window::maximize(main_window_id, true))
+                            .chain(load_layout);
+                    }
+                    other => self.login_screen.update(other),
+                }
+                return Task::none();
+            }
             Message::MarketWsEvent(event) => {
                 let main_window_id = self.main_window.id;
                 let dashboard = self.active_dashboard_mut();
@@ -225,6 +268,11 @@ impl Flowsurface {
             }
             Message::WindowEvent(event) => match event {
                 window::Event::CloseRequested(window) => {
+                    // ログインウィンドウが閉じられたら終了
+                    if Some(window) == self.login_window {
+                        return iced::exit();
+                    }
+
                     let main_window = self.main_window.id;
                     let dashboard = self.active_dashboard_mut();
 
@@ -599,6 +647,11 @@ impl Flowsurface {
     }
 
     fn view(&self, id: window::Id) -> Element<'_, Message> {
+        // ログインウィンドウのビュー
+        if Some(id) == self.login_window {
+            return self.login_screen.view().map(Message::Login);
+        }
+
         let dashboard = self.active_dashboard();
         let sidebar_pos = self.sidebar.position();
 
@@ -683,7 +736,10 @@ impl Flowsurface {
         self.theme.clone().into()
     }
 
-    fn title(&self, _window: window::Id) -> String {
+    fn title(&self, window: window::Id) -> String {
+        if Some(window) == self.login_window {
+            return "kabu STATION ログイン".to_string();
+        }
         if let Some(id) = self.layout_manager.active_layout_id() {
             format!("Flowsurface [{}]", id.name)
         } else {
@@ -698,6 +754,11 @@ impl Flowsurface {
     fn subscription(&self) -> Subscription<Message> {
         let window_events = window::events().map(Message::WindowEvent);
         let sidebar = self.sidebar.subscription().map(Message::Sidebar);
+
+        // ログイン画面中はexchangeストリームを購読しない
+        if self.login_window.is_some() {
+            return Subscription::batch(vec![window_events, sidebar]);
+        }
 
         let exchange_streams = self
             .active_dashboard()
