@@ -196,7 +196,9 @@ impl Flowsurface {
                     Ok(session) => {
                         connector::auth::store_session(session.clone());
                         connector::auth::persist_session(&session);
-                        return self.transition_to_dashboard();
+                        let dashboard_task = self.transition_to_dashboard();
+                        let master_task = Self::start_master_download(session);
+                        return dashboard_task.chain(master_task);
                     }
                     Err(error_msg) => {
                         log::warn!("Login failed: {error_msg}");
@@ -207,8 +209,10 @@ impl Flowsurface {
             }
             Message::SessionRestoreResult(result) => {
                 if let Some(session) = result {
-                    connector::auth::store_session(session);
-                    return self.transition_to_dashboard();
+                    connector::auth::store_session(session.clone());
+                    let dashboard_task = self.transition_to_dashboard();
+                    let master_task = Self::start_master_download(session);
+                    return dashboard_task.chain(master_task);
                 }
                 return Task::none();
             }
@@ -849,6 +853,42 @@ impl Flowsurface {
             .chain(open_main.discard())
             .chain(iced::window::maximize(main_window_id, true))
             .chain(load_layout)
+    }
+
+    /// 銘柄マスタをバックグラウンドでダウンロードし、完了後に TickersTable へ反映する。
+    fn start_master_download(
+        session: exchange::adapter::tachibana::TachibanaSession,
+    ) -> Task<Message> {
+        use exchange::adapter::Venue;
+
+        Task::perform(
+            async move {
+                let client = reqwest::Client::new();
+                exchange::adapter::tachibana::init_issue_master(&client, &session).await?;
+                Ok(exchange::adapter::tachibana::cached_ticker_metadata().await)
+            },
+            |result: Result<_, exchange::adapter::tachibana::TachibanaError>| {
+                let venue = Venue::Tachibana;
+                match result {
+                    Ok(metadata) => Message::Sidebar(
+                        dashboard::sidebar::Message::TickersTable(
+                            dashboard::tickers_table::Message::UpdateMetadata(venue, metadata),
+                        ),
+                    ),
+                    Err(e) => {
+                        log::error!("Tachibana master download failed: {e}");
+                        Message::Sidebar(
+                            dashboard::sidebar::Message::TickersTable(
+                                dashboard::tickers_table::Message::MetadataFetchFailed(
+                                    venue,
+                                    data::InternalError::Fetch(format!("Tachibana: {e}")),
+                                ),
+                            ),
+                        )
+                    }
+                }
+            },
+        )
     }
 
     fn load_layout(&mut self, layout_uid: uuid::Uuid, main_window: window::Id) -> Task<Message> {
