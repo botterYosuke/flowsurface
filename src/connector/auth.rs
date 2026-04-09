@@ -1,5 +1,5 @@
 use exchange::adapter::tachibana::{
-    TachibanaError, TachibanaSession, BASE_URL_DEMO, BASE_URL_PROD,
+    self, TachibanaError, TachibanaSession, BASE_URL_DEMO, BASE_URL_PROD,
 };
 use std::sync::RwLock;
 
@@ -47,9 +47,19 @@ pub async fn perform_login_with_base_url(
     password: String,
 ) -> Result<TachibanaSession, String> {
     let client = reqwest::Client::new();
-    exchange::adapter::tachibana::login(&client, base_url, user_id, password)
+    let session = exchange::adapter::tachibana::login(&client, base_url, user_id, password)
         .await
-        .map_err(tachibana_error_to_message)
+        .map_err(tachibana_error_to_message)?;
+
+    // ログイン完了前に銘柄マスタをダウンロードしキャッシュに格納する。
+    // ダッシュボード初期化時の fetch_ticker_metadata で参照されるため、
+    // spawn ではなく await で完了を待つ必要がある。
+    let client_for_master = reqwest::Client::new();
+    if let Err(e) = tachibana::init_issue_master(&client_for_master, &session).await {
+        log::error!("Tachibana master download failed: {e}");
+    }
+
+    Ok(session)
 }
 
 /// TachibanaError をユーザー向けメッセージに変換する。

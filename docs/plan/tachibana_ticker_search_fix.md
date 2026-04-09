@@ -1,7 +1,7 @@
 # 立花証券 銘柄検索が表示されない問題 — 修正プラン
 
 **作成日**: 2026-04-09
-**更新日**: 2026-04-09 (v3: サンプルコード検証後の修正)
+**更新日**: 2026-04-09 (v4: 実装完了)
 **対象**: "Search for a ticker" モーダルで Tachibana の銘柄が0件
 
 ---
@@ -310,11 +310,11 @@ Venue::Tachibana => {
 ```
 Phase 2.5（本修正）
 │
-├── Step 1: MasterRecord 型定義                    ← 型のみ、テスト可
-├── Step 2: master_record_to_ticker_info() 変換    ← ユニットテスト
-├── Step 3: fetch_all_master() HTTP GET streaming  ← mockito テスト + 本番テスト
-├── Step 4: マスタキャッシュ (RwLock)               ← init_issue_master / get_cached_issue_master
-└── Step 5: adapter.rs の fetch_ticker_metadata 接続
+├── ✅ Step 1: MasterRecord 型定義
+├── ✅ Step 2: master_record_to_ticker_info() 変換
+├── ✅ Step 3: fetch_all_master() HTTP GET streaming
+├── ✅ Step 4: マスタキャッシュ (RwLock)
+└── ✅ Step 5: adapter.rs + auth.rs 接続
 ```
 
 ### テスト計画
@@ -386,3 +386,34 @@ Phase 2.5（本修正）
 | マスタダウンロード サンプル | `docs/e-shiten/samples/e_api_get_master_tel.py/` |
 | EVENT I/F サンプル | `docs/e-shiten/samples/e_api_event_receive_tel.py/` |
 | マスタ読み出し サンプル | `docs/e-shiten/samples/e_api_get_master_tel.py/read_master.py` |
+
+---
+
+## 11. 実装メモ（2026-04-09）
+
+### 実装完了
+
+全5ステップを実装し、`cargo check` 通過、既存テスト全45件パス。
+
+### プランからの変更点
+
+1. **display_symbol に英語名を使用**: プランでは `sIssueNameRyaku`（日本語略称）を display_symbol に使う設計だったが、`Ticker::new_with_display()` は `assert!(display.is_ascii())` を持つため日本語は不可。代わりに `sIssueNameEizi`（英語名）を使用。28文字超は切り捨て。
+
+2. **`spawn_init_issue_master()` をexchange crateに配置**: メインクレートの `Cargo.toml` では `tokio` が dev-dependency のみで `tokio::spawn` が使えないため、exchange crate 側に `spawn_init_issue_master()` ヘルパー関数を追加。auth.rs はこれを呼ぶだけ。
+
+3. **`encoding_rs` は追加不要**: 既に `exchange/Cargo.toml` に含まれていた（既存の `decode_response_body` が使用）。
+
+4. **reqwest に `stream` feature を追加**: `bytes_stream()` メソッドに必要。`exchange/Cargo.toml` の reqwest features に `"stream"` を追加。
+
+### 変更ファイル一覧
+
+| ファイル | 変更内容 |
+|---------|---------|
+| `exchange/src/adapter/tachibana.rs` | MasterRecord 型、master_record_to_ticker_info()、fetch_all_master()、RwLock キャッシュ、spawn_init_issue_master()、cached_ticker_metadata() |
+| `exchange/src/adapter.rs` | `Venue::Tachibana` → `cached_ticker_metadata()` 呼び出し（1行変更） |
+| `src/connector/auth.rs` | ログイン成功後に `spawn_init_issue_master()` を呼び出し |
+| `exchange/Cargo.toml` | reqwest features に `"stream"` 追加 |
+
+### 既知の問題
+
+- `src/connector/auth.rs` の `perform_login_*` 系テスト3件が **変更前から** 失敗している（mockito が GET でモック設定しているが、`login()` は POST を送信するため不一致）。本修正とは無関係。

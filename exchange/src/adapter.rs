@@ -768,8 +768,7 @@ pub async fn fetch_ticker_metadata(
         }
         Venue::Okex => okex::fetch_ticker_metadata(markets).await,
         Venue::Mexc => mexc::fetch_ticker_metadata(markets).await,
-        // 立花証券は CLMIssueMstKabu で銘柄情報を取得（TODO: Phase 3 で実装）
-        Venue::Tachibana => Ok(HashMap::default()),
+        Venue::Tachibana => Ok(tachibana::cached_ticker_metadata().await),
     }
 }
 

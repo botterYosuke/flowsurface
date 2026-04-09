@@ -532,6 +532,201 @@ fn date_str_to_epoch_ms(date: &str) -> Option<u64> {
     Some((epoch_secs as u64) * 1000)
 }
 
+// ── 銘柄マスタ（MASTER I/F） ─────────────────────────────────────────────────
+
+use crate::{Exchange, Ticker, TickerInfo};
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::RwLock;
+
+/// 全マスタダウンロードの各レコードをパースするための汎用型。
+/// sCLMID でレコード種別を判定し、CLMIssueMstKabu のみ抽出する。
+#[derive(Debug, Deserialize, Clone)]
+pub struct MasterRecord {
+    #[serde(rename = "sCLMID")]
+    pub clm_id: String,
+    #[serde(rename = "sIssueCode", default)]
+    pub issue_code: String,
+    #[serde(rename = "sIssueName", default)]
+    pub issue_name: String,
+    #[serde(rename = "sIssueNameRyaku", default)]
+    pub issue_name_short: String,
+    #[serde(rename = "sIssueNameKana", default)]
+    pub issue_name_kana: String,
+    #[serde(rename = "sIssueNameEizi", default)]
+    pub issue_name_english: String,
+    #[serde(rename = "sYusenSizyou", default)]
+    pub primary_market: String,
+    #[serde(rename = "sGyousyuCode", default)]
+    pub sector_code: String,
+    #[serde(rename = "sGyousyuName", default)]
+    pub sector_name: String,
+}
+
+/// MasterRecord (CLMIssueMstKabu) → (Ticker, TickerInfo) に変換。
+/// display_symbol には ASCII の英語名 (sIssueNameEizi) を使用する
+/// （Ticker は ASCII のみ対応のため日本語名は不可）。
+pub fn master_record_to_ticker_info(record: &MasterRecord) -> Option<(Ticker, TickerInfo)> {
+    if record.clm_id != "CLMIssueMstKabu" {
+        return None;
+    }
+    if record.issue_code.is_empty() {
+        return None;
+    }
+
+    let display = if record.issue_name_english.is_empty() {
+        None
+    } else {
+        Some(record.issue_name_english.as_str())
+    };
+
+    // display_symbol が MAX_LEN (28) を超える場合は切り捨て
+    let display = display.map(|d| if d.len() > 28 { &d[..28] } else { d });
+
+    let ticker = Ticker::new_with_display(
+        &record.issue_code,
+        Exchange::Tachibana,
+        display,
+    );
+
+    let info = TickerInfo::new(
+        ticker,
+        1.0,   // min_ticksize (暫定: 呼値テーブルで正確化可能)
+        100.0, // min_qty = 日本株デフォルト売買単位
+        None,  // contract_size (現物なので不要)
+    );
+
+    Some((ticker, info))
+}
+
+/// マスタダウンロード用リクエスト。
+#[derive(Debug, Serialize)]
+struct MasterDownloadRequest {
+    p_no: String,
+    p_sd_date: String,
+    #[serde(rename = "sCLMID")]
+    clm_id: &'static str,
+    #[serde(rename = "sJsonOfmt")]
+    json_ofmt: &'static str,
+}
+
+impl MasterDownloadRequest {
+    fn new() -> Self {
+        Self {
+            p_no: next_p_no(),
+            p_sd_date: current_p_sd_date(),
+            clm_id: "CLMEventDownload",
+            json_ofmt: "4",
+        }
+    }
+}
+
+/// MASTER I/F で全マスタを一括ダウンロードする。
+/// CLMEventDownloadComplete を受信するまでストリーミングで読み取り、
+/// CLMIssueMstKabu レコードのみを抽出して返す。
+pub async fn fetch_all_master(
+    client: &reqwest::Client,
+    session: &TachibanaSession,
+) -> Result<Vec<MasterRecord>, TachibanaError> {
+    use futures::StreamExt;
+
+    let req = MasterDownloadRequest::new();
+    let url = build_api_url_from(&session.url_master, &req)?;
+
+    log::debug!("Tachibana master download URL: {url}");
+
+    let resp = client.get(&url).send().await?;
+    let mut stream = resp.bytes_stream();
+
+    let mut buf = Vec::new();
+    let mut records = Vec::new();
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        for &byte in chunk.iter() {
+            buf.push(byte);
+            if byte == b'}' {
+                // `}` でレコード境界を判定（サンプルコード準拠）
+                let (decoded, _, _) = encoding_rs::SHIFT_JIS.decode(&buf);
+                let decoded = decoded.into_owned();
+                buf.clear();
+
+                let parsed: Result<MasterRecord, _> = serde_json::from_str(&decoded);
+                match parsed {
+                    Ok(record) => {
+                        if record.clm_id == "CLMEventDownloadComplete" {
+                            log::info!(
+                                "Tachibana master download complete: {} issue records",
+                                records.len()
+                            );
+                            return Ok(records);
+                        }
+                        if record.clm_id == "CLMIssueMstKabu"
+                            && !record.issue_code.is_empty()
+                        {
+                            records.push(record);
+                        }
+                    }
+                    Err(e) => {
+                        log::trace!("Skipping unparseable master record: {e}");
+                    }
+                }
+            }
+        }
+    }
+
+    log::warn!(
+        "Tachibana master stream ended without CLMEventDownloadComplete ({} records so far)",
+        records.len()
+    );
+    Ok(records)
+}
+
+// ── マスタキャッシュ ─────────────────────────────────────────────────────────
+
+static ISSUE_MASTER_CACHE: RwLock<Option<Arc<Vec<MasterRecord>>>> = RwLock::const_new(None);
+
+/// ログイン成功時に呼び出し、銘柄マスタをキャッシュに格納する。
+pub async fn init_issue_master(
+    client: &reqwest::Client,
+    session: &TachibanaSession,
+) -> Result<(), TachibanaError> {
+    let records = fetch_all_master(client, session).await?;
+    log::info!("Tachibana issue master cached: {} records", records.len());
+    *ISSUE_MASTER_CACHE.write().await = Some(Arc::new(records));
+    Ok(())
+}
+
+/// キャッシュ済みの銘柄マスタを返す。未取得なら None。
+pub async fn get_cached_issue_master() -> Option<Arc<Vec<MasterRecord>>> {
+    ISSUE_MASTER_CACHE.read().await.clone()
+}
+
+/// バックグラウンドで銘柄マスタをダウンロードしキャッシュに格納する。
+/// ログイン成功後に呼び出す。tokio::spawn でタスクを起動するため、
+/// 呼び出し元は完了を待つ必要がない。
+pub fn spawn_init_issue_master(session: TachibanaSession) {
+    tokio::spawn(async move {
+        let client = reqwest::Client::new();
+        if let Err(e) = init_issue_master(&client, &session).await {
+            log::error!("Tachibana master download failed: {e}");
+        }
+    });
+}
+
+/// キャッシュから Ticker → TickerInfo の HashMap を構築する。
+pub async fn cached_ticker_metadata() -> HashMap<Ticker, Option<TickerInfo>> {
+    let mut out = HashMap::new();
+    if let Some(records) = get_cached_issue_master().await {
+        for record in records.iter() {
+            if let Some((ticker, info)) = master_record_to_ticker_info(record) {
+                out.insert(ticker, Some(info));
+            }
+        }
+    }
+    out
+}
+
 // ── テスト ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
