@@ -145,6 +145,8 @@ let encoded_password = encode(&password).to_string();
 let req = LoginRequest::new(user_id, encoded_password);
 ```
 
+**補足**: 公式 `e_api_login_tel.py` では `urllib.parse.quote` ではなく独自の `func_replace_urlecnode()` 関数で手動エンコードしている（対象文字が限定的）。`urllib.parse.quote` で十分かは要確認。
+
 **優先度**: 🔴 高（GET モード使用中は特に）
 
 ---
@@ -176,6 +178,8 @@ def ans_check(self, pi_ans):
 - セッション切れ（`p_errno: 2`）時にエラーが検出されず、空データとして処理される
 - 稼働時間外（`p_errno: -62`）のエラーが無視される
 - `serde_json` のデシリアライズ自体が失敗するか、空の配列として解釈される可能性
+
+**補足**: `TachibanaError::ApiError` (tachibana.rs:29) が定義済みだが未使用。このラッパー導入で活用すべき。
 
 **修正案**: 共通のレスポンスラッパー型を導入
 ```rust
@@ -254,9 +258,17 @@ def proc_print_event_if_data(pi_data):
             print("col:[" + pa_colval[0] + "], val:[" + pa_colval[1] + "]")
 ```
 
-- `\x01` (SOH) = レコード区切り
+- `\x01` (SOH) = レコード（項目値）区切り
 - `\x02` (STX) = カラム名と値の区切り
+- `\x03` (ETX) = 値と値のサブ区切り（複数値を持つフィールド内の区切り）
 - テキストエンコーディングは ASCII
+
+補足: `e_api_event_receive_tel.py` の実装ではこの3種の区切り子を使用:
+```python
+# e_api_event_receive_tel.py:563-568
+# 通知データは「^A」「^B」「^C」を区切り子とし...
+# 区切り子「^A」は1項目値、「^B」は項目と値、「^C」は値と値の各区切り。
+```
 
 ### 3.3 WebSocket 接続パラメータ
 
@@ -267,6 +279,7 @@ websockets.connect(pi_url, ping_interval=86400, ping_timeout=10)
 
 - `ping_interval=86400`（24時間）: サーバー側から ping が来る設計、クライアント ping は実質無効
 - `ping_timeout=10`: pong の待ち時間は10秒
+- **注意**: `e_api_websocket_receive_tel.py:754` では `ping_interval=None`（無効）で接続しており、サンプル間で設定が異なる。実動作検証で要確認
 
 ### 3.4 HTTP Long-polling の実装
 

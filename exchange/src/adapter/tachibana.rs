@@ -12,6 +12,15 @@
 //! 4. 以降は仮想URLでアクセス
 
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// リクエスト通番カウンタ。全リクエストで共有し、インクリメントする。
+static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+/// 次のリクエスト通番を生成する。
+pub fn next_p_no() -> String {
+    REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed).to_string()
+}
 
 // ── エラー型 ─────────────────────────────────────────────────────────────────
 
@@ -69,7 +78,7 @@ pub struct LoginRequest {
 impl LoginRequest {
     pub fn new(user_id: String, password: String) -> Self {
         Self {
-            p_no: "1".to_string(),
+            p_no: next_p_no(),
             p_sd_date: current_p_sd_date(),
             clm_id: "CLMAuthLoginRequest",
             user_id,
@@ -169,6 +178,26 @@ pub fn build_api_url_from<T: Serialize>(
     Ok(build_api_url(base_url, &json))
 }
 
+/// リクエスト構造体を JSON にシリアライズする。
+fn serialize_request<T: Serialize>(request: &T) -> Result<String, TachibanaError> {
+    Ok(serde_json::to_string(request)?)
+}
+
+/// POST リクエストを送信し、Shift-JIS デコードしたレスポンスボディを返す。
+async fn post_request(
+    client: &reqwest::Client,
+    url: &str,
+    json_body: &str,
+) -> Result<String, TachibanaError> {
+    let resp = client
+        .post(url)
+        .header("Content-Type", "application/json")
+        .body(json_body.to_string())
+        .send()
+        .await?;
+    decode_response_body(resp).await
+}
+
 // ── 時価情報型 ────────────────────────────────────────────────────────────────
 
 /// CLMMfdsGetMarketPrice リクエスト（スナップショット取得）。
@@ -195,7 +224,7 @@ impl MarketPriceRequest {
 
     pub fn new(issue_codes: &[&str]) -> Self {
         Self {
-            p_no: "1".to_string(),
+            p_no: next_p_no(),
             p_sd_date: current_p_sd_date(),
             clm_id: "CLMMfdsGetMarketPrice",
             target_issue_codes: issue_codes.join(","),
@@ -263,7 +292,7 @@ impl DailyHistoryRequest {
 
     pub fn new(issue_code: &str) -> Self {
         Self {
-            p_no: "1".to_string(),
+            p_no: next_p_no(),
             p_sd_date: current_p_sd_date(),
             clm_id: "CLMMfdsGetMarketPriceHistory",
             issue_code: issue_code.to_string(),
@@ -315,6 +344,43 @@ pub struct DailyHistoryResponse {
     pub records: Vec<DailyHistoryRecord>,
 }
 
+// ── 共通レスポンスラッパー ───────────────────────────────────────────────────
+
+/// 業務 API レスポンスの共通ラッパー。
+/// `p_errno` / `sResultCode` でエラーチェックを行う。
+#[derive(Debug, Deserialize)]
+pub struct ApiResponse<T> {
+    #[serde(default)]
+    pub p_errno: String,
+    #[serde(default)]
+    pub p_err: String,
+    #[serde(rename = "sResultCode", default)]
+    pub result_code: String,
+    #[serde(rename = "sResultText", default)]
+    pub result_text: String,
+    #[serde(flatten)]
+    pub data: T,
+}
+
+impl<T> ApiResponse<T> {
+    /// エラーチェックを行い、正常時はデータを返す。
+    pub fn check(self) -> Result<T, TachibanaError> {
+        if !self.p_errno.is_empty() && self.p_errno != "0" {
+            return Err(TachibanaError::ApiError {
+                code: self.p_errno,
+                message: self.p_err,
+            });
+        }
+        if !self.result_code.is_empty() && self.result_code != "0" {
+            return Err(TachibanaError::ApiError {
+                code: self.result_code,
+                message: self.result_text,
+            });
+        }
+        Ok(self.data)
+    }
+}
+
 // ── HTTP クライアント ─────────────────────────────────────────────────────────
 
 /// 立花証券 API の BASE URL（本番）
@@ -343,17 +409,16 @@ pub async fn login(
     user_id: String,
     password: String,
 ) -> Result<TachibanaSession, TachibanaError> {
-    let req = LoginRequest::new(user_id, password);
+    let encoded_password = urlencoding::encode(&password).into_owned();
+    let req = LoginRequest::new(user_id, encoded_password);
     let auth_url = format!("{}{}", base_url, AUTH_PATH);
-    let url = build_api_url_from(&auth_url, &req)?;
+    let json_body = serialize_request(&req)?;
 
-    log::debug!("Tachibana login URL: {url}");
+    log::debug!("Tachibana login URL: {auth_url}");
 
-    let resp = client.get(&url).send().await?;
-    let status = resp.status();
-    let text = decode_response_body(resp).await?;
+    let text = post_request(client, &auth_url, &json_body).await?;
 
-    log::debug!("Tachibana login response (status={status}): {text}");
+    log::debug!("Tachibana login response: {text}");
 
     let login_resp: LoginResponse = serde_json::from_str(&text)?;
     TachibanaSession::try_from(login_resp)
@@ -367,12 +432,12 @@ pub async fn fetch_market_prices(
     issue_codes: &[&str],
 ) -> Result<Vec<MarketPriceRecord>, TachibanaError> {
     let req = MarketPriceRequest::new(issue_codes);
-    let url = build_api_url_from(&session.url_price, &req)?;
+    let json_body = serialize_request(&req)?;
 
-    let resp = client.get(&url).send().await?;
-    let text = decode_response_body(resp).await?;
-    let price_resp: MarketPriceResponse = serde_json::from_str(&text)?;
-    Ok(price_resp.records)
+    let text = post_request(client, &session.url_price, &json_body).await?;
+    let api_resp: ApiResponse<MarketPriceResponse> = serde_json::from_str(&text)?;
+    let data = api_resp.check()?;
+    Ok(data.records)
 }
 
 /// 日足履歴取得（最大約20年分）。
@@ -382,12 +447,12 @@ pub async fn fetch_daily_history(
     issue_code: &str,
 ) -> Result<Vec<DailyHistoryRecord>, TachibanaError> {
     let req = DailyHistoryRequest::new(issue_code);
-    let url = build_api_url_from(&session.url_price, &req)?;
+    let json_body = serialize_request(&req)?;
 
-    let resp = client.get(&url).send().await?;
-    let text = decode_response_body(resp).await?;
-    let hist_resp: DailyHistoryResponse = serde_json::from_str(&text)?;
-    Ok(hist_resp.records)
+    let text = post_request(client, &session.url_price, &json_body).await?;
+    let api_resp: ApiResponse<DailyHistoryResponse> = serde_json::from_str(&text)?;
+    let data = api_resp.check()?;
+    Ok(data.records)
 }
 
 // ── 日足データ変換 ────────────────────────────────────────────────────────────
@@ -776,7 +841,7 @@ mod tests {
     async fn login_returns_session_on_success() {
         let mut server = mockito::Server::new_async().await;
         let mock = server
-            .mock("GET", mockito::Matcher::Any)
+            .mock("POST", mockito::Matcher::Any)
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(
@@ -814,7 +879,7 @@ mod tests {
     async fn login_returns_error_on_auth_failure() {
         let mut server = mockito::Server::new_async().await;
         let _mock = server
-            .mock("GET", mockito::Matcher::Any)
+            .mock("POST", mockito::Matcher::Any)
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(
@@ -848,11 +913,15 @@ mod tests {
     async fn fetch_market_prices_returns_records() {
         let mut server = mockito::Server::new_async().await;
         let _mock = server
-            .mock("GET", mockito::Matcher::Any)
+            .mock("POST", mockito::Matcher::Any)
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(
                 r#"{
+                    "p_errno": "0",
+                    "p_err": "",
+                    "sResultCode": "0",
+                    "sResultText": "",
                     "aCLMMfdsMarketPrice": [
                         {"sIssueCode": "6501", "pDPP": "3250", "pDOP": "3200",
                          "pDHP": "3280", "pDLP": "3195", "pDV": "1500000", "pPRP": "3220"}
@@ -884,11 +953,15 @@ mod tests {
     async fn fetch_daily_history_returns_candles() {
         let mut server = mockito::Server::new_async().await;
         let _mock = server
-            .mock("GET", mockito::Matcher::Any)
+            .mock("POST", mockito::Matcher::Any)
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(
                 r#"{
+                    "p_errno": "0",
+                    "p_err": "",
+                    "sResultCode": "0",
+                    "sResultText": "",
                     "aCLMMfdsGetMarketPriceHistory": [
                         {"sDate":"20240101","pDOP":"3200","pDHP":"3280","pDLP":"3150","pDPP":"3250","pDV":"1500000"},
                         {"sDate":"20240102","pDOP":"3250","pDHP":"3300","pDLP":"3230","pDPP":"3280","pDV":"1200000"}
@@ -915,6 +988,316 @@ mod tests {
         assert_eq!(records[0].date, "20240101");
         assert_eq!(records[1].date, "20240102");
         assert_eq!(records[1].close, "3280");
+    }
+
+    // ── Cycle B4: 業務 API エラーチェック ────────────────────────────────────
+
+    #[test]
+    fn api_response_check_returns_data_on_success() {
+        let json = r#"{
+            "p_errno": "0",
+            "p_err": "",
+            "sResultCode": "0",
+            "sResultText": "",
+            "aCLMMfdsMarketPrice": [
+                {"sIssueCode": "6501", "pDPP": "3250"}
+            ]
+        }"#;
+        let resp: ApiResponse<MarketPriceResponse> = serde_json::from_str(json).unwrap();
+        let data = resp.check().unwrap();
+        assert_eq!(data.records.len(), 1);
+    }
+
+    #[test]
+    fn api_response_check_returns_error_on_p_errno() {
+        let json = r#"{
+            "p_errno": "2",
+            "p_err": "セッションが切断されました。",
+            "sResultCode": "0",
+            "sResultText": "",
+            "aCLMMfdsMarketPrice": []
+        }"#;
+        let resp: ApiResponse<MarketPriceResponse> = serde_json::from_str(json).unwrap();
+        let result = resp.check();
+        assert!(
+            matches!(result, Err(TachibanaError::ApiError { ref code, .. }) if code == "2"),
+            "p_errno が 0 でない場合は ApiError が返るべき: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn api_response_check_returns_error_on_result_code() {
+        let json = r#"{
+            "p_errno": "0",
+            "p_err": "",
+            "sResultCode": "-62",
+            "sResultText": "稼働時間外です",
+            "aCLMMfdsMarketPrice": []
+        }"#;
+        let resp: ApiResponse<MarketPriceResponse> = serde_json::from_str(json).unwrap();
+        let result = resp.check();
+        assert!(
+            matches!(result, Err(TachibanaError::ApiError { ref code, .. }) if code == "-62"),
+            "sResultCode が 0 でない場合は ApiError が返るべき: {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_market_prices_returns_api_error_on_session_expired() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("POST", mockito::Matcher::Any)
+            .with_status(200)
+            .with_body(
+                r#"{
+                    "p_errno": "2",
+                    "p_err": "セッションが切断されました。",
+                    "sResultCode": "0",
+                    "sResultText": "",
+                    "aCLMMfdsMarketPrice": []
+                }"#,
+            )
+            .create_async()
+            .await;
+
+        let client = reqwest::Client::new();
+        let session = TachibanaSession {
+            url_request: String::new(),
+            url_master: String::new(),
+            url_price: format!("{}/price/", server.url()),
+            url_event: String::new(),
+            url_event_ws: String::new(),
+        };
+
+        let result = fetch_market_prices(&client, &session, &["6501"]).await;
+        assert!(
+            matches!(result, Err(TachibanaError::ApiError { .. })),
+            "セッション切れ時は ApiError が返るべき: {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_daily_history_returns_api_error_on_p_errno() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("POST", mockito::Matcher::Any)
+            .with_status(200)
+            .with_body(
+                r#"{
+                    "p_errno": "-62",
+                    "p_err": "稼働時間外です",
+                    "sResultCode": "0",
+                    "sResultText": "",
+                    "aCLMMfdsGetMarketPriceHistory": []
+                }"#,
+            )
+            .create_async()
+            .await;
+
+        let client = reqwest::Client::new();
+        let session = TachibanaSession {
+            url_request: String::new(),
+            url_master: String::new(),
+            url_price: format!("{}/price/", server.url()),
+            url_event: String::new(),
+            url_event_ws: String::new(),
+        };
+
+        let result = fetch_daily_history(&client, &session, "6501").await;
+        assert!(
+            matches!(result, Err(TachibanaError::ApiError { .. })),
+            "稼働時間外時は ApiError が返るべき: {:?}",
+            result
+        );
+    }
+
+    // ── Cycle B3: パスワード URL エンコード ─────────────────────────────────
+
+    #[tokio::test]
+    async fn login_url_encodes_password_with_special_chars() {
+        let mut server = mockito::Server::new_async().await;
+        // POST body に URL エンコードされたパスワードが含まれることを確認
+        let mock = server
+            .mock("POST", mockito::Matcher::Any)
+            .match_body(mockito::Matcher::Regex(
+                // "pass{word}" → "pass%7Bword%7D" がJSONに含まれる
+                r#"pass%7Bword%7D"#.to_string(),
+            ))
+            .with_status(200)
+            .with_body(
+                r#"{
+                    "sCLMID": "CLMAuthLoginAck",
+                    "sResultCode": "0",
+                    "sUrlRequest": "https://r.example.com/",
+                    "sUrlMaster": "https://m.example.com/",
+                    "sUrlPrice": "https://p.example.com/",
+                    "sUrlEvent": "https://e.example.com/",
+                    "sUrlEventWebSocket": "wss://ws.example.com/",
+                    "sKinsyouhouMidokuFlg": "0",
+                    "sResultText": ""
+                }"#,
+            )
+            .create_async()
+            .await;
+
+        let client = reqwest::Client::new();
+        let base_url = format!("{}/", server.url());
+        let _session = login(&client, &base_url, "user".into(), "pass{word}".into())
+            .await
+            .unwrap();
+
+        mock.assert_async().await;
+    }
+
+    // ── Cycle B2: p_no インクリメンタルカウンタ ────────────────────────────
+
+    #[test]
+    fn next_p_no_returns_incrementing_values() {
+        let a = next_p_no();
+        let b = next_p_no();
+        let a_num: u64 = a.parse().expect("p_no は数値であるべき");
+        let b_num: u64 = b.parse().expect("p_no は数値であるべき");
+        assert_eq!(b_num, a_num + 1, "p_no は連続してインクリメントされるべき");
+    }
+
+    #[test]
+    fn login_request_p_no_is_not_hardcoded_one() {
+        // next_p_no を何回か呼んだ後に LoginRequest を生成
+        let _ = next_p_no();
+        let _ = next_p_no();
+        let req = LoginRequest::new("u".into(), "p".into());
+        assert_ne!(req.p_no, "1", "p_no はハードコードの '1' であってはならない");
+    }
+
+    #[test]
+    fn market_price_request_uses_dynamic_p_no() {
+        let req1 = MarketPriceRequest::new(&["6501"]);
+        let req2 = MarketPriceRequest::new(&["7203"]);
+        assert_ne!(
+            req1.p_no, req2.p_no,
+            "連続リクエストで p_no が異なるべき"
+        );
+    }
+
+    #[test]
+    fn daily_history_request_uses_dynamic_p_no() {
+        let req1 = DailyHistoryRequest::new("6501");
+        let req2 = DailyHistoryRequest::new("7203");
+        assert_ne!(
+            req1.p_no, req2.p_no,
+            "連続リクエストで p_no が異なるべき"
+        );
+    }
+
+    // ── Cycle B1: HTTP POST 対応 ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn login_sends_post_request_with_json_body() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", mockito::Matcher::Any)
+            .match_header("content-type", "application/json")
+            .with_status(200)
+            .with_body(
+                r#"{
+                    "sCLMID": "CLMAuthLoginAck",
+                    "sResultCode": "0",
+                    "sUrlRequest": "https://r.example.com/",
+                    "sUrlMaster": "https://m.example.com/",
+                    "sUrlPrice": "https://p.example.com/",
+                    "sUrlEvent": "https://e.example.com/",
+                    "sUrlEventWebSocket": "wss://ws.example.com/",
+                    "sKinsyouhouMidokuFlg": "0",
+                    "sResultText": ""
+                }"#,
+            )
+            .create_async()
+            .await;
+
+        let client = reqwest::Client::new();
+        let base_url = format!("{}/", server.url());
+        let _session = login(&client, &base_url, "u".into(), "p".into())
+            .await
+            .unwrap();
+
+        mock.assert_async().await; // POST でなければ mock がマッチせず失敗
+    }
+
+    #[tokio::test]
+    async fn fetch_market_prices_sends_post_request() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", mockito::Matcher::Any)
+            .match_header("content-type", "application/json")
+            .with_status(200)
+            .with_body(
+                r#"{
+                    "p_errno": "0",
+                    "p_err": "",
+                    "sResultCode": "0",
+                    "sResultText": "",
+                    "aCLMMfdsMarketPrice": [
+                        {"sIssueCode": "6501", "pDPP": "3250"}
+                    ]
+                }"#,
+            )
+            .create_async()
+            .await;
+
+        let client = reqwest::Client::new();
+        let session = TachibanaSession {
+            url_request: String::new(),
+            url_master: String::new(),
+            url_price: format!("{}/price/", server.url()),
+            url_event: String::new(),
+            url_event_ws: String::new(),
+        };
+
+        let _records = fetch_market_prices(&client, &session, &["6501"])
+            .await
+            .unwrap();
+
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn fetch_daily_history_sends_post_request() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", mockito::Matcher::Any)
+            .match_header("content-type", "application/json")
+            .with_status(200)
+            .with_body(
+                r#"{
+                    "p_errno": "0",
+                    "p_err": "",
+                    "sResultCode": "0",
+                    "sResultText": "",
+                    "aCLMMfdsGetMarketPriceHistory": [
+                        {"sDate":"20240101","pDOP":"3200","pDHP":"3280","pDLP":"3150","pDPP":"3250","pDV":"1500000"}
+                    ]
+                }"#,
+            )
+            .create_async()
+            .await;
+
+        let client = reqwest::Client::new();
+        let session = TachibanaSession {
+            url_request: String::new(),
+            url_master: String::new(),
+            url_price: format!("{}/price/", server.url()),
+            url_event: String::new(),
+            url_event_ws: String::new(),
+        };
+
+        let _records = fetch_daily_history(&client, &session, "6501")
+            .await
+            .unwrap();
+
+        mock.assert_async().await;
     }
 
     // ── Cycle A1: DailyHistoryRecord → Kline 変換 ────────────────────────────
