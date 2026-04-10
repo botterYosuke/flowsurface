@@ -196,7 +196,7 @@ mod tests {
     async fn perform_login_returns_session_on_success() {
         let mut server = mockito::Server::new_async().await;
         let _mock = server
-            .mock("GET", mockito::Matcher::Any)
+            .mock("POST", mockito::Matcher::Any)
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(
@@ -230,7 +230,7 @@ mod tests {
     async fn perform_login_returns_user_facing_error_on_auth_failure() {
         let mut server = mockito::Server::new_async().await;
         let _mock = server
-            .mock("GET", mockito::Matcher::Any)
+            .mock("POST", mockito::Matcher::Any)
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(
@@ -260,7 +260,7 @@ mod tests {
     async fn perform_login_returns_unread_notices_error() {
         let mut server = mockito::Server::new_async().await;
         let _mock = server
-            .mock("GET", mockito::Matcher::Any)
+            .mock("POST", mockito::Matcher::Any)
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(

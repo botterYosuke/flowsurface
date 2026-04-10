@@ -542,12 +542,12 @@ mod tests {
     async fn fetch_tachibana_klines_converts_daily_history_to_klines() {
         let mut server = mockito::Server::new_async().await;
         let _mock = server
-            .mock("GET", mockito::Matcher::Any)
+            .mock("POST", mockito::Matcher::Any)
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(
                 r#"{
-                    "aCLMMfdsGetMarketPriceHistory": [
+                    "aCLMMfdsMarketPriceHistory": [
                         {"sDate":"20240101","pDOP":"3200","pDHP":"3280","pDLP":"3150","pDPP":"3250","pDV":"1500000",
                          "pDOPxK":"3200","pDHPxK":"3280","pDLPxK":"3150","pDPPxK":"3250","pDVxK":"1500000"},
                         {"sDate":"20240102","pDOP":"3250","pDHP":"3300","pDLP":"3230","pDPP":"3280","pDV":"1200000",

@@ -11,29 +11,33 @@ use flowsurface_exchange::adapter::tachibana::{
 };
 
 fn get_credentials() -> Option<(String, String)> {
-    // まず .env ファイルを読み込む
-    if let Ok(content) = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .join(".env"),
-    ) {
-        for line in content.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            if let Some((key, value)) = line.split_once('=') {
-                // SAFETY: テスト実行時のみ呼ばれ、シングルスレッドで初期化段階
-                unsafe {
-                    std::env::set_var(key.trim(), value.trim());
+    // 環境変数を優先し、なければ .env ファイルからフォールバック
+    let mut user_id = std::env::var("TACHIBANA_USER_ID").unwrap_or_default();
+    let mut password = std::env::var("TACHIBANA_PASSWORD").unwrap_or_default();
+
+    if user_id.is_empty() || password.is_empty() {
+        if let Ok(content) = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .join(".env"),
+        ) {
+            for line in content.lines() {
+                let line = line.trim();
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                if let Some((key, value)) = line.split_once('=') {
+                    match key.trim() {
+                        "TACHIBANA_USER_ID" => user_id = value.trim().to_string(),
+                        "TACHIBANA_PASSWORD" => password = value.trim().to_string(),
+                        _ => {}
+                    }
                 }
             }
         }
     }
 
-    let user_id = std::env::var("TACHIBANA_USER_ID").ok()?;
-    let password = std::env::var("TACHIBANA_PASSWORD").ok()?;
     if user_id.is_empty() || password.is_empty() {
         return None;
     }

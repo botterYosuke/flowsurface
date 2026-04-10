@@ -437,7 +437,7 @@ Phase 2.5（本修正）
 
 ### 実装完了
 
-全5ステップを実装し、`cargo check` 通過、既存テスト全45件パス。
+全5ステップを実装し、`cargo check` 通過、既存テスト全パス（exchange 50 + app 20 + data 3 + 統合 1 = 74テスト）。
 
 ### プランからの変更点
 
@@ -460,7 +460,7 @@ Phase 2.5（本修正）
 
 ### 既知の問題
 
-- `src/connector/auth.rs` の `perform_login_*` 系テスト3件が **変更前から** 失敗している（mockito が GET でモック設定しているが、`login()` は POST を送信するため不一致）。本修正とは無関係。
+- ~~`src/connector/auth.rs` の `perform_login_*` 系テスト3件が **変更前から** 失敗していた~~ → ✅ 修正済み（`mock("GET")` → `mock("POST")` に変更、`fetcher.rs` のフィールド名も修正）。全20テスト通過。
 
 ### 残タスク
 
@@ -664,7 +664,8 @@ impl<'de> Deserialize<'de> for Settings {
 // exchange/src/adapter/tachibana.rs — fetch_all_master()
 } else if seen_kabu {
     // CLMIssueMstKabu の区間を過ぎた → 早期リターン
-    log::info!("Tachibana master early return after kabu section: {} records", records.len());
+    // ※ 公式Pythonサンプル準拠: マスタデータは種別ごとに連続配信される前提。
+    log::warn!("Tachibana master early return after kabu section: {} records ...", records.len());
     return Ok(records);
 }
 ```

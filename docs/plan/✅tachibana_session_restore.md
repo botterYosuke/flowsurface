@@ -130,19 +130,22 @@ pub async fn validate_session(
     session: &TachibanaSession,
 ) -> Result<(), TachibanaError> {
     // 時価情報に対して存在しない銘柄コードで問い合わせ。
-    // p_errno=0 ならセッション有効、p_errno=2 なら失効。
+    // p_errno=0 ならセッション有効、それ以外（失効・未知エラー）は Err。
     let req = MarketPriceRequest::new(&["0000"]);
     let json_body = serialize_request(&req)?;
     let text = post_request(client, &session.url_price, &json_body).await?;
     let api_resp: ApiResponse<serde_json::Value> = serde_json::from_str(&text)?;
-    // p_errno チェック — 2 なら TachibanaError::ApiError が返る
-    if !api_resp.p_errno.is_empty() && api_resp.p_errno != "0" {
-        return Err(TachibanaError::ApiError {
-            code: api_resp.p_errno,
-            message: api_resp.p_err,
-        });
+    // 許可リスト方式: "0" / "" のみ有効。未知コードもエラーとして扱う。
+    match api_resp.p_errno.as_str() {
+        "0" | "" => Ok(()),
+        other => {
+            log::warn!("validate_session: p_errno={}, p_err={}", other, api_resp.p_err);
+            Err(TachibanaError::ApiError {
+                code: api_resp.p_errno,
+                message: api_resp.p_err,
+            })
+        }
     }
-    Ok(())
 }
 ```
 
@@ -313,6 +316,6 @@ pub fn clear_session() {
 | テスト | 内容 |
 |--------|------|
 | `TachibanaSession` の JSON ラウンドトリップ | serialize → deserialize で全フィールドが一致 |
-| `validate_session` の成功/失効パス | mockito で p_errno=0 / p_errno=2 を返す |
+| `validate_session` の成功/失効/未知エラーパス | mockito で p_errno=0 / p_errno=2 / p_errno=99 を返す（3テスト） |
 | `try_restore_session` の統合テスト | keyring mock は困難なので手動確認を中心とする |
 | 既存テストの不退行 | `cargo test` で全テスト PASS を確認 |

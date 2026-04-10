@@ -8,7 +8,7 @@
 
 ### 1. p_no カウンターのリセット問題 ✅
 - アプリ再起動時に `p_no` が 1 からリセットされ、サーバー側セッションの前回値を下回ると `p_errno: 6` で拒否される
-- **修正**: `REQUEST_COUNTER` を Unix 秒で初期化し、常に前回値を超えるようにした
+- **修正**: `REQUEST_COUNTER` を `compare_exchange(0, epoch_secs, Relaxed, Relaxed)` で初期化し、常に前回値を超えるようにした。CAS で初期化を排他し、複数スレッドが同時に呼んでも安全
 - **ファイル**: `exchange/src/adapter/tachibana.rs` の `next_p_no()`
 
 ### 2. serde デシリアライズ失敗 ✅
@@ -24,7 +24,8 @@
 
 ## 確認結果
 
-- `cargo test -p flowsurface-exchange -- tachibana`: 全46テスト合格
+- `cargo test -p flowsurface-exchange`: 全50テスト合格（+2: p_no並行テスト、validate_session未知p_errnoテスト）
+- `cargo test --bin flowsurface`: 全20テスト合格（GET→POST + フィールド名修正済み）
 - `cargo run` で TOYOTA (7203) を選択: **`Tachibana: fetched 6189 daily klines for 7203`** — 2001年から約25年分の日足データが正常に取得された
 
 ## 知見・Tips
@@ -38,4 +39,4 @@
 ## 関連ファイル
 
 - `exchange/src/adapter/tachibana.rs` — API アダプター
-- `src/connector/fetcher.rs` — fetch_tachibana_daily_klines
+- `src/connector/fetcher.rs` — fetch_tachibana_daily_klines（テストの `mock("GET")` → `mock("POST")` + フィールド名修正済み）

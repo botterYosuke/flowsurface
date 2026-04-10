@@ -20,17 +20,16 @@ static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// 次のリクエスト通番を生成する。
 /// 初回呼び出し時にタイムスタンプベースで初期化される。
+/// `compare_exchange` で初期化を排他し、複数スレッドが同時に呼んでも安全。
 pub fn next_p_no() -> String {
+    let epoch_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    // CAS: カウンタが 0（未初期化）の場合のみ epoch_secs で初期化。
+    // 複数スレッドが同時に呼んでも 1 つだけが成功し、残りは失敗して既存値を使う。
+    let _ = REQUEST_COUNTER.compare_exchange(0, epoch_secs, Ordering::Relaxed, Ordering::Relaxed);
     let val = REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-    if val == 0 {
-        // 初回: Unix秒で初期化（前セッションの p_no を常に超える）
-        let epoch_secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        REQUEST_COUNTER.store(epoch_secs + 1, Ordering::Relaxed);
-        return epoch_secs.to_string();
-    }
     val.to_string()
 }
 
@@ -408,7 +407,10 @@ pub const AUTH_PATH: &str = "auth/";
 /// 立花証券 API のレスポンスは Shift-JIS エンコーディング。
 async fn decode_response_body(resp: reqwest::Response) -> Result<String, TachibanaError> {
     let bytes = resp.bytes().await?;
-    let (cow, _, _) = encoding_rs::SHIFT_JIS.decode(&bytes);
+    let (cow, _, had_errors) = encoding_rs::SHIFT_JIS.decode(&bytes);
+    if had_errors {
+        log::warn!("Shift-JIS decode produced lossy output ({} bytes)", bytes.len());
+    }
     Ok(cow.into_owned())
 }
 
@@ -471,21 +473,22 @@ pub async fn validate_session(
         &text[..text.len().min(500)]
     );
     let api_resp: ApiResponse<serde_json::Value> = serde_json::from_str(&text)?;
-    // p_errno="2" はセッション失効を示す。それ以外（"0" や空文字）は有効。
-    if api_resp.p_errno == "2" {
-        return Err(TachibanaError::ApiError {
-            code: api_resp.p_errno,
-            message: api_resp.p_err,
-        });
+    // 許可リスト: p_errno が "0" または空文字のみ有効。
+    // "2" はセッション失効、それ以外の未知コードもエラーとして扱う。
+    match api_resp.p_errno.as_str() {
+        "0" | "" => Ok(()),
+        other => {
+            log::warn!(
+                "validate_session: p_errno={}, p_err={}",
+                other,
+                api_resp.p_err,
+            );
+            Err(TachibanaError::ApiError {
+                code: api_resp.p_errno,
+                message: api_resp.p_err,
+            })
+        }
     }
-    if !api_resp.p_errno.is_empty() && api_resp.p_errno != "0" {
-        log::warn!(
-            "validate_session: unexpected p_errno={}, p_err={} (treating as valid)",
-            api_resp.p_errno,
-            api_resp.p_err,
-        );
-    }
-    Ok(())
 }
 
 /// 日足履歴取得（最大約20年分）。
@@ -697,7 +700,10 @@ pub async fn fetch_all_master(
             buf.push(byte);
             if byte == b'}' {
                 // `}` でレコード境界を判定（サンプルコード準拠）
-                let (decoded, _, _) = encoding_rs::SHIFT_JIS.decode(&buf);
+                let (decoded, _, had_errors) = encoding_rs::SHIFT_JIS.decode(&buf);
+                if had_errors {
+                    log::warn!("Shift-JIS decode produced lossy output in master stream ({} bytes)", buf.len());
+                }
                 let decoded = decoded.into_owned();
                 buf.clear();
 
@@ -717,8 +723,11 @@ pub async fn fetch_all_master(
                         } else if seen_kabu {
                             // CLMIssueMstKabu の区間を過ぎた → 早期リターン
                             // 残りのマスタ（呼値テーブル等）は不要なので読み捨てる
-                            log::info!(
-                                "Tachibana master early return after kabu section: {} records (next: {})",
+                            // ※ 公式Pythonサンプル準拠: マスタデータは種別ごとに連続配信される前提。
+                            //   API仕様変更で非連続配信になった場合、レコード欠損の可能性あり。
+                            log::warn!(
+                                "Tachibana master early return after kabu section: {} records (next: {}). \
+                                 Assumption: CLMIssueMstKabu records are contiguous in the stream.",
                                 records.len(),
                                 record.clm_id
                             );
@@ -1439,6 +1448,16 @@ mod tests {
         assert_ne!(req1.p_no, req2.p_no, "連続リクエストで p_no が異なるべき");
     }
 
+    #[test]
+    fn next_p_no_concurrent_calls_return_unique_values() {
+        use std::collections::HashSet;
+        let handles: Vec<_> = (0..10)
+            .map(|_| std::thread::spawn(|| next_p_no()))
+            .collect();
+        let values: HashSet<String> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        assert_eq!(values.len(), 10, "並行呼び出しでも全 p_no がユニークであるべき");
+    }
+
     // ── Cycle B1: HTTP POST 対応 ───────────────────────────────────────────
 
     #[tokio::test]
@@ -1731,5 +1750,33 @@ mod tests {
         let client = reqwest::Client::new();
         let result = validate_session(&client, &session).await;
         assert!(result.is_err(), "失効セッションは Err を返すべき");
+    }
+
+    // ── Cycle V3: validate_session — 未知の p_errno ────────────────────────────
+
+    #[tokio::test]
+    async fn validate_session_returns_err_on_unknown_p_errno() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("POST", mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"p_errno":"99","p_err":"不明なエラー","sResultCode":"","sResultText":""}"#,
+            )
+            .create_async()
+            .await;
+
+        let session = TachibanaSession {
+            url_request: String::new(),
+            url_master: String::new(),
+            url_price: server.url(),
+            url_event: String::new(),
+            url_event_ws: String::new(),
+        };
+
+        let client = reqwest::Client::new();
+        let result = validate_session(&client, &session).await;
+        assert!(result.is_err(), "未知の p_errno は Err を返すべき");
     }
 }
