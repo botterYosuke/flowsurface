@@ -3,7 +3,16 @@
     "allow": [
       "Bash(tasklist)",
       "Bash(taskkill //PID 25136 //F)",
-      "Bash(powershell -Command \"cmdkey /delete:flowsurface.tachibana 2>&1; echo 'Done'\")"
+      "Bash(powershell -Command \"cmdkey /delete:flowsurface.tachibana 2>&1; echo 'Done'\")",
+      "Bash(xargs cat:*)",
+      "Bash(echo \"App started in background, PID: $!\")",
+      "Bash(echo \"App started, PID: $!\")",
+      "Bash(grep -n \"WebSocket\\\\|websocket\" /c/Users/sasai/Documents/flowsurface/src/connector/*.rs)",
+      "Bash(tasklist.exe)",
+      "Read(//c/Users/sasai/AppData/Local/Temp/claude/c--Users-sasai-Documents-flowsurface/e134b01e-663f-4233-b937-7efff9f75dc0/tasks/**)",
+      "Read(//c/Users/sasai/Documents/flowsurface/**)",
+      "Bash(taskkill //IM flowsurface.exe //F)",
+      "Bash(rm -f debug_tachibana.log)"
     ],
     "additionalDirectories": [
       "C:\\Users\\sasai\\Documents\\marimo\\.claude\\plans"

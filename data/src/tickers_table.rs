@@ -6,13 +6,46 @@ use exchange::{
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, PartialEq)]
 pub struct Settings {
     pub favorited_tickers: Vec<Ticker>,
     pub show_favorites: bool,
     pub selected_sort_option: SortOptions,
     pub selected_exchanges: Vec<Venue>,
     pub selected_markets: Vec<MarketKind>,
+}
+
+impl<'de> Deserialize<'de> for Settings {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Raw {
+            favorited_tickers: Vec<Ticker>,
+            show_favorites: bool,
+            selected_sort_option: SortOptions,
+            selected_exchanges: Vec<Venue>,
+            selected_markets: Vec<MarketKind>,
+        }
+
+        let mut raw = Raw::deserialize(deserializer)?;
+
+        // 保存済み設定に含まれていない新しい Venue を自動追加する
+        for venue in Venue::ALL {
+            if !raw.selected_exchanges.contains(&venue) {
+                raw.selected_exchanges.push(venue);
+            }
+        }
+
+        Ok(Settings {
+            favorited_tickers: raw.favorited_tickers,
+            show_favorites: raw.show_favorites,
+            selected_sort_option: raw.selected_sort_option,
+            selected_exchanges: raw.selected_exchanges,
+            selected_markets: raw.selected_markets,
+        })
+    }
 }
 
 impl Default for Settings {

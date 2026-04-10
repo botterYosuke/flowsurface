@@ -569,6 +569,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+
 /// 全マスタダウンロードの各レコードをパースするための汎用型。
 /// sCLMID でレコード種別を判定し、CLMIssueMstKabu のみ抽出する。
 #[derive(Debug, Deserialize, Clone)]
@@ -612,6 +613,9 @@ pub fn master_record_to_ticker_info(record: &MasterRecord) -> Option<(Ticker, Ti
 
     // display_symbol が MAX_LEN (28) を超える場合は切り捨て
     let display = display.map(|d| if d.len() > 28 { &d[..28] } else { d });
+
+    // display が非 ASCII なら Ticker がパニックするので None にフォールバック
+    let display = display.filter(|d| d.is_ascii());
 
     let ticker = Ticker::new_with_display(
         &record.issue_code,
@@ -670,6 +674,7 @@ pub async fn fetch_all_master(
 
     let mut buf = Vec::new();
     let mut records = Vec::new();
+    let mut seen_kabu = false;
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;
@@ -694,7 +699,17 @@ pub async fn fetch_all_master(
                         if record.clm_id == "CLMIssueMstKabu"
                             && !record.issue_code.is_empty()
                         {
+                            seen_kabu = true;
                             records.push(record);
+                        } else if seen_kabu {
+                            // CLMIssueMstKabu の区間を過ぎた → 早期リターン
+                            // 残りのマスタ（呼値テーブル等）は不要なので読み捨てる
+                            log::info!(
+                                "Tachibana master early return after kabu section: {} records (next: {})",
+                                records.len(),
+                                record.clm_id
+                            );
+                            return Ok(records);
                         }
                     }
                     Err(e) => {
@@ -722,7 +737,6 @@ pub async fn init_issue_master(
     session: &TachibanaSession,
 ) -> Result<(), TachibanaError> {
     let records = fetch_all_master(client, session).await?;
-    log::info!("Tachibana issue master cached: {} records", records.len());
     *ISSUE_MASTER_CACHE.write().await = Some(Arc::new(records));
     Ok(())
 }
@@ -747,7 +761,8 @@ pub fn spawn_init_issue_master(session: TachibanaSession) {
 /// キャッシュから Ticker → TickerInfo の HashMap を構築する。
 pub async fn cached_ticker_metadata() -> HashMap<Ticker, Option<TickerInfo>> {
     let mut out = HashMap::new();
-    if let Some(records) = get_cached_issue_master().await {
+    let cache = get_cached_issue_master().await;
+    if let Some(records) = cache {
         for record in records.iter() {
             if let Some((ticker, info)) = master_record_to_ticker_info(record) {
                 out.insert(ticker, Some(info));

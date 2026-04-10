@@ -14,6 +14,7 @@ use data::{
 use exchange::{
     Ticker, TickerInfo, TickerStats,
     adapter::{Exchange, MarketKind, Venue, fetch_ticker_metadata, fetch_ticker_stats},
+    unit::{price::Price, qty::Qty},
 };
 use iced::{
     Alignment, Element, Length, Renderer, Size, Subscription, Task, Theme,
@@ -295,8 +296,41 @@ impl TickersTable {
             Message::UpdateMetadata(venue, info) => {
                 self.unavailable_exchanges.remove(&venue);
 
+                let mut new_rows_added = false;
                 for (ticker, ticker_info) in info.into_iter() {
                     self.tickers_info.insert(ticker, ticker_info);
+
+                    // ticker_rows に未登録のティッカーはデフォルト stats で行を作成する。
+                    // stats が後から到着すれば update_ticker_rows で上書きされる。
+                    // Tachibana のように fetch_ticker_stats が未実装の取引所でも
+                    // 銘柄検索に表示されるようになる。
+                    if !self.row_index.contains_key(&ticker) {
+                        let default_stats = TickerStats {
+                            mark_price: Price { units: 0 },
+                            daily_price_chg: 0.0,
+                            daily_volume: Qty::ZERO,
+                        };
+                        let new_row = TickerRowData {
+                            exchange: ticker.exchange,
+                            ticker,
+                            stats: default_stats,
+                            previous_stats: None,
+                            is_favorited: self.favorited_tickers.contains(&ticker),
+                        };
+                        self.ticker_rows.push(new_row);
+                        let idx = self.ticker_rows.len() - 1;
+                        self.row_index.insert(ticker, idx);
+
+                        self.display_cache.insert(
+                            ticker,
+                            compute_display_data(&ticker, &default_stats, None, None),
+                        );
+                        new_rows_added = true;
+                    }
+                }
+
+                if new_rows_added {
+                    self.sort_ticker_rows();
                 }
 
                 if self.selected_exchanges.contains(&venue) {

@@ -872,11 +872,13 @@ impl Flowsurface {
             |result: Result<_, exchange::adapter::tachibana::TachibanaError>| {
                 let venue = Venue::Tachibana;
                 match result {
-                    Ok(metadata) => Message::Sidebar(
-                        dashboard::sidebar::Message::TickersTable(
-                            dashboard::tickers_table::Message::UpdateMetadata(venue, metadata),
-                        ),
-                    ),
+                    Ok(metadata) => {
+                        Message::Sidebar(
+                            dashboard::sidebar::Message::TickersTable(
+                                dashboard::tickers_table::Message::UpdateMetadata(venue, metadata),
+                            ),
+                        )
+                    }
                     Err(e) => {
                         log::error!("Tachibana master download failed: {e}");
                         Message::Sidebar(
