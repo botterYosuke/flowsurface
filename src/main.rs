@@ -156,10 +156,7 @@ impl Flowsurface {
 
         (
             state,
-            Task::batch([
-                launch_sidebar.map(Message::Sidebar),
-                restore_task,
-            ]),
+            Task::batch([launch_sidebar.map(Message::Sidebar), restore_task]),
         )
     }
 
@@ -872,23 +869,17 @@ impl Flowsurface {
             |result: Result<_, exchange::adapter::tachibana::TachibanaError>| {
                 let venue = Venue::Tachibana;
                 match result {
-                    Ok(metadata) => {
-                        Message::Sidebar(
-                            dashboard::sidebar::Message::TickersTable(
-                                dashboard::tickers_table::Message::UpdateMetadata(venue, metadata),
-                            ),
-                        )
-                    }
+                    Ok(metadata) => Message::Sidebar(dashboard::sidebar::Message::TickersTable(
+                        dashboard::tickers_table::Message::UpdateMetadata(venue, metadata),
+                    )),
                     Err(e) => {
                         log::error!("Tachibana master download failed: {e}");
-                        Message::Sidebar(
-                            dashboard::sidebar::Message::TickersTable(
-                                dashboard::tickers_table::Message::MetadataFetchFailed(
-                                    venue,
-                                    data::InternalError::Fetch(format!("Tachibana: {e}")),
-                                ),
+                        Message::Sidebar(dashboard::sidebar::Message::TickersTable(
+                            dashboard::tickers_table::Message::MetadataFetchFailed(
+                                venue,
+                                data::InternalError::Fetch(format!("Tachibana: {e}")),
                             ),
-                        )
+                        ))
                     }
                 }
             },

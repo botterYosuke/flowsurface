@@ -64,7 +64,7 @@ iced::window::frames() → Message::Tick(Instant) → dashboard.tick()
 | API | シグネチャ | 対応取引所 |
 |-----|----------|----------|
 | `fetch_klines()` | `(TickerInfo, Timeframe, Option<(u64,u64)>) → Vec<Kline>` | Binance, Bybit, Hyperliquid, OKX, MEXC |
-| `fetch_trades_batched()` | `(TickerInfo, from_time, to_time, data_path) → impl Straw<(), Vec<Trade>, AdapterError>` | Binance, Bybit |
+| `fetch_trades_batched()` | `(TickerInfo, from_time, to_time, data_path) → impl Straw<(), Vec<Trade>, AdapterError>` | Binance のみ |
 | `fetch_open_interest()` | `(TickerInfo, Timeframe, Option<(u64,u64)>) → Vec<OpenInterest>` | Binance, Bybit, OKX |
 
 → これらの API でリプレイ用の過去データを取得可能。
@@ -123,6 +123,8 @@ pub struct PlaybackState {
 }
 
 pub enum PlaybackStatus {
+    /// データプリフェッチ中
+    Loading,
     Playing,
     Paused,
 }
@@ -236,13 +238,14 @@ Play 押下
     ├── 2. アクティブな全ペインの StreamKind を列挙
     ├── 3. ペインの content を再構築してチャートデータをクリア
     │      （settings / streams は保持、content のみ KlineChart::new() 等で再生成）
-    ├── 4. status を Loading に設定（ヘッダーに "Loading..." 表示）
+    ├── 4. PlaybackState を初期化（status = Loading）、ヘッダーに "Loading..." 表示
     ├── 5. 既存の fetcher::request_fetch() を利用して過去データを取得:
-    │       ├── FetchRange::Kline(start, end) → Kline は一括 insert_hist_klines()
-    │       └── FetchRange::Trades(start, end) → fetch_trades_batched() の Straw ストリームを購読
+    │       ├── FetchRange::Kline(start, end) → Kline は一括 insert_hist_klines(req_id, klines)
+    │       │   ※ req_id はリプレイ用にダミー Uuid::new_v4() を生成して渡す
+    │       └── FetchRange::Trades(start, end) → fetch_trades_batched() を Task::sip() で消費
     │           各バッチ → TradesBatchReceived → TradeBuffer に追記
-    │           全バッチ完了 → DataLoaded → PlaybackState 初期化
-    │      ※fetch_trades_batched() は Binance / Bybit のみ対応。
+    │           全バッチ完了 → DataLoaded → status を Playing に遷移
+    │      ※fetch_trades_batched() は現在 Binance のみ対応。
     │       他の取引所では Kline のみの再生になる。
     ├── 6. WebSocket 購読は subscription() の除外で自動停止
     │      （mode が Replay になった時点で次の subscription 評価で exchange_streams を返さなくなる）
@@ -323,10 +326,12 @@ fn subscription(&self) -> Subscription<Message> {
 | 1-4 | `view_replay_header()` メソッド実装（現在時刻 + トグル + 日時入力 + ▶/⏸ + ⏭） | `src/main.rs` |
 | 1-5 | `view()` の `column!` にヘッダーバーを挿入 | `src/main.rs` |
 | 1-6 | トグルボタンでモード切替（UI状態のみ。入力欄・ボタンの有効/無効切替） | `src/main.rs` |
+| 1-7 | Live に戻す際の UI 状態リセット（ReplayRangeInput のクリア、ボタン無効化に復帰） | `src/main.rs` |
 
 > ⏮（StepBackward）ボタンは Phase 1 では配置しない。Phase 4 で実装と同時に追加する。
+> NOTE: `header_title` は macOS 以外では空の `column![]` のため、Windows ではリプレイヘッダーがウィンドウ最上部に配置される。
 
-**検証**: ビルドしてメインウィンドウ上部にヘッダーバーが表示されること。トグルで入力欄・ボタンの有効/無効が切り替わること。
+**検証**: ビルドしてメインウィンドウ上部にヘッダーバーが表示されること。トグルで入力欄・ボタンの有効/無効が切り替わること。Live に戻した際に UI 状態がリセットされること。
 
 ### Phase 2: リプレイデータのプリフェッチ
 
@@ -457,7 +462,7 @@ fn subscription(&self) -> Subscription<Message> {
    - → **範囲上限 6 時間で緩和**。6 時間分の Trades は活発な銘柄でも数十 MB 程度に収まる
 
 3. **Trades フェッチの取引所制限**
-   - `fetch_trades_batched()` は現在 Binance / Bybit のみ対応
+   - `fetch_trades_batched()` は現在 **Binance のみ**対応
    - 他の取引所ではリプレイ時に Kline のみの再生になる
 
 4. **フレームレートと再生精度**
@@ -473,6 +478,5 @@ fn subscription(&self) -> Subscription<Message> {
    - チャートリセット → Kline 再挿入 → `start_time` から `new_current_time` まで Trades 一括再注入が必要
    - Phase 4 に延期して複雑度を管理する
 
-7. **StreamKind の Hash 実装**
-   - `trade_buffers: HashMap<StreamKind, TradeBuffer>` を使うには `StreamKind` が `Hash + Eq` を実装している必要がある
-   - 未実装なら `Vec<(StreamKind, TradeBuffer)>` で代替する
+7. **~~StreamKind の Hash 実装~~** → **解決済み**
+   - `StreamKind` は `Hash + Eq` を既に derive 済み → `HashMap<StreamKind, TradeBuffer>` で問題なし

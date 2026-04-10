@@ -12,7 +12,16 @@
       "Read(//c/Users/sasai/AppData/Local/Temp/claude/c--Users-sasai-Documents-flowsurface/e134b01e-663f-4233-b937-7efff9f75dc0/tasks/**)",
       "Read(//c/Users/sasai/Documents/flowsurface/**)",
       "Bash(taskkill //IM flowsurface.exe //F)",
-      "Bash(rm -f debug_tachibana.log)"
+      "Bash(rm -f debug_tachibana.log)",
+      "Bash(cargo fmt:*)",
+      "Bash(kill %1)",
+      "Bash(wait)",
+      "Bash(dir /s /b \"C:\\\\Users\\\\sasai\\\\AppData\\\\Roaming\\\\flowsurface\\\\flowsurface-current.log\")",
+      "Bash(dir /s /b \"C:\\\\Users\\\\sasai\\\\AppData\\\\Local\\\\flowsurface\\\\flowsurface-current.log\")",
+      "Bash(tee /tmp/flowsurface_debug.log)",
+      "Read(//tmp/**)",
+      "Bash(echo \"PID: $!\")",
+      "Bash(tee /tmp/flowsurface_verify.log)"
     ],
     "additionalDirectories": [
       "C:\\Users\\sasai\\Documents\\marimo\\.claude\\plans"

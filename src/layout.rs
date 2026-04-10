@@ -34,7 +34,6 @@ pub struct SavedState {
     pub proxy_cfg: Option<exchange::proxy::Proxy>,
 }
 
-
 impl Default for SavedState {
     fn default() -> Self {
         SavedState {

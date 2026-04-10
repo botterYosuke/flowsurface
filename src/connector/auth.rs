@@ -1,5 +1,5 @@
 use exchange::adapter::tachibana::{
-    TachibanaError, TachibanaSession, BASE_URL_DEMO, BASE_URL_PROD,
+    BASE_URL_DEMO, BASE_URL_PROD, TachibanaError, TachibanaSession,
 };
 use std::sync::RwLock;
 
@@ -7,7 +7,11 @@ static SESSION: RwLock<Option<TachibanaSession>> = RwLock::new(None);
 
 /// デモ/本番の BASE URL を返す。
 pub fn base_url(is_demo: bool) -> &'static str {
-    if is_demo { BASE_URL_DEMO } else { BASE_URL_PROD }
+    if is_demo {
+        BASE_URL_DEMO
+    } else {
+        BASE_URL_PROD
+    }
 }
 
 /// 保存済みセッションを取得する。
@@ -91,9 +95,7 @@ pub async fn try_restore_session() -> Option<TachibanaSession> {
 fn tachibana_error_to_message(err: TachibanaError) -> String {
     use crate::screen::login::tachibana_error_message;
     match &err {
-        TachibanaError::UnreadNotices => {
-            tachibana_error_message("UNREAD_NOTICES").to_string()
-        }
+        TachibanaError::UnreadNotices => tachibana_error_message("UNREAD_NOTICES").to_string(),
         TachibanaError::LoginFailed(msg) => {
             // "code=10001, message=..." 形式からコードを抽出
             if let Some(code) = msg.strip_prefix("code=").and_then(|s| s.split(',').next()) {
@@ -129,7 +131,10 @@ mod tests {
     #[test]
     fn get_session_returns_none_when_no_session_stored() {
         clear_session();
-        assert!(get_session().is_none(), "セッション未保存時は None であるべき");
+        assert!(
+            get_session().is_none(),
+            "セッション未保存時は None であるべき"
+        );
     }
 
     #[test]
@@ -211,12 +216,9 @@ mod tests {
             .await;
 
         let base = format!("{}/", server.url());
-        let result = perform_login_with_base_url(
-            &base,
-            "testuser".to_string(),
-            "testpass".to_string(),
-        )
-        .await;
+        let result =
+            perform_login_with_base_url(&base, "testuser".to_string(), "testpass".to_string())
+                .await;
 
         let session = result.expect("ログイン成功でセッションが返るべき");
         assert_eq!(session.url_price, "https://virtual.test/price/");
@@ -242,12 +244,8 @@ mod tests {
             .await;
 
         let base = format!("{}/", server.url());
-        let result = perform_login_with_base_url(
-            &base,
-            "wrong".to_string(),
-            "wrong".to_string(),
-        )
-        .await;
+        let result =
+            perform_login_with_base_url(&base, "wrong".to_string(), "wrong".to_string()).await;
 
         let err = result.expect_err("認証失敗でエラーが返るべき");
         assert!(
@@ -282,12 +280,8 @@ mod tests {
             .await;
 
         let base = format!("{}/", server.url());
-        let result = perform_login_with_base_url(
-            &base,
-            "user".to_string(),
-            "pass".to_string(),
-        )
-        .await;
+        let result =
+            perform_login_with_base_url(&base, "user".to_string(), "pass".to_string()).await;
 
         let err = result.expect_err("未読書面エラーが返るべき");
         assert!(

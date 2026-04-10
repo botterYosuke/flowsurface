@@ -7,13 +7,16 @@
 //!   cargo test --package flowsurface-exchange --test tachibana_integration -- --nocapture
 
 use flowsurface_exchange::adapter::tachibana::{
-    login, fetch_all_master, master_record_to_ticker_info, BASE_URL_DEMO,
+    BASE_URL_DEMO, fetch_all_master, login, master_record_to_ticker_info,
 };
 
 fn get_credentials() -> Option<(String, String)> {
     // まず .env ファイルを読み込む
     if let Ok(content) = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join(".env"),
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join(".env"),
     ) {
         for line in content.lines() {
             let line = line.trim();
@@ -22,7 +25,9 @@ fn get_credentials() -> Option<(String, String)> {
             }
             if let Some((key, value)) = line.split_once('=') {
                 // SAFETY: テスト実行時のみ呼ばれ、シングルスレッドで初期化段階
-                unsafe { std::env::set_var(key.trim(), value.trim()); }
+                unsafe {
+                    std::env::set_var(key.trim(), value.trim());
+                }
             }
         }
     }
@@ -94,9 +99,7 @@ async fn test_login_and_fetch_master() {
                 if converted < 5 {
                     eprintln!(
                         "  {:?} => min_qty={:?}, min_tick={:?}",
-                        ticker,
-                        info.min_qty,
-                        info.min_ticksize,
+                        ticker, info.min_qty, info.min_ticksize,
                     );
                 }
                 converted += 1;
@@ -114,9 +117,7 @@ async fn test_login_and_fetch_master() {
     );
 
     // Step 5: 特定銘柄の存在確認（トヨタ自動車 7203）
-    let toyota = records
-        .iter()
-        .find(|r| r.issue_code == "7203");
+    let toyota = records.iter().find(|r| r.issue_code == "7203");
     assert!(
         toyota.is_some(),
         "トヨタ自動車 (7203) が銘柄マスタに存在するべき"

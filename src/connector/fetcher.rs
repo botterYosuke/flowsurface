@@ -404,9 +404,7 @@ pub fn kline_fetch_task(
                 // 立花証券: セッション経由で日足データを取得
                 let (issue_code, _) = ticker_info.ticker.to_full_symbol_and_type();
                 Task::perform(
-                    async move {
-                        fetch_tachibana_daily_klines(&issue_code).await
-                    },
+                    async move { fetch_tachibana_daily_klines(&issue_code).await },
                     move |result| match result {
                         Ok(klines) => {
                             let data = FetchedData::Klines {
@@ -469,13 +467,12 @@ pub async fn fetch_tachibana_daily_klines(issue_code: &str) -> Result<Vec<Kline>
         .ok_or_else(|| "セッションが存在しません。再ログインしてください。".to_string())?;
 
     let client = reqwest::Client::new();
-    let records =
-        exchange::adapter::tachibana::fetch_daily_history(&client, &session, issue_code)
-            .await
-            .map_err(|e| {
-                log::error!("Tachibana daily history fetch failed: {e}");
-                format!("日足データ取得エラー: {e}")
-            })?;
+    let records = exchange::adapter::tachibana::fetch_daily_history(&client, &session, issue_code)
+        .await
+        .map_err(|e| {
+            log::error!("Tachibana daily history fetch failed: {e}");
+            format!("日足データ取得エラー: {e}")
+        })?;
 
     let klines: Vec<Kline> = records
         .iter()

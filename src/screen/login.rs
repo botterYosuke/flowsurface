@@ -32,7 +32,10 @@ mod tests {
     #[test]
     fn new_login_screen_defaults_to_production_environment() {
         let screen = LoginScreen::new();
-        assert!(!screen.is_demo, "デフォルトは本番環境 (is_demo = false) であるべき");
+        assert!(
+            !screen.is_demo,
+            "デフォルトは本番環境 (is_demo = false) であるべき"
+        );
     }
 
     // ── Cycle B4: Message::IsDemoProd でデモ/本番を切り替え ──────────────────
@@ -68,19 +71,28 @@ mod tests {
     #[test]
     fn error_code_10001_maps_to_credential_error_message() {
         let msg = tachibana_error_message("10001");
-        assert!(msg.contains("ユーザID") || msg.contains("パスワード"), "コード 10001 は認証情報エラーを示すべき: {msg}");
+        assert!(
+            msg.contains("ユーザID") || msg.contains("パスワード"),
+            "コード 10001 は認証情報エラーを示すべき: {msg}"
+        );
     }
 
     #[test]
     fn unread_notices_error_maps_to_guidance_message() {
         let msg = tachibana_error_message("UNREAD_NOTICES");
-        assert!(msg.contains("書面") || msg.contains("未読"), "未読書面エラーは書面確認を促すメッセージであるべき: {msg}");
+        assert!(
+            msg.contains("書面") || msg.contains("未読"),
+            "未読書面エラーは書面確認を促すメッセージであるべき: {msg}"
+        );
     }
 
     #[test]
     fn unknown_error_code_returns_generic_message() {
         let msg = tachibana_error_message("99999");
-        assert!(!msg.is_empty(), "未知のコードでも空でないメッセージを返すべき");
+        assert!(
+            !msg.is_empty(),
+            "未知のコードでも空でないメッセージを返すべき"
+        );
     }
 }
 
@@ -104,9 +116,7 @@ pub struct LoginScreen {
 /// Tachibana エラーコードを日本語メッセージに変換する。
 pub fn tachibana_error_message(code: &str) -> &'static str {
     match code {
-        "10001" | "10002" | "10003" => {
-            "ユーザIDまたはパスワードが正しくありません。"
-        }
+        "10001" | "10002" | "10003" => "ユーザIDまたはパスワードが正しくありません。",
         "10004" => "アカウントがロックされています。サポートにお問い合わせください。",
         "UNREAD_NOTICES" => {
             "未読書面があります。立花証券の Web サイトで書面を確認してからログインしてください。"
@@ -193,11 +203,12 @@ impl LoginScreen {
         })
         .padding(12);
 
-        let news_text = text("【次回バージョンアップのお知らせ】")
-            .size(13)
-            .style(|_theme: &iced::Theme| iced::widget::text::Style {
-                color: Some(Color::from_rgb(1.0, 1.0, 0.0)),
-            });
+        let news_text =
+            text("【次回バージョンアップのお知らせ】")
+                .size(13)
+                .style(|_theme: &iced::Theme| iced::widget::text::Style {
+                    color: Some(Color::from_rgb(1.0, 1.0, 0.0)),
+                });
 
         let news_detail = text("2026/4/9 (木) 夜  Ver.5.39.1.0をリリース予定")
             .size(13)
@@ -239,7 +250,9 @@ impl LoginScreen {
                 }),
         )
         .style(|_theme: &iced::Theme| container::Style {
-            background: Some(iced::Background::Color(Color::from_rgba(0.2, 0.3, 0.9, 0.08))),
+            background: Some(iced::Background::Color(Color::from_rgba(
+                0.2, 0.3, 0.9, 0.08,
+            ))),
             border: Border {
                 color: Color::from_rgba(0.4, 0.4, 0.9, 0.4),
                 width: 1.0,
@@ -265,15 +278,19 @@ impl LoginScreen {
             .style(input_style);
 
         // デモ/本番環境切り替えトグル
-        let env_label = text(if self.is_demo { "デモ環境" } else { "本番環境" })
-            .size(13)
-            .style(move |_theme: &iced::Theme| iced::widget::text::Style {
-                color: Some(if self.is_demo {
-                    Color::from_rgb(0.1, 0.6, 0.4)
-                } else {
-                    Color::from_rgb(0.3, 0.3, 0.3)
-                }),
-            });
+        let env_label = text(if self.is_demo {
+            "デモ環境"
+        } else {
+            "本番環境"
+        })
+        .size(13)
+        .style(move |_theme: &iced::Theme| iced::widget::text::Style {
+            color: Some(if self.is_demo {
+                Color::from_rgb(0.1, 0.6, 0.4)
+            } else {
+                Color::from_rgb(0.3, 0.3, 0.3)
+            }),
+        });
 
         let env_toggle = toggler(self.is_demo)
             .on_toggle(Message::IsDemoProd)
@@ -285,15 +302,15 @@ impl LoginScreen {
 
         // エラーメッセージ
         let error_area: Element<'_, Message> = if let Some(err) = &self.error {
-            container(
-                text(err.as_str())
-                    .size(13)
-                    .style(|_theme: &iced::Theme| iced::widget::text::Style {
-                        color: Some(Color::from_rgb(0.85, 0.1, 0.1)),
-                    }),
-            )
+            container(text(err.as_str()).size(13).style(|_theme: &iced::Theme| {
+                iced::widget::text::Style {
+                    color: Some(Color::from_rgb(0.85, 0.1, 0.1)),
+                }
+            }))
             .style(|_theme: &iced::Theme| container::Style {
-                background: Some(iced::Background::Color(Color::from_rgba(0.9, 0.1, 0.1, 0.07))),
+                background: Some(iced::Background::Color(Color::from_rgba(
+                    0.9, 0.1, 0.1, 0.07,
+                ))),
                 border: Border {
                     color: Color::from_rgb(0.85, 0.1, 0.1),
                     width: 1.0,
@@ -359,7 +376,10 @@ impl LoginScreen {
                 ..Default::default()
             },
             shadow: Shadow {
-                color: Color { a: 0.3, ..Color::BLACK },
+                color: Color {
+                    a: 0.3,
+                    ..Color::BLACK
+                },
                 offset: iced::Vector { x: 0.0, y: 4.0 },
                 blur_radius: 16.0,
             },

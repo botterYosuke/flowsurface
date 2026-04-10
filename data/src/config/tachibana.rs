@@ -106,9 +106,6 @@ mod tests {
     #[test]
     fn load_returns_none_when_nothing_saved() {
         delete_session(); // 念のためクリア
-        assert!(
-            load_session().is_none(),
-            "未保存時は None であるべき"
-        );
+        assert!(load_session().is_none(), "未保存時は None であるべき");
     }
 }

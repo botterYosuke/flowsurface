@@ -15,11 +15,23 @@ use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// リクエスト通番カウンタ。全リクエストで共有し、インクリメントする。
-static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
+/// 初期値は起動時のUnix秒を使用し、セッション復元時に前回の値を常に超える。
+static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// 次のリクエスト通番を生成する。
+/// 初回呼び出し時にタイムスタンプベースで初期化される。
 pub fn next_p_no() -> String {
-    REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed).to_string()
+    let val = REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+    if val == 0 {
+        // 初回: Unix秒で初期化（前セッションの p_no を常に超える）
+        let epoch_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        REQUEST_COUNTER.store(epoch_secs + 1, Ordering::Relaxed);
+        return epoch_secs.to_string();
+    }
+    val.to_string()
 }
 
 // ── エラー型 ─────────────────────────────────────────────────────────────────
@@ -263,7 +275,7 @@ pub struct MarketPriceRecord {
 /// CLMMfdsGetMarketPrice 応答。
 #[derive(Debug, Deserialize)]
 pub struct MarketPriceResponse {
-    #[serde(rename = "aCLMMfdsMarketPrice")]
+    #[serde(rename = "aCLMMfdsMarketPrice", default)]
     pub records: Vec<MarketPriceRecord>,
 }
 
@@ -340,7 +352,7 @@ pub struct DailyHistoryRecord {
 /// CLMMfdsGetMarketPriceHistory 応答。
 #[derive(Debug, Deserialize)]
 pub struct DailyHistoryResponse {
-    #[serde(rename = "aCLMMfdsGetMarketPriceHistory")]
+    #[serde(rename = "aCLMMfdsMarketPriceHistory", default)]
     pub records: Vec<DailyHistoryRecord>,
 }
 
@@ -447,11 +459,17 @@ pub async fn validate_session(
     client: &reqwest::Client,
     session: &TachibanaSession,
 ) -> Result<(), TachibanaError> {
-    log::debug!("Validating tachibana session: url_price={}", session.url_price);
+    log::debug!(
+        "Validating tachibana session: url_price={}",
+        session.url_price
+    );
     let req = MarketPriceRequest::new(&["0000"]);
     let json_body = serialize_request(&req)?;
     let text = post_request(client, &session.url_price, &json_body).await?;
-    log::debug!("validate_session response: {}", &text[..text.len().min(500)]);
+    log::debug!(
+        "validate_session response: {}",
+        &text[..text.len().min(500)]
+    );
     let api_resp: ApiResponse<serde_json::Value> = serde_json::from_str(&text)?;
     // p_errno="2" はセッション失効を示す。それ以外（"0" や空文字）は有効。
     if api_resp.p_errno == "2" {
@@ -487,8 +505,8 @@ pub async fn fetch_daily_history(
 
 // ── 日足データ変換 ────────────────────────────────────────────────────────────
 
-use crate::{Kline, Volume};
 use crate::unit::{MinTicksize, qty::Qty};
+use crate::{Kline, Volume};
 
 /// `DailyHistoryRecord` を `Kline` に変換する。
 ///
@@ -516,7 +534,11 @@ pub fn daily_record_to_kline(record: &DailyHistoryRecord, use_adjusted: bool) ->
 
     // "*" は未取得を意味する
     let parse = |s: &str| -> Option<f32> {
-        if s == "*" || s.is_empty() { None } else { s.parse().ok() }
+        if s == "*" || s.is_empty() {
+            None
+        } else {
+            s.parse().ok()
+        }
     };
 
     let open = parse(open_s)?;
@@ -553,8 +575,7 @@ fn date_str_to_epoch_ms(date: &str) -> Option<u64> {
     let day: u32 = date[6..8].parse().ok()?;
 
     use chrono::NaiveDate;
-    let naive = NaiveDate::from_ymd_opt(year, month, day)?
-        .and_hms_opt(0, 0, 0)?;
+    let naive = NaiveDate::from_ymd_opt(year, month, day)?.and_hms_opt(0, 0, 0)?;
 
     // JST は UTC+9 なので -9h して UTC に変換
     const JST_OFFSET_SECS: i64 = 9 * 3600;
@@ -568,7 +589,6 @@ use crate::{Exchange, Ticker, TickerInfo};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-
 
 /// 全マスタダウンロードの各レコードをパースするための汎用型。
 /// sCLMID でレコード種別を判定し、CLMIssueMstKabu のみ抽出する。
@@ -617,15 +637,10 @@ pub fn master_record_to_ticker_info(record: &MasterRecord) -> Option<(Ticker, Ti
     // display が非 ASCII なら Ticker がパニックするので None にフォールバック
     let display = display.filter(|d| d.is_ascii());
 
-    let ticker = Ticker::new_with_display(
-        &record.issue_code,
-        Exchange::Tachibana,
-        display,
-    );
+    let ticker = Ticker::new_with_display(&record.issue_code, Exchange::Tachibana, display);
 
     let info = TickerInfo::new(
-        ticker,
-        1.0,   // min_ticksize (暫定: 呼値テーブルで正確化可能)
+        ticker, 1.0,   // min_ticksize (暫定: 呼値テーブルで正確化可能)
         100.0, // min_qty = 日本株デフォルト売買単位
         None,  // contract_size (現物なので不要)
     );
@@ -696,9 +711,7 @@ pub async fn fetch_all_master(
                             );
                             return Ok(records);
                         }
-                        if record.clm_id == "CLMIssueMstKabu"
-                            && !record.issue_code.is_empty()
-                        {
+                        if record.clm_id == "CLMIssueMstKabu" && !record.issue_code.is_empty() {
                             seen_kabu = true;
                             records.push(record);
                         } else if seen_kabu {
@@ -794,14 +807,8 @@ mod tests {
     fn login_request_serializes_user_credentials() {
         let req = LoginRequest::new("user123".to_string(), "secret!".to_string());
         let json = serde_json::to_string(&req).unwrap();
-        assert!(
-            json.contains(r#""sUserId":"user123""#),
-            "JSON: {json}"
-        );
-        assert!(
-            json.contains(r#""sPassword":"secret!""#),
-            "JSON: {json}"
-        );
+        assert!(json.contains(r#""sUserId":"user123""#), "JSON: {json}");
+        assert!(json.contains(r#""sPassword":"secret!""#), "JSON: {json}");
     }
 
     // ── Cycle 2: LoginResponse デシリアライズ ─────────────────────────────────
@@ -822,10 +829,7 @@ mod tests {
         let response: LoginResponse = serde_json::from_str(json).unwrap();
         assert_eq!(response.result_code, "0");
         assert_eq!(response.url_price, "https://virtual.example.com/price/");
-        assert_eq!(
-            response.url_event_ws,
-            "wss://virtual.example.com/event-ws/"
-        );
+        assert_eq!(response.url_event_ws, "wss://virtual.example.com/event-ws/");
     }
 
     #[test]
@@ -924,12 +928,18 @@ mod tests {
         let req = LoginRequest::new("user".to_string(), "pass".to_string());
         let base = "https://kabuka.e-shiten.jp/e_api_v4r8/auth/";
         let url = build_api_url_from(base, &req).unwrap();
-        assert!(url.starts_with(base), "URL はベース URL で始まるべき: {url}");
+        assert!(
+            url.starts_with(base),
+            "URL はベース URL で始まるべき: {url}"
+        );
         assert!(
             url.contains("CLMAuthLoginRequest"),
             "URL に CLMAuthLoginRequest が含まれるべき: {url}"
         );
-        assert!(url.contains("user"), "URL にユーザーIDが含まれるべき: {url}");
+        assert!(
+            url.contains("user"),
+            "URL にユーザーIDが含まれるべき: {url}"
+        );
     }
 
     // ── Cycle 5: MarketPriceRequest シリアライズ ──────────────────────────────
@@ -1023,7 +1033,7 @@ mod tests {
     #[test]
     fn daily_history_response_deserializes_ohlcv() {
         let json = r#"{
-            "aCLMMfdsGetMarketPriceHistory": [
+            "aCLMMfdsMarketPriceHistory": [
                 {
                     "sDate": "20240101",
                     "pDOP": "3200",
@@ -1048,7 +1058,7 @@ mod tests {
     #[test]
     fn daily_history_response_deserializes_split_adjusted_values() {
         let json = r#"{
-            "aCLMMfdsGetMarketPriceHistory": [
+            "aCLMMfdsMarketPriceHistory": [
                 {
                     "sDate": "20200101",
                     "pDOP": "6400",
@@ -1202,7 +1212,7 @@ mod tests {
                     "p_err": "",
                     "sResultCode": "0",
                     "sResultText": "",
-                    "aCLMMfdsGetMarketPriceHistory": [
+                    "aCLMMfdsMarketPriceHistory": [
                         {"sDate":"20240101","pDOP":"3200","pDHP":"3280","pDLP":"3150","pDPP":"3250","pDV":"1500000"},
                         {"sDate":"20240102","pDOP":"3250","pDHP":"3300","pDLP":"3230","pDPP":"3280","pDV":"1200000"}
                     ]
@@ -1331,7 +1341,7 @@ mod tests {
                     "p_err": "稼働時間外です",
                     "sResultCode": "0",
                     "sResultText": "",
-                    "aCLMMfdsGetMarketPriceHistory": []
+                    "aCLMMfdsMarketPriceHistory": []
                 }"#,
             )
             .create_async()
@@ -1409,27 +1419,24 @@ mod tests {
         let _ = next_p_no();
         let _ = next_p_no();
         let req = LoginRequest::new("u".into(), "p".into());
-        assert_ne!(req.p_no, "1", "p_no はハードコードの '1' であってはならない");
+        assert_ne!(
+            req.p_no, "1",
+            "p_no はハードコードの '1' であってはならない"
+        );
     }
 
     #[test]
     fn market_price_request_uses_dynamic_p_no() {
         let req1 = MarketPriceRequest::new(&["6501"]);
         let req2 = MarketPriceRequest::new(&["7203"]);
-        assert_ne!(
-            req1.p_no, req2.p_no,
-            "連続リクエストで p_no が異なるべき"
-        );
+        assert_ne!(req1.p_no, req2.p_no, "連続リクエストで p_no が異なるべき");
     }
 
     #[test]
     fn daily_history_request_uses_dynamic_p_no() {
         let req1 = DailyHistoryRequest::new("6501");
         let req2 = DailyHistoryRequest::new("7203");
-        assert_ne!(
-            req1.p_no, req2.p_no,
-            "連続リクエストで p_no が異なるべき"
-        );
+        assert_ne!(req1.p_no, req2.p_no, "連続リクエストで p_no が異なるべき");
     }
 
     // ── Cycle B1: HTTP POST 対応 ───────────────────────────────────────────
@@ -1516,7 +1523,7 @@ mod tests {
                     "p_err": "",
                     "sResultCode": "0",
                     "sResultText": "",
-                    "aCLMMfdsGetMarketPriceHistory": [
+                    "aCLMMfdsMarketPriceHistory": [
                         {"sDate":"20240101","pDOP":"3200","pDHP":"3280","pDLP":"3150","pDPP":"3250","pDV":"1500000"}
                     ]
                 }"#,
@@ -1617,7 +1624,10 @@ mod tests {
         // 2024-01-01 00:00:00 JST = 2023-12-31 15:00:00 UTC
         // UTC epoch: 2023-12-31 15:00:00 = 1704034800 seconds = 1704034800000 ms
         let expected_ms: u64 = 1704034800000;
-        assert_eq!(kline.time, expected_ms, "time は JST 深夜0時の epoch ms であるべき");
+        assert_eq!(
+            kline.time, expected_ms,
+            "time は JST 深夜0時の epoch ms であるべき"
+        );
     }
 
     // ── Cycle A4: 調整値を使用する ────────────────────────────────────────────
@@ -1641,7 +1651,10 @@ mod tests {
         let kline = daily_record_to_kline(&record, true).expect("変換できるはず");
 
         let close_f32 = kline.close.to_f32();
-        assert!((close_f32 - 3250.0).abs() < 1.0, "調整後終値は 3250 であるべき: {close_f32}");
+        assert!(
+            (close_f32 - 3250.0).abs() < 1.0,
+            "調整後終値は 3250 であるべき: {close_f32}"
+        );
     }
 
     // ── Cycle S1: TachibanaSession の JSON ラウンドトリップ ─────────────────────
@@ -1657,8 +1670,7 @@ mod tests {
         };
 
         let json = serde_json::to_string(&session).expect("serialize すべき");
-        let restored: TachibanaSession =
-            serde_json::from_str(&json).expect("deserialize すべき");
+        let restored: TachibanaSession = serde_json::from_str(&json).expect("deserialize すべき");
 
         assert_eq!(session.url_request, restored.url_request);
         assert_eq!(session.url_master, restored.url_master);
@@ -1702,7 +1714,9 @@ mod tests {
             .mock("POST", mockito::Matcher::Any)
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{"p_errno":"2","p_err":"セッション失効","sResultCode":"","sResultText":""}"#)
+            .with_body(
+                r#"{"p_errno":"2","p_err":"セッション失効","sResultCode":"","sResultText":""}"#,
+            )
             .create_async()
             .await;
 
