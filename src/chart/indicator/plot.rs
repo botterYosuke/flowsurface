@@ -318,12 +318,16 @@ where
                 // horizontal snap uses label extents
                 let highest = self.max_for_labels;
                 let lowest = self.min_for_labels;
+                let span = lowest - highest;
+                if span.abs() < f32::EPSILON {
+                    return;
+                }
                 let tick = guesstimate_ticks(highest - lowest);
 
                 let ratio = cursor_position.y / bounds.height;
-                let value = highest + ratio * (lowest - highest);
+                let value = highest + ratio * span;
                 let rounded = round_to_tick(value, tick);
-                let snap_ratio = (rounded - highest) / (lowest - highest);
+                let snap_ratio = (rounded - highest) / span;
 
                 frame.stroke(
                     &Path::line(

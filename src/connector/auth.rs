@@ -20,7 +20,10 @@ pub fn get_session() -> Option<TachibanaSession> {
 }
 
 /// セッションを保存する。
+/// EVENT I/F WebSocket URL も exchange crate 側に設定する。
 pub fn store_session(session: TachibanaSession) {
+    exchange::adapter::tachibana::set_event_ws_url(session.url_event_ws.clone());
+    exchange::adapter::tachibana::set_event_http_url(session.url_event.clone());
     if let Ok(mut guard) = SESSION.write() {
         *guard = Some(session);
     }

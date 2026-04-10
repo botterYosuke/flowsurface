@@ -21,10 +21,21 @@
       "Bash(tee /tmp/flowsurface_debug.log)",
       "Read(//tmp/**)",
       "Bash(echo \"PID: $!\")",
-      "Bash(tee /tmp/flowsurface_verify.log)"
+      "Bash(tee /tmp/flowsurface_verify.log)",
+      "Bash(git add:*)",
+      "Bash(git commit -m ':*)",
+      "Bash(find /c/Users/sasai/Documents/flowsurface -name \"*.md\" -path \"*/docs/plan/*\" -exec ls -la {} \\\\;)",
+      "Bash(find c:/Users/sasai/Documents/flowsurface -name \"*.rs\" -type f -exec grep -l \"Tachibana.*WebSocket\\\\|Tachibana.*depth\\\\|Tachibana.*board\\\\|板情報.*WebSocket\" {} \\\\;)",
+      "Bash(echo \"Started PID: $!\")",
+      "Bash(python -c \"from urllib.parse import urlparse; url='wss://demo-kabuka.e-shiten.jp/e_api_v4r8/event_ws/OTY2MDIzNjE2MTAwNC0xMTYtNTM4NzM=/?p_rid=22&p_board_no=1000&p_gyou_no=1&p_issue_code=7203&p_mkt_code=00&p_eno=0&p_evt_cmd=ST,KP,FD'; r=urlparse\\(url\\); print\\('path:', r.path\\); print\\('query:', r.query\\)\")",
+      "Bash(echo \"EXIT CODE: $?\")",
+      "Bash(tee /tmp/flowsurface_full.log)",
+      "Bash(echo \"EXIT: $?\")",
+      "Bash(tee /tmp/flowsurface_test.log)"
     ],
     "additionalDirectories": [
-      "C:\\Users\\sasai\\Documents\\marimo\\.claude\\plans"
+      "C:\\Users\\sasai\\Documents\\marimo\\.claude\\plans",
+      "\\tmp"
     ]
   }
 }

@@ -800,6 +800,328 @@ pub async fn cached_ticker_metadata() -> HashMap<Ticker, Option<TickerInfo>> {
     out
 }
 
+// ── EVENT I/F パーサー ───────────────────────────────────────────────────────
+//
+// EVENT I/F WebSocket はカスタムバイナリ区切りフォーマット:
+//   SOH (\x01) = フィールド区切り
+//   STX (\x02) = カラム名:値 区切り
+//   ETX (\x03) = 値のサブ区切り（複数値を持つフィールド内）
+// エンコーディングは ASCII（REST の Shift-JIS とは異なる）。
+
+use crate::depth::{DeOrder, DepthPayload};
+use crate::{Price, Trade};
+
+/// EVENT I/F の1フレームをパースし、(カラム名, 値) のペア列に分解する。
+pub fn parse_event_frame(data: &str) -> Vec<(&str, &str)> {
+    data.split('\x01')
+        .filter(|r| !r.is_empty())
+        .filter_map(|record| {
+            let mut parts = record.splitn(2, '\x02');
+            match (parts.next(), parts.next()) {
+                (Some(col), Some(val)) if !col.is_empty() => Some((col, val)),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+/// パース済みフィールドから板情報に変換する。
+/// EVENT I/F のフィールド名は `p_{行番号}_{情報コード}` 形式。
+/// 売気配: GAP1(最良)〜GAP10(上位) + GAV1〜GAV10
+/// 買気配: GBP1(最良)〜GBP10(下位) + GBV1〜GBV10
+pub fn fields_to_depth(fields: &[(&str, &str)]) -> Option<DepthPayload> {
+    /// フィールド名の末尾が `_suffix` と一致するか（例: `p_1_GAP1` → suffix `_QAP1`）
+    fn find_val_suffix(fields: &[(&str, &str)], suffix: &str) -> Option<f32> {
+        fields
+            .iter()
+            .find(|(k, _)| k.ends_with(suffix))
+            .and_then(|(_, v)| {
+                if *v == "*" || v.is_empty() {
+                    None
+                } else {
+                    v.parse().ok()
+                }
+            })
+    }
+
+    // FD コマンドでのみ板情報を処理
+    let cmd = fields.iter().find(|(k, _)| *k == "p_cmd").map(|(_, v)| *v);
+    if cmd != Some("FD") {
+        return None;
+    }
+
+    let mut asks = Vec::new();
+    let mut bids = Vec::new();
+
+    for i in 1..=10 {
+        let price_suffix = format!("_GAP{i}");
+        let qty_suffix = format!("_GAV{i}");
+        if let (Some(price), Some(qty)) = (
+            find_val_suffix(fields, &price_suffix),
+            find_val_suffix(fields, &qty_suffix),
+        ) {
+            asks.push(DeOrder { price, qty });
+        }
+    }
+
+    for i in 1..=10 {
+        let price_suffix = format!("_GBP{i}");
+        let qty_suffix = format!("_GBV{i}");
+        if let (Some(price), Some(qty)) = (
+            find_val_suffix(fields, &price_suffix),
+            find_val_suffix(fields, &qty_suffix),
+        ) {
+            bids.push(DeOrder { price, qty });
+        }
+    }
+
+    if asks.is_empty() && bids.is_empty() {
+        return None;
+    }
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+
+    Some(DepthPayload {
+        last_update_id: now_ms,
+        time: now_ms,
+        bids,
+        asks,
+    })
+}
+
+/// パース済みフィールドから Trade に変換する。
+/// EVENT I/F フィールド名: `p_{行番号}_{情報コード}` 形式。
+/// DPP = 約定価格, DV = 約定数量, DYSS = 売買区分 ("1"=売)
+/// `_DPP` で末尾マッチ（`_XDPP` 等との誤マッチを防ぐため `_` 付き）。
+pub fn fields_to_trade(fields: &[(&str, &str)]) -> Option<Trade> {
+    let get_suffix = |suffix: &str| -> Option<&str> {
+        fields
+            .iter()
+            .find(|(k, _)| k.ends_with(suffix))
+            .map(|(_, v)| *v)
+    };
+
+    // ST（歩み値）コマンドでのみ有効。FD/KP では Trade を生成しない。
+    let cmd = get_suffix("p_cmd");
+    if cmd != Some("ST") {
+        return None;
+    }
+
+    let price_str = get_suffix("_DPP")?;
+    if price_str == "*" || price_str.is_empty() {
+        return None;
+    }
+    let price: f32 = price_str.parse().ok()?;
+
+    let qty_str = get_suffix("_DV")?;
+    if qty_str == "*" || qty_str.is_empty() {
+        return None;
+    }
+    let qty: f32 = qty_str.parse().ok()?;
+
+    let is_sell = get_suffix("_DYSS").map(|v| v == "1").unwrap_or(false);
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+
+    Some(Trade {
+        time: now_ms,
+        is_sell,
+        price: Price::from_f32(price),
+        qty: Qty::from_f32(qty),
+    })
+}
+
+// ── EVENT I/F WebSocket 接続 ─────────────────────────────────────────────────
+
+use crate::adapter::{Event, StreamKind, StreamTicksize};
+use crate::connect::channel;
+use crate::depth::{DepthUpdate, LocalDepthCache};
+use crate::PushFrequency;
+use futures::Stream;
+use std::time::Duration;
+
+/// EVENT I/F URL を exchange crate 内で保持する。
+/// HTTP Long-polling 用の url_event と WebSocket 用の url_event_ws を両方保持。
+/// auth.rs の store_session() から set_event_urls() 経由で設定される。
+static EVENT_HTTP_URL: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
+static EVENT_WS_URL: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
+
+/// セッション取得時に EVENT I/F URL を設定する。
+pub fn set_event_ws_url(url: String) {
+    if let Ok(mut guard) = EVENT_WS_URL.write() {
+        *guard = Some(url);
+    }
+}
+
+/// セッション取得時に EVENT I/F HTTP URL を設定する。
+pub fn set_event_http_url(url: String) {
+    if let Ok(mut guard) = EVENT_HTTP_URL.write() {
+        *guard = Some(url);
+    }
+}
+
+fn get_event_http_url() -> Option<String> {
+    EVENT_HTTP_URL.read().ok()?.clone()
+}
+
+fn get_event_ws_url() -> Option<String> {
+    EVENT_WS_URL.read().ok()?.clone()
+}
+
+/// EVENT I/F の接続パラメータを構築する。
+/// 公式サンプル準拠: パラメータ順序は固定（順番の変更は不可）。
+/// p_rid → p_board_no → p_gyou_no → p_mkt_code → p_eno → p_evt_cmd → p_issue_code
+fn build_event_params(issue_code: &str, market_code: &str) -> String {
+    format!(
+        "p_rid=22&p_board_no=1000&p_gyou_no=1&p_mkt_code={}&p_eno=0&p_evt_cmd=ST,KP,FD&p_issue_code={}",
+        market_code,
+        issue_code,
+    )
+}
+
+/// EVENT I/F に接続し、板情報・歩み値を統合した Event ストリームを返す。
+///
+/// HTTP Long-polling（`sUrlEvent`）で接続する。
+/// 公式サンプル `e_api_sample_v4r8.py` の HTTP ストリーミング方式:
+///   requests.session().get(url, stream=True).iter_lines()
+///
+/// `trade_stream` は空のまま。本ストリームで TradesReceived も発行する。
+pub fn connect_event_stream(
+    ticker_info: TickerInfo,
+    push_freq: PushFrequency,
+) -> impl Stream<Item = Event> {
+    channel(100, move |mut output| async move {
+        use futures::SinkExt;
+
+        log::info!("Tachibana EVENT I/F stream started for {:?}", ticker_info.ticker);
+
+        let exchange = Exchange::Tachibana;
+        let mut orderbook = LocalDepthCache::default();
+
+        let stream_kind_depth = StreamKind::Depth {
+            ticker_info,
+            depth_aggr: StreamTicksize::default(),
+            push_freq,
+        };
+        let stream_kind_trades = StreamKind::Trades { ticker_info };
+
+        loop {
+            let event_url = match get_event_http_url() {
+                Some(url) => url,
+                None => {
+                    log::warn!("Tachibana EVENT I/F URL not available, waiting...");
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                    continue;
+                }
+            };
+
+            let (issue_code, _) = ticker_info.ticker.to_full_symbol_and_type();
+            let params = build_event_params(&issue_code, "00");
+            let url = format!("{}?{}", event_url, params);
+            log::info!("Tachibana EVENT I/F connecting: issue={}", issue_code);
+
+            let client = reqwest::Client::new();
+            match client.get(&url).send().await {
+                Ok(response) => {
+                    if !response.status().is_success() {
+                        log::error!("Tachibana EVENT I/F HTTP error: status={}", response.status());
+                        let _ = output
+                            .send(Event::Disconnected(exchange, format!("HTTP {}", response.status())))
+                            .await;
+                        tokio::time::sleep(Duration::from_secs(3)).await;
+                        continue;
+                    }
+
+                    log::info!("Tachibana EVENT I/F connected");
+                    let _ = output.send(Event::Connected(exchange)).await;
+
+                    // ストリーミングレスポンスを行ごとに読む
+                    use futures::StreamExt;
+                    let mut byte_stream = response.bytes_stream();
+
+                    let mut line_buf = String::new();
+
+                    while let Some(chunk_result) = byte_stream.next().await {
+                        match chunk_result {
+                            Ok(chunk) => {
+                                // ASCII デコード（公式サンプル: p_rec.decode('ascii')）
+                                let text = String::from_utf8_lossy(&chunk);
+                                // チャンクは行境界を跨ぐ可能性があるため蓄積して行分割
+                                line_buf.push_str(&text);
+
+                                // 改行で分割
+                                while let Some(newline_pos) = line_buf.find('\n') {
+                                    let line: String = line_buf.drain(..=newline_pos).collect();
+                                    let line = line.trim();
+                                    if line.is_empty() {
+                                        continue;
+                                    }
+
+                                    let fields = parse_event_frame(line);
+                                    if fields.is_empty() {
+                                        continue;
+                                    }
+                                    if let Some(depth_payload) = fields_to_depth(&fields) {
+                                        let time = depth_payload.time;
+                                        orderbook.update(
+                                            DepthUpdate::Snapshot(depth_payload),
+                                            ticker_info.min_ticksize,
+                                        );
+                                        let _ = output
+                                            .send(Event::DepthReceived(
+                                                stream_kind_depth,
+                                                time,
+                                                orderbook.depth.clone(),
+                                            ))
+                                            .await;
+                                    }
+
+                                    if let Some(trade) = fields_to_trade(&fields) {
+                                        let time = trade.time;
+                                        let _ = output
+                                            .send(Event::TradesReceived(
+                                                stream_kind_trades,
+                                                time,
+                                                Box::new([trade]),
+                                            ))
+                                            .await;
+                                    }
+                                }
+
+                                // 残りの未完了行は line_buf に残る（次のチャンクで処理）
+                            }
+                            Err(e) => {
+                                log::error!("Tachibana EVENT I/F stream error: {}", e);
+                                break;
+                            }
+                        }
+                    }
+
+                    // ストリーム終了
+                    log::warn!("Tachibana EVENT I/F stream ended, reconnecting...");
+                    let _ = output
+                        .send(Event::Disconnected(exchange, "Stream ended".to_string()))
+                        .await;
+                }
+                Err(e) => {
+                    log::error!("Tachibana EVENT I/F connect failed: {}", e);
+                    let _ = output
+                        .send(Event::Disconnected(exchange, e.to_string()))
+                        .await;
+                }
+            }
+
+            tokio::time::sleep(Duration::from_secs(3)).await;
+        }
+    })
+}
+
 // ── テスト ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1788,5 +2110,830 @@ mod tests {
         let client = reqwest::Client::new();
         let result = validate_session(&client, &session).await;
         assert!(result.is_err(), "未知の p_errno は Err を返すべき");
+    }
+
+    // ── EVENT I/F パーサーテスト ────────────────────────────────────────────
+
+    #[test]
+    fn parse_event_frame_basic() {
+        // 実際のデータ形式: p_{行番号}_{情報コード}
+        let data = "\x01p_1_DPP\x023250\x01p_1_GAP1\x02500\x01p_1_GBP1\x023249";
+        let fields = parse_event_frame(data);
+        assert_eq!(fields.len(), 3);
+        assert_eq!(fields[0], ("p_1_DPP", "3250"));
+        assert_eq!(fields[1], ("p_1_GAP1", "500"));
+        assert_eq!(fields[2], ("p_1_GBP1", "3249"));
+    }
+
+    #[test]
+    fn parse_event_frame_empty_data() {
+        let fields = parse_event_frame("");
+        assert!(fields.is_empty());
+    }
+
+    #[test]
+    fn parse_event_frame_no_stx_skips_record() {
+        let data = "\x01novalue\x01pDPP\x023250";
+        let fields = parse_event_frame(data);
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0], ("pDPP", "3250"));
+    }
+
+    #[test]
+    fn parse_event_frame_empty_column_name_skipped() {
+        let data = "\x01\x02value\x01pDPP\x023250";
+        let fields = parse_event_frame(data);
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0], ("pDPP", "3250"));
+    }
+
+    #[test]
+    fn fields_to_depth_full_10_levels() {
+        // 実際のデータ形式: p_{行番号}_{情報コード}、p_cmd=FD 必須
+        let mut data = String::from("\x01p_cmd\x02FD");
+        for i in 1..=10 {
+            let ask_price = 3250 + i;
+            let bid_price = 3250 - i;
+            data.push_str(&format!(
+                "\x01p_1_GAP{i}\x02{ask_price}\x01p_1_GAV{i}\x02{}\x01p_1_GBP{i}\x02{bid_price}\x01p_1_GBV{i}\x02{}",
+                (i * 100),
+                (i * 200),
+            ));
+        }
+        let fields = parse_event_frame(&data);
+        let depth = fields_to_depth(&fields).expect("板情報が返るべき");
+        assert_eq!(depth.asks.len(), 10);
+        assert_eq!(depth.bids.len(), 10);
+        assert_eq!(depth.asks[0].price, 3251.0);
+        assert_eq!(depth.asks[0].qty, 100.0);
+        assert_eq!(depth.bids[0].price, 3249.0);
+        assert_eq!(depth.bids[0].qty, 200.0);
+    }
+
+    #[test]
+    fn fields_to_depth_partial_missing_levels() {
+        let data = "\x01p_cmd\x02FD\x01p_1_GAP1\x023251\x01p_1_GAV1\x02100\x01p_1_GBP1\x023249\x01p_1_GBV1\x02200";
+        let fields = parse_event_frame(data);
+        let depth = fields_to_depth(&fields).expect("部分的な板情報でも返るべき");
+        assert_eq!(depth.asks.len(), 1);
+        assert_eq!(depth.bids.len(), 1);
+    }
+
+    #[test]
+    fn fields_to_depth_returns_none_for_no_depth_data() {
+        // p_cmd=KP なので板情報は None
+        let data = "\x01p_cmd\x02KP\x01p_1_DPP\x023250\x01p_1_DV\x02500";
+        let fields = parse_event_frame(data);
+        assert!(fields_to_depth(&fields).is_none());
+    }
+
+    #[test]
+    fn fields_to_depth_star_values_skipped() {
+        let data = "\x01p_cmd\x02FD\x01p_1_GAP1\x02*\x01p_1_GAV1\x02100\x01p_1_GBP1\x023249\x01p_1_GBV1\x02200";
+        let fields = parse_event_frame(data);
+        let depth = fields_to_depth(&fields).expect("買気配のみでも返るべき");
+        assert_eq!(depth.asks.len(), 0);
+        assert_eq!(depth.bids.len(), 1);
+    }
+
+    #[test]
+    fn fields_to_trade_basic() {
+        let data = "\x01p_cmd\x02ST\x01p_1_DPP\x023250\x01p_1_DV\x02500\x01p_1_DYSS\x021";
+        let fields = parse_event_frame(data);
+        let trade = fields_to_trade(&fields).expect("Trade が返るべき");
+        assert_eq!(trade.price.to_f32(), 3250.0);
+        assert_eq!(trade.qty.to_f32_lossy(), 500.0);
+        assert!(trade.is_sell);
+    }
+
+    #[test]
+    fn fields_to_trade_buy_side() {
+        let data = "\x01p_cmd\x02ST\x01p_1_DPP\x023250\x01p_1_DV\x02300\x01p_1_DYSS\x023";
+        let fields = parse_event_frame(data);
+        let trade = fields_to_trade(&fields).expect("Trade が返るべき");
+        assert!(!trade.is_sell);
+    }
+
+    #[test]
+    fn fields_to_trade_star_price_returns_none() {
+        let data = "\x01p_cmd\x02ST\x01p_1_DPP\x02*\x01p_1_DV\x02500";
+        let fields = parse_event_frame(data);
+        assert!(fields_to_trade(&fields).is_none());
+    }
+
+    #[test]
+    fn fields_to_trade_missing_qty_returns_none() {
+        let data = "\x01p_cmd\x02ST\x01p_1_DPP\x023250";
+        let fields = parse_event_frame(data);
+        assert!(fields_to_trade(&fields).is_none());
+    }
+
+    #[test]
+    fn fields_to_trade_returns_none_for_fd_cmd() {
+        // p_cmd=FD なので Trade は None
+        let data = "\x01p_cmd\x02FD\x01p_1_DPP\x023250\x01p_1_DV\x02500";
+        let fields = parse_event_frame(data);
+        assert!(fields_to_trade(&fields).is_none());
+    }
+
+    #[test]
+    fn build_event_params_format() {
+        let params = build_event_params("6501", "00");
+        assert!(params.contains("p_issue_code=6501"));
+        assert!(params.contains("p_mkt_code=00"));
+        assert!(params.contains("p_evt_cmd=ST,KP,FD"));
+        assert!(params.contains("p_board_no=1000"));
+        assert!(params.contains("p_eno=0"));
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // 追加テスト: EVENT I/F パーサー堅牢性
+    // ══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn parse_event_frame_etx_sub_delimiter_preserved_in_value() {
+        // ETX (\x03) は値のサブ区切り。値文字列にそのまま含まれる
+        let data = "\x01p_1_QAS\x020101\x03extra";
+        let fields = parse_event_frame(data);
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].0, "p_1_QAS");
+        assert_eq!(fields[0].1, "0101\x03extra");
+    }
+
+    #[test]
+    fn parse_event_frame_multiple_stx_uses_first_split_only() {
+        // STX が値の中にもある場合、最初の STX でのみ分割（splitn(2)）
+        let data = "\x01p_1_DPP\x023250\x02extra";
+        let fields = parse_event_frame(data);
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].0, "p_1_DPP");
+        assert_eq!(fields[0].1, "3250\x02extra");
+    }
+
+    #[test]
+    fn parse_event_frame_real_69_field_fd_frame() {
+        // 計画書セクション2.6 記載の実データフィールド69件を模擬
+        let mut data = String::new();
+        let field_names = [
+            "p_no", "p_date", "p_cmd",
+            "p_1_AV", "p_1_BV", "p_1_DHF", "p_1_DHP", "p_1_DHP:T", "p_1_DJ",
+            "p_1_DLF", "p_1_DLP", "p_1_DLP:T", "p_1_DOP", "p_1_DOP:T",
+            "p_1_DPG", "p_1_DPP", "p_1_DPP:T", "p_1_DV", "p_1_DYRP", "p_1_DYWP",
+        ];
+        for (i, name) in field_names.iter().enumerate() {
+            data.push_str(&format!("\x01{}\x02val{}", name, i));
+        }
+        // GAP1..10, GAV1..10, GBP1..10, GBV1..10 = 40 fields
+        for i in 1..=10 {
+            data.push_str(&format!("\x01p_1_GAP{}\x02{}", i, 3319 + i));
+            data.push_str(&format!("\x01p_1_GAV{}\x02{}", i, 10000 + i * 100));
+            data.push_str(&format!("\x01p_1_GBP{}\x02{}", i, 3318 - i));
+            data.push_str(&format!("\x01p_1_GBV{}\x02{}", i, 6300 + i * 50));
+        }
+        // 残りフィールド
+        for name in &["p_1_LISS", "p_1_PRP", "p_1_QAP", "p_1_QAS", "p_1_QBP", "p_1_QBS", "p_1_QOV", "p_1_QUV", "p_1_VWAP"] {
+            data.push_str(&format!("\x01{}\x021234", name));
+        }
+        let fields = parse_event_frame(&data);
+        // 20 + 40 + 9 = 69
+        assert_eq!(fields.len(), 69, "69フィールドすべてパースされるべき");
+    }
+
+    #[test]
+    fn parse_event_frame_colon_in_field_name() {
+        // 実データでは p_1_DPP:T のようなコロン付きフィールド名がある
+        let data = "\x01p_1_DPP:T\x0215:00:00";
+        let fields = parse_event_frame(data);
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].0, "p_1_DPP:T");
+        assert_eq!(fields[0].1, "15:00:00");
+    }
+
+    #[test]
+    fn parse_event_frame_consecutive_soh_skips_empty_records() {
+        let data = "\x01\x01p_1_DPP\x023250\x01\x01";
+        let fields = parse_event_frame(data);
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0], ("p_1_DPP", "3250"));
+    }
+
+    #[test]
+    fn parse_event_frame_value_is_empty_string() {
+        let data = "\x01p_1_DPP\x02";
+        let fields = parse_event_frame(data);
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0], ("p_1_DPP", ""));
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // 追加テスト: fields_to_depth 堅牢性
+    // ══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn fields_to_depth_non_contiguous_levels() {
+        // GAP1 あり、GAP2 欠損、GAP3 あり → 2件のみ
+        let data = "\x01p_cmd\x02FD\
+                     \x01p_1_GAP1\x023320\x01p_1_GAV1\x02100\
+                     \x01p_1_GAP3\x023322\x01p_1_GAV3\x02300\
+                     \x01p_1_GBP1\x023318\x01p_1_GBV1\x02200";
+        let fields = parse_event_frame(data);
+        let depth = fields_to_depth(&fields).expect("板情報が返るべき");
+        assert_eq!(depth.asks.len(), 2, "GAP1+GAP3 の2件のみ");
+        assert_eq!(depth.bids.len(), 1);
+        assert_eq!(depth.asks[0].price, 3320.0);
+        assert_eq!(depth.asks[1].price, 3322.0);
+    }
+
+    #[test]
+    fn fields_to_depth_zero_qty_is_valid() {
+        // 数量0は「板が消えた」意味で有効な値
+        let data = "\x01p_cmd\x02FD\
+                     \x01p_1_GAP1\x023320\x01p_1_GAV1\x020\
+                     \x01p_1_GBP1\x023318\x01p_1_GBV1\x020";
+        let fields = parse_event_frame(data);
+        let depth = fields_to_depth(&fields).expect("0数量でも板情報は返るべき");
+        assert_eq!(depth.asks[0].qty, 0.0);
+        assert_eq!(depth.bids[0].qty, 0.0);
+    }
+
+    #[test]
+    fn fields_to_depth_large_over_under_quantities() {
+        // OVER/UNDER（QOV/QUV）は板集計量。数百万の値でもパースエラーにならない
+        let data = "\x01p_cmd\x02FD\
+                     \x01p_1_GAP1\x023319\x01p_1_GAV1\x0210000\
+                     \x01p_1_GBP1\x023318\x01p_1_GBV1\x026300\
+                     \x01p_1_QOV\x024218600\x01p_1_QUV\x022520200";
+        let fields = parse_event_frame(data);
+        let depth = fields_to_depth(&fields).expect("大きな値でも板情報が返るべき");
+        assert_eq!(depth.asks.len(), 1);
+        assert_eq!(depth.bids.len(), 1);
+    }
+
+    #[test]
+    fn fields_to_depth_returns_none_when_no_cmd_field() {
+        // p_cmd フィールド自体が無い場合
+        let data = "\x01p_1_GAP1\x023320\x01p_1_GAV1\x02100";
+        let fields = parse_event_frame(data);
+        assert!(fields_to_depth(&fields).is_none(), "p_cmd なしでは None");
+    }
+
+    #[test]
+    fn fields_to_depth_returns_none_for_st_cmd() {
+        let data = "\x01p_cmd\x02ST\x01p_1_GAP1\x023320\x01p_1_GAV1\x02100";
+        let fields = parse_event_frame(data);
+        assert!(fields_to_depth(&fields).is_none(), "ST コマンドでは板情報を返さない");
+    }
+
+    #[test]
+    fn fields_to_depth_empty_value_skipped() {
+        let data = "\x01p_cmd\x02FD\
+                     \x01p_1_GAP1\x02\x01p_1_GAV1\x02100\
+                     \x01p_1_GBP1\x023318\x01p_1_GBV1\x02200";
+        let fields = parse_event_frame(data);
+        let depth = fields_to_depth(&fields).expect("買気配のみ返るべき");
+        assert_eq!(depth.asks.len(), 0, "空の価格はスキップ");
+        assert_eq!(depth.bids.len(), 1);
+    }
+
+    #[test]
+    fn fields_to_depth_price_without_matching_qty_skipped() {
+        // GAP1 はあるが GAV1 が無い → ペアにならないのでスキップ
+        let data = "\x01p_cmd\x02FD\x01p_1_GAP1\x023320\x01p_1_GBP1\x023318\x01p_1_GBV1\x02200";
+        let fields = parse_event_frame(data);
+        let depth = fields_to_depth(&fields).expect("買気配のみ返るべき");
+        assert_eq!(depth.asks.len(), 0, "数量ペアなし売気配はスキップ");
+        assert_eq!(depth.bids.len(), 1);
+    }
+
+    #[test]
+    fn fields_to_depth_preserves_index_order() {
+        // asks は GAP1→GAP10 の順序で格納されることを確認
+        let mut data = String::from("\x01p_cmd\x02FD");
+        for i in 1..=5 {
+            let p = 3320 + i;
+            data.push_str(&format!("\x01p_1_GAP{i}\x02{p}\x01p_1_GAV{i}\x02100"));
+        }
+        let fields = parse_event_frame(&data);
+        let depth = fields_to_depth(&fields).unwrap();
+        for i in 0..4 {
+            assert!(
+                depth.asks[i].price < depth.asks[i + 1].price,
+                "asks はインデックス順（価格昇順）であるべき: idx={i}"
+            );
+        }
+    }
+
+    #[test]
+    fn fields_to_depth_invalid_number_skipped() {
+        let data = "\x01p_cmd\x02FD\
+                     \x01p_1_GAP1\x02abc\x01p_1_GAV1\x02100\
+                     \x01p_1_GBP1\x023318\x01p_1_GBV1\x02200";
+        let fields = parse_event_frame(data);
+        let depth = fields_to_depth(&fields).expect("有効な買気配のみ返るべき");
+        assert_eq!(depth.asks.len(), 0, "数値でない価格はスキップ");
+        assert_eq!(depth.bids.len(), 1);
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // 追加テスト: fields_to_trade 堅牢性
+    // ══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn fields_to_trade_missing_dyss_defaults_to_buy() {
+        // DYSS フィールドなし → is_sell = false（買いとみなす）
+        let data = "\x01p_cmd\x02ST\x01p_1_DPP\x023250\x01p_1_DV\x02500";
+        let fields = parse_event_frame(data);
+        let trade = fields_to_trade(&fields).expect("DYSS なしでも Trade が返るべき");
+        assert!(!trade.is_sell, "DYSS なしはデフォルト買い");
+    }
+
+    #[test]
+    fn fields_to_trade_returns_none_for_kp_cmd() {
+        let data = "\x01p_cmd\x02KP\x01p_1_DPP\x023250\x01p_1_DV\x02500";
+        let fields = parse_event_frame(data);
+        assert!(fields_to_trade(&fields).is_none(), "KP コマンドでは Trade を返さない");
+    }
+
+    #[test]
+    fn fields_to_trade_returns_none_when_no_cmd() {
+        let data = "\x01p_1_DPP\x023250\x01p_1_DV\x02500";
+        let fields = parse_event_frame(data);
+        assert!(fields_to_trade(&fields).is_none(), "p_cmd なしでは None");
+    }
+
+    #[test]
+    fn fields_to_trade_empty_price_returns_none() {
+        let data = "\x01p_cmd\x02ST\x01p_1_DPP\x02\x01p_1_DV\x02500";
+        let fields = parse_event_frame(data);
+        assert!(fields_to_trade(&fields).is_none(), "空価格は None");
+    }
+
+    #[test]
+    fn fields_to_trade_empty_qty_returns_none() {
+        let data = "\x01p_cmd\x02ST\x01p_1_DPP\x023250\x01p_1_DV\x02";
+        let fields = parse_event_frame(data);
+        assert!(fields_to_trade(&fields).is_none(), "空数量は None");
+    }
+
+    #[test]
+    fn fields_to_trade_invalid_price_returns_none() {
+        let data = "\x01p_cmd\x02ST\x01p_1_DPP\x02abc\x01p_1_DV\x02500";
+        let fields = parse_event_frame(data);
+        assert!(fields_to_trade(&fields).is_none(), "非数値価格は None");
+    }
+
+    #[test]
+    fn fields_to_trade_suffix_xdpp_does_not_match_dpp() {
+        // p_1_XDPP は ends_with("_DPP") = false（末尾は "XDPP"）
+        // よって _DPP フィールドが見つからず Trade は None
+        let data = "\x01p_cmd\x02ST\x01p_1_XDPP\x029999\x01p_1_DV\x02500";
+        let fields = parse_event_frame(data);
+        let trade = fields_to_trade(&fields);
+        assert!(trade.is_none(), "_XDPP は _DPP 末尾マッチにヒットしない（安全）");
+    }
+
+    #[test]
+    fn fields_to_trade_large_quantity() {
+        // 出来高が数千万の場合でもパースできる
+        let data = "\x01p_cmd\x02ST\x01p_1_DPP\x023319\x01p_1_DV\x0216930900\x01p_1_DYSS\x021";
+        let fields = parse_event_frame(data);
+        let trade = fields_to_trade(&fields).expect("大きな数量でも Trade が返るべき");
+        assert_eq!(trade.qty.to_f32_lossy(), 16930900.0);
+    }
+
+    #[test]
+    fn fields_to_trade_fractional_price() {
+        // 小数点価格（ETF など）
+        let data = "\x01p_cmd\x02ST\x01p_1_DPP\x021234.5\x01p_1_DV\x02100";
+        let fields = parse_event_frame(data);
+        let trade = fields_to_trade(&fields).expect("小数価格でも Trade が返るべき");
+        assert!((trade.price.to_f32() - 1234.5).abs() < 0.1);
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // 追加テスト: build_event_params パラメータ順序
+    // ══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn build_event_params_preserves_mandatory_order() {
+        // 公式サンプル準拠: p_rid が先頭、p_issue_code が最後（順番変更不可）
+        let params = build_event_params("7203", "00");
+        let parts: Vec<&str> = params.split('&').collect();
+        assert!(
+            parts[0].starts_with("p_rid="),
+            "先頭は p_rid であるべき: {:?}",
+            parts[0]
+        );
+        assert!(
+            parts.last().unwrap().starts_with("p_issue_code="),
+            "最後は p_issue_code であるべき: {:?}",
+            parts.last()
+        );
+        // 全7パラメータ
+        assert_eq!(parts.len(), 7, "パラメータは7個であるべき");
+    }
+
+    #[test]
+    fn build_event_params_different_market_code() {
+        let params = build_event_params("7203", "01");
+        assert!(params.contains("p_mkt_code=01"));
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // 追加テスト: master_record_to_ticker_info
+    // ══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn master_record_to_ticker_info_basic_kabu_record() {
+        let record = MasterRecord {
+            clm_id: "CLMIssueMstKabu".to_string(),
+            issue_code: "7203".to_string(),
+            issue_name: "トヨタ自動車".to_string(),
+            issue_name_short: "トヨタ".to_string(),
+            issue_name_kana: "トヨタジドウシャ".to_string(),
+            issue_name_english: "TOYOTA MOTOR".to_string(),
+            primary_market: "00".to_string(),
+            sector_code: "3050".to_string(),
+            sector_name: "輸送用機器".to_string(),
+        };
+        let (ticker, info) = master_record_to_ticker_info(&record).expect("変換できるべき");
+        let (symbol, _) = ticker.to_full_symbol_and_type();
+        assert_eq!(symbol, "7203");
+        assert_eq!(info.ticker, ticker);
+    }
+
+    #[test]
+    fn master_record_to_ticker_info_non_kabu_returns_none() {
+        let record = MasterRecord {
+            clm_id: "CLMIssueMstFuture".to_string(),
+            issue_code: "1234".to_string(),
+            issue_name: String::new(),
+            issue_name_short: String::new(),
+            issue_name_kana: String::new(),
+            issue_name_english: "SOME FUTURE".to_string(),
+            primary_market: String::new(),
+            sector_code: String::new(),
+            sector_name: String::new(),
+        };
+        assert!(master_record_to_ticker_info(&record).is_none(), "非 CLMIssueMstKabu は None");
+    }
+
+    #[test]
+    fn master_record_to_ticker_info_empty_issue_code_returns_none() {
+        let record = MasterRecord {
+            clm_id: "CLMIssueMstKabu".to_string(),
+            issue_code: String::new(),
+            issue_name: String::new(),
+            issue_name_short: String::new(),
+            issue_name_kana: String::new(),
+            issue_name_english: "SOME STOCK".to_string(),
+            primary_market: String::new(),
+            sector_code: String::new(),
+            sector_name: String::new(),
+        };
+        assert!(master_record_to_ticker_info(&record).is_none(), "空 issue_code は None");
+    }
+
+    #[test]
+    fn master_record_to_ticker_info_empty_english_name_uses_no_display() {
+        let record = MasterRecord {
+            clm_id: "CLMIssueMstKabu".to_string(),
+            issue_code: "9999".to_string(),
+            issue_name: "テスト銘柄".to_string(),
+            issue_name_short: String::new(),
+            issue_name_kana: String::new(),
+            issue_name_english: String::new(), // 英語名なし
+            primary_market: String::new(),
+            sector_code: String::new(),
+            sector_name: String::new(),
+        };
+        let result = master_record_to_ticker_info(&record);
+        assert!(result.is_some(), "英語名なしでも変換可能であるべき");
+    }
+
+    #[test]
+    fn master_record_to_ticker_info_long_english_name_truncated() {
+        let record = MasterRecord {
+            clm_id: "CLMIssueMstKabu".to_string(),
+            issue_code: "8001".to_string(),
+            issue_name: String::new(),
+            issue_name_short: String::new(),
+            issue_name_kana: String::new(),
+            issue_name_english: "ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890".to_string(), // 36文字 > 28
+            primary_market: String::new(),
+            sector_code: String::new(),
+            sector_name: String::new(),
+        };
+        // 28文字に切り捨てられてもパニックしない
+        let result = master_record_to_ticker_info(&record);
+        assert!(result.is_some(), "長い名前は切り捨てて変換可能であるべき");
+    }
+
+    #[test]
+    fn master_record_to_ticker_info_non_ascii_english_name_falls_back() {
+        let record = MasterRecord {
+            clm_id: "CLMIssueMstKabu".to_string(),
+            issue_code: "8002".to_string(),
+            issue_name: String::new(),
+            issue_name_short: String::new(),
+            issue_name_kana: String::new(),
+            issue_name_english: "日本語名".to_string(), // 非ASCII
+            primary_market: String::new(),
+            sector_code: String::new(),
+            sector_name: String::new(),
+        };
+        // 非ASCII の display_symbol は None にフォールバック → パニックしない
+        let result = master_record_to_ticker_info(&record);
+        assert!(result.is_some(), "非ASCII英語名でもパニックせず変換可能であるべき");
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // 追加テスト: Event URL 管理
+    // ══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn set_and_get_event_http_url() {
+        set_event_http_url("https://event.test/streaming/".to_string());
+        let url = get_event_http_url().expect("設定した URL が取得できるべき");
+        assert_eq!(url, "https://event.test/streaming/");
+    }
+
+    #[test]
+    fn set_and_get_event_ws_url() {
+        set_event_ws_url("wss://ws.test/event/".to_string());
+        let url = get_event_ws_url().expect("設定した URL が取得できるべき");
+        assert_eq!(url, "wss://ws.test/event/");
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // 追加テスト: 実データ統合テスト（FD/ST/KP ディスパッチ）
+    // ══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn real_data_fd_frame_produces_depth_and_no_trade() {
+        // TOYOTA (7203) 実データ相当のFDフレーム
+        let mut data = String::from("\x01p_no\x0212345\x01p_date\x0220260410\x01p_cmd\x02FD");
+        // 売気配10本（GAP/GAV）
+        for i in 1..=10 {
+            data.push_str(&format!("\x01p_1_GAP{}\x02{}", i, 3319 + i));
+            data.push_str(&format!("\x01p_1_GAV{}\x02{}", i, 10000 + i * 930));
+        }
+        // 買気配10本（GBP/GBV）
+        for i in 1..=10 {
+            data.push_str(&format!("\x01p_1_GBP{}\x02{}", i, 3318 - i));
+            data.push_str(&format!("\x01p_1_GBV{}\x02{}", i, 6300 + i * 400));
+        }
+        // FDフレーム内の終値・出来高（Tradeとして誤パースされてはならない）
+        data.push_str("\x01p_1_DPP\x023319\x01p_1_DV\x0216930900");
+
+        let fields = parse_event_frame(&data);
+
+        // 板情報が正しく取得できること
+        let depth = fields_to_depth(&fields).expect("FDフレームから板情報が返るべき");
+        assert_eq!(depth.asks.len(), 10, "売気配10本");
+        assert_eq!(depth.bids.len(), 10, "買気配10本");
+        assert_eq!(depth.asks[0].price, 3320.0, "最良売気配は GAP1");
+        assert_eq!(depth.bids[0].price, 3317.0, "最良買気配は GBP1");
+
+        // FDフレームからTradeが生成されないこと（クラッシュ防止の回帰テスト）
+        assert!(
+            fields_to_trade(&fields).is_none(),
+            "FDフレームの DPP/DV から Trade が生成されてはならない"
+        );
+    }
+
+    #[test]
+    fn real_data_st_frame_produces_trade_and_no_depth() {
+        let data = "\x01p_no\x0212346\x01p_date\x0220260410\x01p_cmd\x02ST\
+                     \x01p_1_DPP\x023319\x01p_1_DV\x02500\x01p_1_DPP:T\x0209:00:01\x01p_1_DYSS\x021";
+        let fields = parse_event_frame(data);
+
+        let trade = fields_to_trade(&fields).expect("STフレームから Trade が返るべき");
+        assert_eq!(trade.price.to_f32(), 3319.0);
+        assert_eq!(trade.qty.to_f32_lossy(), 500.0);
+        assert!(trade.is_sell);
+
+        assert!(
+            fields_to_depth(&fields).is_none(),
+            "STフレームから板情報が返ってはならない"
+        );
+    }
+
+    #[test]
+    fn real_data_kp_frame_produces_neither_depth_nor_trade() {
+        let data = "\x01p_no\x0212347\x01p_date\x0220260410\x01p_cmd\x02KP\
+                     \x01p_1_DPP\x023319\x01p_1_DV\x0216930900";
+        let fields = parse_event_frame(data);
+
+        assert!(fields_to_depth(&fields).is_none(), "KPフレームから板情報は返らない");
+        assert!(fields_to_trade(&fields).is_none(), "KPフレームから Trade は返らない");
+    }
+
+    #[test]
+    fn mixed_frame_sequence_dispatches_correctly() {
+        // 連続する FD → ST → KP フレームを順に処理
+        let fd_data = "\x01p_cmd\x02FD\x01p_1_GAP1\x023320\x01p_1_GAV1\x02100\x01p_1_GBP1\x023318\x01p_1_GBV1\x02200";
+        let st_data = "\x01p_cmd\x02ST\x01p_1_DPP\x023319\x01p_1_DV\x02300\x01p_1_DYSS\x021";
+        let kp_data = "\x01p_cmd\x02KP\x01p_1_DPP\x023319\x01p_1_DV\x0216930900";
+
+        let frames = [fd_data, st_data, kp_data];
+        let mut depth_count = 0;
+        let mut trade_count = 0;
+
+        for frame in &frames {
+            let fields = parse_event_frame(frame);
+            if fields_to_depth(&fields).is_some() {
+                depth_count += 1;
+            }
+            if fields_to_trade(&fields).is_some() {
+                trade_count += 1;
+            }
+        }
+
+        assert_eq!(depth_count, 1, "FDフレームのみ板情報を生成");
+        assert_eq!(trade_count, 1, "STフレームのみ Trade を生成");
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // 追加テスト: date_str_to_epoch_ms エッジケース
+    // ══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn date_str_to_epoch_ms_valid_date() {
+        let ms = date_str_to_epoch_ms("20240101").expect("有効な日付");
+        // 2024-01-01 00:00:00 JST = 2023-12-31 15:00:00 UTC = 1704034800000ms
+        assert_eq!(ms, 1704034800000);
+    }
+
+    #[test]
+    fn date_str_to_epoch_ms_invalid_length() {
+        assert!(date_str_to_epoch_ms("2024010").is_none(), "7文字は無効");
+        assert!(date_str_to_epoch_ms("202401012").is_none(), "9文字は無効");
+        assert!(date_str_to_epoch_ms("").is_none(), "空文字列は無効");
+    }
+
+    #[test]
+    fn date_str_to_epoch_ms_invalid_month() {
+        assert!(date_str_to_epoch_ms("20241301").is_none(), "13月は無効");
+    }
+
+    #[test]
+    fn date_str_to_epoch_ms_invalid_day() {
+        assert!(date_str_to_epoch_ms("20240230").is_none(), "2月30日は無効");
+    }
+
+    #[test]
+    fn date_str_to_epoch_ms_non_numeric() {
+        assert!(date_str_to_epoch_ms("abcdefgh").is_none(), "非数値は無効");
+    }
+
+    #[test]
+    fn date_str_to_epoch_ms_leap_year() {
+        // 2024年はうるう年: 2月29日は有効
+        assert!(date_str_to_epoch_ms("20240229").is_some(), "うるう年の2月29日は有効");
+        // 2023年は非うるう年: 2月29日は無効
+        assert!(date_str_to_epoch_ms("20230229").is_none(), "非うるう年の2月29日は無効");
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // 追加テスト: daily_record_to_kline エッジケース
+    // ══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn daily_record_returns_none_when_all_fields_asterisk() {
+        let record = DailyHistoryRecord {
+            date: "20240101".to_string(),
+            open: "*".to_string(),
+            high: "*".to_string(),
+            low: "*".to_string(),
+            close: "*".to_string(),
+            volume: "*".to_string(),
+            open_adj: String::new(),
+            high_adj: String::new(),
+            low_adj: String::new(),
+            close_adj: String::new(),
+            volume_adj: String::new(),
+        };
+        assert!(daily_record_to_kline(&record, false).is_none());
+    }
+
+    #[test]
+    fn daily_record_returns_none_when_adjusted_fields_empty_and_use_adjusted() {
+        let record = DailyHistoryRecord {
+            date: "20200101".to_string(),
+            open: "6400".to_string(),
+            high: "6560".to_string(),
+            low: "6300".to_string(),
+            close: "6500".to_string(),
+            volume: "750000".to_string(),
+            open_adj: String::new(), // 空
+            high_adj: String::new(),
+            low_adj: String::new(),
+            close_adj: String::new(),
+            volume_adj: String::new(),
+        };
+        assert!(
+            daily_record_to_kline(&record, true).is_none(),
+            "調整値が空で use_adjusted=true なら None"
+        );
+    }
+
+    #[test]
+    fn daily_record_invalid_date_returns_none() {
+        let record = DailyHistoryRecord {
+            date: "invalid!".to_string(),
+            open: "100".to_string(),
+            high: "110".to_string(),
+            low: "90".to_string(),
+            close: "105".to_string(),
+            volume: "1000".to_string(),
+            open_adj: String::new(),
+            high_adj: String::new(),
+            low_adj: String::new(),
+            close_adj: String::new(),
+            volume_adj: String::new(),
+        };
+        assert!(daily_record_to_kline(&record, false).is_none(), "不正な日付は None");
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // 追加テスト: ApiResponse エッジケース
+    // ══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn api_response_check_passes_when_both_codes_empty() {
+        let json = r#"{
+            "p_errno": "",
+            "p_err": "",
+            "sResultCode": "",
+            "sResultText": "",
+            "aCLMMfdsMarketPrice": [{"sIssueCode": "6501", "pDPP": "3250"}]
+        }"#;
+        let resp: ApiResponse<MarketPriceResponse> = serde_json::from_str(json).unwrap();
+        let data = resp.check().unwrap();
+        assert_eq!(data.records.len(), 1, "空コードは正常扱い");
+    }
+
+    #[test]
+    fn api_response_p_errno_takes_precedence_over_result_code() {
+        // p_errno がエラーなら sResultCode が "0" でもエラーになる
+        let json = r#"{
+            "p_errno": "2",
+            "p_err": "セッション切断",
+            "sResultCode": "0",
+            "sResultText": "",
+            "aCLMMfdsMarketPrice": []
+        }"#;
+        let resp: ApiResponse<MarketPriceResponse> = serde_json::from_str(json).unwrap();
+        let result = resp.check();
+        assert!(
+            matches!(result, Err(TachibanaError::ApiError { ref code, .. }) if code == "2"),
+            "p_errno が優先されるべき"
+        );
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // 追加テスト: LoginResponse TryFrom エッジケース
+    // ══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn session_creation_fails_on_p_errno_error() {
+        let response = LoginResponse {
+            clm_id: "CLMAuthLoginAck".to_string(),
+            p_errno: "999".to_string(),
+            p_err: "内部エラー".to_string(),
+            result_code: "0".to_string(),
+            url_request: String::new(),
+            url_master: String::new(),
+            url_price: String::new(),
+            url_event: String::new(),
+            url_event_ws: String::new(),
+            unread_notice_flag: "0".to_string(),
+            result_text: String::new(),
+        };
+        let result = TachibanaSession::try_from(response);
+        assert!(
+            matches!(result, Err(TachibanaError::LoginFailed(_))),
+            "p_errno が 0 でない場合は LoginFailed が返るべき"
+        );
+    }
+
+    #[test]
+    fn session_creation_succeeds_with_empty_p_errno() {
+        let response = LoginResponse {
+            clm_id: "CLMAuthLoginAck".to_string(),
+            p_errno: String::new(), // 空
+            p_err: String::new(),
+            result_code: "0".to_string(),
+            url_request: "https://r.test/".to_string(),
+            url_master: "https://m.test/".to_string(),
+            url_price: "https://p.test/".to_string(),
+            url_event: "https://e.test/".to_string(),
+            url_event_ws: "wss://ws.test/".to_string(),
+            unread_notice_flag: "0".to_string(),
+            result_text: String::new(),
+        };
+        let session = TachibanaSession::try_from(response).expect("空 p_errno は成功すべき");
+        assert_eq!(session.url_price, "https://p.test/");
     }
 }

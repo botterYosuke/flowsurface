@@ -44,8 +44,9 @@ pub fn depth_stream(config: &StreamConfig<TickerInfo>) -> BoxStream<'static, Eve
         }
         Venue::Okex => adapter::okex::connect_depth_stream(ticker, push_freq).boxed(),
         Venue::Mexc => adapter::mexc::connect_depth_stream(ticker, push_freq).boxed(),
-        // 立花証券は板情報を EVENT I/F 経由で取得（TODO: Phase 3 で実装）
-        Venue::Tachibana => futures::stream::empty().boxed(),
+        Venue::Tachibana => {
+            adapter::tachibana::connect_event_stream(ticker, push_freq).boxed()
+        }
     }
 }
 
@@ -61,7 +62,7 @@ pub fn trade_stream(config: &StreamConfig<Vec<TickerInfo>>) -> BoxStream<'static
         }
         Venue::Okex => adapter::okex::connect_trade_stream(tickers, market_kind).boxed(),
         Venue::Mexc => adapter::mexc::connect_trade_stream(tickers, market_kind).boxed(),
-        // 立花証券はティックデータを EVENT I/F 経由で取得（TODO: Phase 3 で実装）
+        // 立花証券は depth_stream 内で TradesReceived も発行するため空のまま
         Venue::Tachibana => futures::stream::empty().boxed(),
     }
 }
