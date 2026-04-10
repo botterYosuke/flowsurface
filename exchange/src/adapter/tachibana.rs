@@ -409,7 +409,10 @@ async fn decode_response_body(resp: reqwest::Response) -> Result<String, Tachiba
     let bytes = resp.bytes().await?;
     let (cow, _, had_errors) = encoding_rs::SHIFT_JIS.decode(&bytes);
     if had_errors {
-        log::warn!("Shift-JIS decode produced lossy output ({} bytes)", bytes.len());
+        log::warn!(
+            "Shift-JIS decode produced lossy output ({} bytes)",
+            bytes.len()
+        );
     }
     Ok(cow.into_owned())
 }
@@ -702,7 +705,10 @@ pub async fn fetch_all_master(
                 // `}` でレコード境界を判定（サンプルコード準拠）
                 let (decoded, _, had_errors) = encoding_rs::SHIFT_JIS.decode(&buf);
                 if had_errors {
-                    log::warn!("Shift-JIS decode produced lossy output in master stream ({} bytes)", buf.len());
+                    log::warn!(
+                        "Shift-JIS decode produced lossy output in master stream ({} bytes)",
+                        buf.len()
+                    );
                 }
                 let decoded = decoded.into_owned();
                 buf.clear();
@@ -1455,7 +1461,11 @@ mod tests {
             .map(|_| std::thread::spawn(|| next_p_no()))
             .collect();
         let values: HashSet<String> = handles.into_iter().map(|h| h.join().unwrap()).collect();
-        assert_eq!(values.len(), 10, "並行呼び出しでも全 p_no がユニークであるべき");
+        assert_eq!(
+            values.len(),
+            10,
+            "並行呼び出しでも全 p_no がユニークであるべき"
+        );
     }
 
     // ── Cycle B1: HTTP POST 対応 ───────────────────────────────────────────
