@@ -1134,8 +1134,7 @@ fn request_fetch(handler: &mut RequestHandler, range: FetchRange) -> Option<Acti
         }
         Ok(None) => None,
         Err(reason) => {
-            log::error!("Failed to request {:?}: {}", range, reason);
-            // TODO: handle this more explicitly, maybe by returning Action::ErrorOccurred
+            log::debug!("Failed to request {:?}: {}", range, reason);
             None
         }
     }

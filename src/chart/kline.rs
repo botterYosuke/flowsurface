@@ -625,17 +625,32 @@ impl KlineChart {
     pub fn insert_hist_klines(&mut self, req_id: uuid::Uuid, klines_raw: &[Kline]) {
         match self.data_source {
             PlotData::TimeBased(ref mut timeseries) => {
+                let before = timeseries.datapoints.len();
                 timeseries.insert_klines(klines_raw);
                 timeseries.insert_trades_existing_buckets(&self.raw_trades);
+                let after = timeseries.datapoints.len();
+
+                // latest_x が未初期化（0）の場合、挿入したデータの最新タイムスタンプで更新する。
+                // 保存状態から空チャートで復元された場合、ここで正しいビューポート位置が設定される。
+                let ts_latest = timeseries.latest_timestamp();
 
                 self.indicators
                     .values_mut()
                     .filter_map(Option::as_mut)
                     .for_each(|indi| indi.on_insert_klines(klines_raw));
 
-                if klines_raw.is_empty() {
+                if let Some(ts_latest) = ts_latest {
+                    let chart = self.mut_state();
+                    if ts_latest > chart.latest_x {
+                        chart.latest_x = ts_latest;
+                    }
+                }
+
+                if klines_raw.is_empty() || (before > 0 && after == before) {
+                    // 新しいデータポイントが追加されなかった場合（株式市場の土日祝日ギャップなど）、
+                    // 再試行を防ぐため失敗としてマークする
                     self.request_handler
-                        .mark_failed(req_id, "No data received".to_string());
+                        .mark_failed(req_id, "No new data received".to_string());
                 } else {
                     self.request_handler.mark_completed(req_id);
                 }
