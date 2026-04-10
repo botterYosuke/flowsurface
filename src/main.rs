@@ -10,6 +10,7 @@ mod notify;
 mod screen;
 use screen::login::{self, LoginScreen};
 mod replay;
+mod replay_api;
 use replay::{ReplayMessage, ReplayState};
 mod style;
 mod version;
@@ -115,6 +116,7 @@ enum Message {
     LoginCompleted(Result<exchange::adapter::tachibana::TachibanaSession, String>),
     SessionRestoreResult(Option<exchange::adapter::tachibana::TachibanaSession>),
     Replay(ReplayMessage),
+    ReplayApi(replay_api::ApiMessage),
 }
 
 impl Flowsurface {
@@ -269,9 +271,15 @@ impl Flowsurface {
                 let main_window_id = self.main_window.id;
 
                 // リプレイ再生中の場合はフレームごとに時間を進めて Trades を注入
+                let elapsed_ms = self
+                    .replay
+                    .last_tick
+                    .map(|prev| now.duration_since(prev).as_secs_f64() * 1000.0)
+                    .unwrap_or(16.0);
+                self.replay.last_tick = Some(now);
+
                 let replay_trades = if let Some(pb) = &mut self.replay.playback {
                     if pb.status == replay::PlaybackStatus::Playing {
-                        let elapsed_ms = 16.0_f64;
                         let current_time = pb.advance_time(elapsed_ms);
 
                         // 各ストリームの TradeBuffer から current_time 以前を収集
@@ -301,8 +309,9 @@ impl Flowsurface {
                     None
                 };
 
+                let mut all_tasks: Vec<Task<Message>> = Vec::new();
+
                 if let Some(collected) = replay_trades {
-                    let mut trade_tasks = Vec::new();
                     for (stream, trades, update_t) in &collected {
                         let task = self
                             .active_dashboard_mut()
@@ -311,21 +320,21 @@ impl Flowsurface {
                                 layout_id: None,
                                 event: msg,
                             });
-                        trade_tasks.push(task);
+                        all_tasks.push(task);
                     }
-                    if !trade_tasks.is_empty() {
-                        return Task::batch(trade_tasks);
-                    }
-                    return Task::none();
                 }
 
-                return self
+                // リプレイ中も tick() を呼んでチャートのアニメーション更新を維持する
+                let tick_task = self
                     .active_dashboard_mut()
                     .tick(now, main_window_id)
                     .map(move |msg| Message::Dashboard {
                         layout_id: None,
                         event: msg,
                     });
+                all_tasks.push(tick_task);
+
+                return Task::batch(all_tasks);
             }
             Message::WindowEvent(event) => match event {
                 window::Event::CloseRequested(window) => {
@@ -968,6 +977,53 @@ impl Flowsurface {
                     }
                 }
             }
+            Message::ReplayApi((command, reply_tx)) => {
+                use replay::ReplayCommand;
+
+                match command {
+                    ReplayCommand::GetStatus => {
+                        reply_tx.send(self.replay.to_status());
+                    }
+                    ReplayCommand::Toggle => {
+                        let task = self.update(Message::Replay(ReplayMessage::ToggleMode));
+                        reply_tx.send(self.replay.to_status());
+                        return task;
+                    }
+                    ReplayCommand::Play { start, end } => {
+                        self.replay.range_input.start = start;
+                        self.replay.range_input.end = end;
+                        let task = self.update(Message::Replay(ReplayMessage::Play));
+                        reply_tx.send(self.replay.to_status());
+                        return task;
+                    }
+                    ReplayCommand::Pause => {
+                        let task = self.update(Message::Replay(ReplayMessage::Pause));
+                        reply_tx.send(self.replay.to_status());
+                        return task;
+                    }
+                    ReplayCommand::Resume => {
+                        if let Some(pb) = &mut self.replay.playback {
+                            pb.status = replay::PlaybackStatus::Playing;
+                        }
+                        reply_tx.send(self.replay.to_status());
+                    }
+                    ReplayCommand::StepForward => {
+                        let task = self.update(Message::Replay(ReplayMessage::StepForward));
+                        reply_tx.send(self.replay.to_status());
+                        return task;
+                    }
+                    ReplayCommand::StepBackward => {
+                        let task = self.update(Message::Replay(ReplayMessage::StepBackward));
+                        reply_tx.send(self.replay.to_status());
+                        return task;
+                    }
+                    ReplayCommand::CycleSpeed => {
+                        let task = self.update(Message::Replay(ReplayMessage::CycleSpeed));
+                        reply_tx.send(self.replay.to_status());
+                        return task;
+                    }
+                }
+            }
         }
         Task::none()
     }
@@ -1180,10 +1236,11 @@ impl Flowsurface {
     fn subscription(&self) -> Subscription<Message> {
         let window_events = window::events().map(Message::WindowEvent);
         let sidebar = self.sidebar.subscription().map(Message::Sidebar);
+        let replay_api = Subscription::run(replay_api::subscription).map(Message::ReplayApi);
 
         // ログイン画面中はexchangeストリームを購読しない
         if self.login_window.is_some() {
-            return Subscription::batch(vec![window_events, sidebar]);
+            return Subscription::batch(vec![window_events, sidebar, replay_api]);
         }
 
         let tick = iced::window::frames().map(Message::Tick);
@@ -1194,13 +1251,16 @@ impl Flowsurface {
             };
             match key {
                 keyboard::Key::Named(keyboard::key::Named::Escape) => Some(Message::GoBack),
+                keyboard::Key::Named(keyboard::key::Named::F5) => {
+                    Some(Message::Replay(ReplayMessage::ToggleMode))
+                }
                 _ => None,
             }
         });
 
         // リプレイモード中は WebSocket ストリームを購読しない
         if self.replay.is_replay() {
-            return Subscription::batch(vec![window_events, sidebar, tick, hotkeys]);
+            return Subscription::batch(vec![window_events, sidebar, tick, hotkeys, replay_api]);
         }
 
         let exchange_streams = self
@@ -1214,6 +1274,7 @@ impl Flowsurface {
             window_events,
             tick,
             hotkeys,
+            replay_api,
         ])
     }
 

@@ -1167,6 +1167,7 @@ dependencies = [
  "fern",
  "flowsurface-data",
  "flowsurface-exchange",
+ "futures",
  "iced",
  "iced_core",
  "iced_wgpu",

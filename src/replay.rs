@@ -3,6 +3,35 @@ use std::collections::HashMap;
 use exchange::Trade;
 use exchange::adapter::StreamKind;
 
+/// API から iced app へ送るコマンド
+#[derive(Debug, Clone)]
+pub enum ReplayCommand {
+    GetStatus,
+    Toggle,
+    Play { start: String, end: String },
+    Pause,
+    Resume,
+    StepForward,
+    StepBackward,
+    CycleSpeed,
+}
+
+/// iced app から API へ返すレスポンス
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ReplayStatus {
+    pub mode: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_time: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub speed: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_time: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_time: Option<u64>,
+}
+
 /// リプレイモードの状態を管理する
 pub struct ReplayState {
     /// ライブ / リプレイの切替
@@ -11,6 +40,8 @@ pub struct ReplayState {
     pub range_input: ReplayRangeInput,
     /// リプレイ実行中の状態（再生開始後に Some になる）
     pub playback: Option<PlaybackState>,
+    /// 前回の Tick 時刻（フレーム間経過時間を計算するため）
+    pub last_tick: Option<std::time::Instant>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,6 +116,7 @@ impl Default for ReplayState {
             mode: ReplayMode::Live,
             range_input: ReplayRangeInput::default(),
             playback: None,
+            last_tick: None,
         }
     }
 }
@@ -116,6 +148,37 @@ impl ReplayState {
     /// リプレイモードかどうか
     pub fn is_replay(&self) -> bool {
         self.mode == ReplayMode::Replay
+    }
+
+    /// 現在の状態を API レスポンス用に変換
+    pub fn to_status(&self) -> ReplayStatus {
+        let mode = match self.mode {
+            ReplayMode::Live => "Live".to_string(),
+            ReplayMode::Replay => "Replay".to_string(),
+        };
+
+        match &self.playback {
+            Some(pb) => ReplayStatus {
+                mode,
+                status: Some(match pb.status {
+                    PlaybackStatus::Loading => "Loading".to_string(),
+                    PlaybackStatus::Playing => "Playing".to_string(),
+                    PlaybackStatus::Paused => "Paused".to_string(),
+                }),
+                current_time: Some(pb.current_time),
+                speed: Some(pb.speed_label()),
+                start_time: Some(pb.start_time),
+                end_time: Some(pb.end_time),
+            },
+            None => ReplayStatus {
+                mode,
+                status: None,
+                current_time: None,
+                speed: None,
+                start_time: None,
+                end_time: None,
+            },
+        }
     }
 }
 
@@ -286,6 +349,7 @@ mod tests {
                 speed: 1.0,
                 trade_buffers: HashMap::new(),
             }),
+            last_tick: None,
         };
 
         let result = format_current_time(&state, data::UserTimezone::Utc);

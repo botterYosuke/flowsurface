@@ -533,3 +533,117 @@ fn subscription(&self) -> Subscription<Message> {
 
 7. **~~StreamKind の Hash 実装~~** → **解決済み**
    - `StreamKind` は `Hash + Eq` を既に derive 済み → `HashMap<StreamKind, TradeBuffer>` で問題なし
+
+---
+
+## 9. Phase 5: リプレイ制御 API（ローカル HTTP サーバー）
+
+### 9.1 目的
+
+外部プロセス（テストスクリプト、自動化ツール）からリプレイ機能を操作・検証できるように、ローカル HTTP API を公開する。これにより、手動操作なしで全リプレイ機能の E2E テストが可能になる。
+
+### 9.2 API 仕様
+
+**ベース**: `http://127.0.0.1:9876/api/replay`
+
+| メソッド | パス | リクエスト | レスポンス | 対応 ReplayMessage |
+|---------|------|----------|-----------|-------------------|
+| POST | `/toggle` | — | `{ "mode": "Replay" }` | `ToggleMode` |
+| POST | `/play` | `{ "start": "2026-04-10 00:00", "end": "2026-04-10 01:00" }` | `{ "status": "Loading" }` | `StartTimeChanged` + `EndTimeChanged` + `Play` |
+| POST | `/pause` | — | `{ "status": "Paused" }` | `Pause` |
+| POST | `/resume` | — | `{ "status": "Playing" }` | `Play`（playback 既存時は再開） |
+| POST | `/step-forward` | — | `{ "current_time": 1234567890 }` | `StepForward` |
+| POST | `/step-backward` | — | `{ "current_time": 1234567890 }` | `StepBackward` |
+| POST | `/speed` | — | `{ "speed": "2x" }` | `CycleSpeed` |
+| GET | `/status` | — | `{ "mode", "status", "current_time", "speed", "start_time", "end_time" }` | （読み取りのみ） |
+
+### 9.3 アーキテクチャ
+
+```
+┌────────────────────┐       mpsc::channel        ┌───────────────────┐
+│  HTTP Server       │  ───(ReplayCommand)───►     │  iced app         │
+│  (tokio task)      │                             │  subscription()   │
+│  127.0.0.1:9876    │  ◄───(ReplayStatus)────     │  update()         │
+│                    │       oneshot::channel       │                   │
+└────────────────────┘                             └───────────────────┘
+```
+
+**データフロー**:
+1. HTTP リクエスト受信 → `ReplayCommand` を mpsc sender で送信 + oneshot で応答待ち
+2. iced `subscription()` で mpsc receiver を `Stream` として購読 → `Message::ReplayApi(cmd, reply_tx)` に変換
+3. `update()` で `ReplayApi` を処理 → 既存の `ReplayMessage` と同等の状態変更を実行
+4. 結果を `oneshot` で HTTP ハンドラに返送 → JSON レスポンス
+
+### 9.4 実装ステップ
+
+| Step | 内容 | ファイル | 状態 |
+|------|------|---------|------|
+| 5-1 | `ReplayCommand`, `ReplayStatus` 型定義 | `src/replay.rs` | ✅ |
+| 5-2 | `ReplayState` に status 取得メソッド追加（`to_status()` メソッド） | `src/replay.rs` | ✅ |
+| 5-3 | HTTP サーバー本体（`tokio::net::TcpListener` + 手動 HTTP パース） | `src/replay_api.rs`（新規）| ✅ |
+| 5-4 | `Message::ReplayApi` バリアント追加 | `src/main.rs` | ✅ |
+| 5-5 | `subscription()` に API サーバーの `Subscription` を追加（`exchange::connect::channel` パターン利用） | `src/main.rs` | ✅ |
+| 5-6 | `update()` に `ReplayApi` ハンドラ追加 → 既存 ReplayMessage へ委譲 + oneshot で応答 | `src/main.rs` | ✅ |
+
+### 9.5 設計判断
+
+- **HTTP サーバーライブラリ**: `tokio::net::TcpListener` + 手動パースを推奨。外部依存を増やさず、tokio は既に利用可能。リクエスト数が少ないので手動パースで十分。`tiny_http` でも可（Cargo.toml に追加が必要）
+- **Subscription パターン**: `exchange::connect::channel()` (`exchange/src/connect.rs:111-122`) を再利用。mpsc channel で外部 → iced のメッセージ送信を実現
+- **応答方式**: `tokio::sync::oneshot` で同期的にレスポンスを返す。update() 内で状態変更後に reply_tx.send() する
+- **ポート**: デフォルト `9876`。環境変数 `FLOWSURFACE_API_PORT` でオーバーライド可能にする
+- **セキュリティ**: `127.0.0.1` のみバインド。外部アクセス不可
+
+### 9.6 検証手順
+
+```bash
+# 1. アプリ起動
+cargo run --release
+
+# 2. ステータス確認
+curl http://127.0.0.1:9876/api/replay/status
+
+# 3. REPLAY モードに切替
+curl -X POST http://127.0.0.1:9876/api/replay/toggle
+
+# 4. 再生開始
+curl -X POST http://127.0.0.1:9876/api/replay/play \
+  -d '{"start":"2026-04-10 00:00","end":"2026-04-10 01:00"}'
+
+# 5. ステータス確認（current_time が進行していること）
+curl http://127.0.0.1:9876/api/replay/status
+
+# 6. 一時停止
+curl -X POST http://127.0.0.1:9876/api/replay/pause
+
+# 7. 早送り
+curl -X POST http://127.0.0.1:9876/api/replay/step-forward
+
+# 8. 巻き戻し
+curl -X POST http://127.0.0.1:9876/api/replay/step-backward
+
+# 9. 速度切替
+curl -X POST http://127.0.0.1:9876/api/replay/speed
+
+# 10. LIVE 復帰
+curl -X POST http://127.0.0.1:9876/api/replay/toggle
+```
+
+**Phase 5 実装メモ (2026-04-11)**:
+- `ReplayCommand`（8 バリアント）+ `ReplayStatus`（serde::Serialize 付き JSON レスポンス型）を `src/replay.rs` に追加
+- `ReplayState::to_status()` で現在の状態を API レスポンス用 struct に変換
+- `src/replay_api.rs` 新規作成: `tokio::net::TcpListener` + 手動 HTTP パース。`exchange::connect::channel()` パターンで `mpsc` ストリームを返す
+- iced の `Message` は `Clone` が必要なため、`oneshot::Sender` を `Arc<Mutex<Option<oneshot::Sender>>>` でラップした `ReplySender` 型を導入
+- `Message::ReplayApi` ハンドラは `self.update(Message::Replay(...))` を再帰呼び出しして既存ロジックに委譲
+- `Subscription::run(replay_api::subscription)` でログイン画面中も含め常時 API サーバーを起動
+- 依存追加: `tokio` (net, io-util, sync) + `futures` を `Cargo.toml` に追加（tokio は iced 経由で利用可能だが直接参照が必要）
+- 既存テスト 16 件全てパス
+
+### 9.7 参照すべき既存コード
+
+| 参照先 | 内容 |
+|--------|------|
+| `exchange/src/connect.rs:111-122` | `channel()` ヘルパー — mpsc + tokio::spawn で Stream を作る再利用パターン |
+| `exchange/src/adapter/binance.rs:356-422` | `channel()` の実用例（WS接続 → Event ストリーム） |
+| `src/main.rs` の `subscription()` | 複数 Subscription の `batch` 結合パターン |
+| `src/main.rs` の `Message::Replay` ハンドラ | 各 ReplayMessage の処理ロジック（そのまま委譲可能） |
+| `src/replay.rs` | ReplayState / PlaybackState / ReplayMessage の全型定義 |
