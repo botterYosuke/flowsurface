@@ -190,6 +190,8 @@ p_1_QOV, p_1_QUV, p_1_VWAP
 | `exchange/src/connect.rs` | 変更 | `depth_stream` の Tachibana 分岐を `connect_event_stream` に置換 |
 | `src/connector/auth.rs` | 変更 | `store_session()` で `set_event_ws_url()` + `set_event_http_url()` を呼び出す |
 | `src/chart/indicator/plot.rs` | 変更 | クロスヘア描画のゼロ除算ガード追加（7.5 修正） |
+| `src/chart/kline.rs` | 変更 | `insert_hist_klines()` で `latest_x` 更新 + 再試行防止（7.6 修正） |
+| `src/chart.rs` | 変更 | `request_fetch` の失敗ログレベルを `debug` に変更（7.6 修正） |
 | `exchange/src/lib.rs` | 変更なし | 既存の `Depth`, `Trade`, `Event` 型をそのまま使用 |
 
 ---
@@ -257,6 +259,8 @@ connect.rs → Subscription → dashboard
 | 2 | KP（現在値）定期受信 | ✅ 約5秒間隔 |
 | 3 | アプリクラッシュなし（7.4 修正後） | ✅ 安定動作 |
 | 4 | インジケーター クロスヘア描画（7.5 修正後） | ✅ データ未到着時もクラッシュなし |
+| 5 | KIOXIAHD (285A) 日足チャート表示（7.6 修正後） | ✅ 317 件の日足データが正常に表示 |
+| 6 | 繰り返しフェッチ停止（7.6 修正後） | ✅ 初期ロード後の不要なフェッチなし |
 
 ---
 
@@ -304,6 +308,34 @@ if span.abs() < f32::EPSILON {
 let snap_ratio = (rounded - highest) / span;
 ```
 **変更ファイル**: `src/chart/indicator/plot.rs` (317-334行目)
+
+### 7.6 保存状態から復元した KlineChart が表示されない（2026-04-10 修正）
+
+**問題**: アプリ起動時に `KIOXIAHD (285A)` のローソク足チャートが表示されない。API から 317 件の日足データは正常に取得・挿入されるが、チャートが空白のまま。TOYOTA (7203) の比較チャートは正常に表示される。
+**原因**: `KlineChart::insert_hist_klines()` が `chart.latest_x`（ビューポートの X 軸アンカー）を更新していなかった。保存状態からチャートが復元されると、空のデータで `ViewState` が作成されるため `latest_x = 0`（1970 年エポック）となる。その後 `fetch_missing_data()` 経由でデータがフェッチされ `insert_hist_klines()` で挿入されるが、`latest_x` が更新されないため、ビューポートは `visible=[0..734400000]`（1970 年 1 月）に固定され、実際のデータ `kline=[1734447600000..1775660400000]`（2024 年 12 月〜2026 年 4 月）と重ならない。
+
+なお、`KlineChart::new()` は `latest_x = timeseries.latest_timestamp()` で正しく初期化するが、このパスは `req_id: None`（ユーザーが銘柄を選択した場合）のみ通る。保存状態からの復元では `req_id: Some(uuid)` パスを通り、`insert_hist_klines()` が使われる。
+
+**副次問題**: 株式市場の土日祝日にはデータがないため、`check_kline_integrity()` がこれらを「欠損」と検出し、30 秒間隔で同じデータを繰り返しフェッチしていた（`RequestHandler` の 30 秒クールダウン後に再試行）。
+**解決**:
+```rust
+// src/chart/kline.rs - insert_hist_klines()
+
+// 1. latest_x を更新
+if let Some(ts_latest) = timeseries.latest_timestamp() {
+    let chart = self.mut_state();
+    if ts_latest > chart.latest_x {
+        chart.latest_x = ts_latest;
+    }
+}
+
+// 2. 新しいデータが追加されなかった場合は再試行を防止
+if klines_raw.is_empty() || (before > 0 && after == before) {
+    self.request_handler
+        .mark_failed(req_id, "No new data received".to_string());
+}
+```
+**変更ファイル**: `src/chart/kline.rs` (`insert_hist_klines`)、`src/chart.rs` (`request_fetch` ログレベル変更)
 
 ---
 

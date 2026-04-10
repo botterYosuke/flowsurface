@@ -939,10 +939,10 @@ pub fn fields_to_trade(fields: &[(&str, &str)]) -> Option<Trade> {
 
 // ── EVENT I/F WebSocket 接続 ─────────────────────────────────────────────────
 
+use crate::PushFrequency;
 use crate::adapter::{Event, StreamKind, StreamTicksize};
 use crate::connect::channel;
 use crate::depth::{DepthUpdate, LocalDepthCache};
-use crate::PushFrequency;
 use futures::Stream;
 use std::time::Duration;
 
@@ -980,8 +980,7 @@ fn get_event_ws_url() -> Option<String> {
 fn build_event_params(issue_code: &str, market_code: &str) -> String {
     format!(
         "p_rid=22&p_board_no=1000&p_gyou_no=1&p_mkt_code={}&p_eno=0&p_evt_cmd=ST,KP,FD&p_issue_code={}",
-        market_code,
-        issue_code,
+        market_code, issue_code,
     )
 }
 
@@ -999,7 +998,10 @@ pub fn connect_event_stream(
     channel(100, move |mut output| async move {
         use futures::SinkExt;
 
-        log::info!("Tachibana EVENT I/F stream started for {:?}", ticker_info.ticker);
+        log::info!(
+            "Tachibana EVENT I/F stream started for {:?}",
+            ticker_info.ticker
+        );
 
         let exchange = Exchange::Tachibana;
         let mut orderbook = LocalDepthCache::default();
@@ -1030,9 +1032,15 @@ pub fn connect_event_stream(
             match client.get(&url).send().await {
                 Ok(response) => {
                     if !response.status().is_success() {
-                        log::error!("Tachibana EVENT I/F HTTP error: status={}", response.status());
+                        log::error!(
+                            "Tachibana EVENT I/F HTTP error: status={}",
+                            response.status()
+                        );
                         let _ = output
-                            .send(Event::Disconnected(exchange, format!("HTTP {}", response.status())))
+                            .send(Event::Disconnected(
+                                exchange,
+                                format!("HTTP {}", response.status()),
+                            ))
                             .await;
                         tokio::time::sleep(Duration::from_secs(3)).await;
                         continue;
@@ -2275,10 +2283,26 @@ mod tests {
         // 計画書セクション2.6 記載の実データフィールド69件を模擬
         let mut data = String::new();
         let field_names = [
-            "p_no", "p_date", "p_cmd",
-            "p_1_AV", "p_1_BV", "p_1_DHF", "p_1_DHP", "p_1_DHP:T", "p_1_DJ",
-            "p_1_DLF", "p_1_DLP", "p_1_DLP:T", "p_1_DOP", "p_1_DOP:T",
-            "p_1_DPG", "p_1_DPP", "p_1_DPP:T", "p_1_DV", "p_1_DYRP", "p_1_DYWP",
+            "p_no",
+            "p_date",
+            "p_cmd",
+            "p_1_AV",
+            "p_1_BV",
+            "p_1_DHF",
+            "p_1_DHP",
+            "p_1_DHP:T",
+            "p_1_DJ",
+            "p_1_DLF",
+            "p_1_DLP",
+            "p_1_DLP:T",
+            "p_1_DOP",
+            "p_1_DOP:T",
+            "p_1_DPG",
+            "p_1_DPP",
+            "p_1_DPP:T",
+            "p_1_DV",
+            "p_1_DYRP",
+            "p_1_DYWP",
         ];
         for (i, name) in field_names.iter().enumerate() {
             data.push_str(&format!("\x01{}\x02val{}", name, i));
@@ -2291,7 +2315,10 @@ mod tests {
             data.push_str(&format!("\x01p_1_GBV{}\x02{}", i, 6300 + i * 50));
         }
         // 残りフィールド
-        for name in &["p_1_LISS", "p_1_PRP", "p_1_QAP", "p_1_QAS", "p_1_QBP", "p_1_QBS", "p_1_QOV", "p_1_QUV", "p_1_VWAP"] {
+        for name in &[
+            "p_1_LISS", "p_1_PRP", "p_1_QAP", "p_1_QAS", "p_1_QBP", "p_1_QBS", "p_1_QOV",
+            "p_1_QUV", "p_1_VWAP",
+        ] {
             data.push_str(&format!("\x01{}\x021234", name));
         }
         let fields = parse_event_frame(&data);
@@ -2381,7 +2408,10 @@ mod tests {
     fn fields_to_depth_returns_none_for_st_cmd() {
         let data = "\x01p_cmd\x02ST\x01p_1_GAP1\x023320\x01p_1_GAV1\x02100";
         let fields = parse_event_frame(data);
-        assert!(fields_to_depth(&fields).is_none(), "ST コマンドでは板情報を返さない");
+        assert!(
+            fields_to_depth(&fields).is_none(),
+            "ST コマンドでは板情報を返さない"
+        );
     }
 
     #[test]
@@ -2451,7 +2481,10 @@ mod tests {
     fn fields_to_trade_returns_none_for_kp_cmd() {
         let data = "\x01p_cmd\x02KP\x01p_1_DPP\x023250\x01p_1_DV\x02500";
         let fields = parse_event_frame(data);
-        assert!(fields_to_trade(&fields).is_none(), "KP コマンドでは Trade を返さない");
+        assert!(
+            fields_to_trade(&fields).is_none(),
+            "KP コマンドでは Trade を返さない"
+        );
     }
 
     #[test]
@@ -2489,7 +2522,10 @@ mod tests {
         let data = "\x01p_cmd\x02ST\x01p_1_XDPP\x029999\x01p_1_DV\x02500";
         let fields = parse_event_frame(data);
         let trade = fields_to_trade(&fields);
-        assert!(trade.is_none(), "_XDPP は _DPP 末尾マッチにヒットしない（安全）");
+        assert!(
+            trade.is_none(),
+            "_XDPP は _DPP 末尾マッチにヒットしない（安全）"
+        );
     }
 
     #[test]
@@ -2575,7 +2611,10 @@ mod tests {
             sector_code: String::new(),
             sector_name: String::new(),
         };
-        assert!(master_record_to_ticker_info(&record).is_none(), "非 CLMIssueMstKabu は None");
+        assert!(
+            master_record_to_ticker_info(&record).is_none(),
+            "非 CLMIssueMstKabu は None"
+        );
     }
 
     #[test]
@@ -2591,7 +2630,10 @@ mod tests {
             sector_code: String::new(),
             sector_name: String::new(),
         };
-        assert!(master_record_to_ticker_info(&record).is_none(), "空 issue_code は None");
+        assert!(
+            master_record_to_ticker_info(&record).is_none(),
+            "空 issue_code は None"
+        );
     }
 
     #[test]
@@ -2644,7 +2686,10 @@ mod tests {
         };
         // 非ASCII の display_symbol は None にフォールバック → パニックしない
         let result = master_record_to_ticker_info(&record);
-        assert!(result.is_some(), "非ASCII英語名でもパニックせず変換可能であるべき");
+        assert!(
+            result.is_some(),
+            "非ASCII英語名でもパニックせず変換可能であるべき"
+        );
     }
 
     // ══════════════════════════════════════════════════════════════════════
@@ -2725,8 +2770,14 @@ mod tests {
                      \x01p_1_DPP\x023319\x01p_1_DV\x0216930900";
         let fields = parse_event_frame(data);
 
-        assert!(fields_to_depth(&fields).is_none(), "KPフレームから板情報は返らない");
-        assert!(fields_to_trade(&fields).is_none(), "KPフレームから Trade は返らない");
+        assert!(
+            fields_to_depth(&fields).is_none(),
+            "KPフレームから板情報は返らない"
+        );
+        assert!(
+            fields_to_trade(&fields).is_none(),
+            "KPフレームから Trade は返らない"
+        );
     }
 
     #[test]
@@ -2790,9 +2841,15 @@ mod tests {
     #[test]
     fn date_str_to_epoch_ms_leap_year() {
         // 2024年はうるう年: 2月29日は有効
-        assert!(date_str_to_epoch_ms("20240229").is_some(), "うるう年の2月29日は有効");
+        assert!(
+            date_str_to_epoch_ms("20240229").is_some(),
+            "うるう年の2月29日は有効"
+        );
         // 2023年は非うるう年: 2月29日は無効
-        assert!(date_str_to_epoch_ms("20230229").is_none(), "非うるう年の2月29日は無効");
+        assert!(
+            date_str_to_epoch_ms("20230229").is_none(),
+            "非うるう年の2月29日は無効"
+        );
     }
 
     // ══════════════════════════════════════════════════════════════════════
@@ -2853,7 +2910,10 @@ mod tests {
             close_adj: String::new(),
             volume_adj: String::new(),
         };
-        assert!(daily_record_to_kline(&record, false).is_none(), "不正な日付は None");
+        assert!(
+            daily_record_to_kline(&record, false).is_none(),
+            "不正な日付は None"
+        );
     }
 
     // ══════════════════════════════════════════════════════════════════════

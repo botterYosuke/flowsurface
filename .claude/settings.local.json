@@ -1,7 +1,10 @@
 {
   "permissions": {
     "allow": [
-      "WebFetch(domain:www.e-shiten.jp)"
+      "WebFetch(domain:www.e-shiten.jp)",
+      "Bash(grep -E \"\\\\.rs$\")",
+      "Bash(git rm:*)",
+      "Bash(git commit:*)"
     ]
   }
 }

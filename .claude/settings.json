@@ -31,7 +31,13 @@
       "Bash(echo \"EXIT CODE: $?\")",
       "Bash(tee /tmp/flowsurface_full.log)",
       "Bash(echo \"EXIT: $?\")",
-      "Bash(tee /tmp/flowsurface_test.log)"
+      "Bash(tee /tmp/flowsurface_test.log)",
+      "Bash(RUST_LOG=warn ./target/release/flowsurface.exe)",
+      "Bash(echo \"Started with PID $!\")",
+      "Bash(./target/release/flowsurface.exe)",
+      "Bash(git reset:*)",
+      "Bash(grep -n \"pub async fn fetch_trades\\\\|pub fn fetch_trades\" /c/Users/sasai/Documents/flowsurface/exchange/src/adapter/*.rs)",
+      "Bash(grep -l \"pub async fn fetch_trades\\\\|pub fn fetch_trades\" /c/Users/sasai/Documents/flowsurface/exchange/src/adapter/*.rs)"
     ],
     "additionalDirectories": [
       "C:\\Users\\sasai\\Documents\\marimo\\.claude\\plans",

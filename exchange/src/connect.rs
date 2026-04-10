@@ -44,9 +44,7 @@ pub fn depth_stream(config: &StreamConfig<TickerInfo>) -> BoxStream<'static, Eve
         }
         Venue::Okex => adapter::okex::connect_depth_stream(ticker, push_freq).boxed(),
         Venue::Mexc => adapter::mexc::connect_depth_stream(ticker, push_freq).boxed(),
-        Venue::Tachibana => {
-            adapter::tachibana::connect_event_stream(ticker, push_freq).boxed()
-        }
+        Venue::Tachibana => adapter::tachibana::connect_event_stream(ticker, push_freq).boxed(),
     }
 }
 
