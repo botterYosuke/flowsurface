@@ -608,8 +608,9 @@ impl Dashboard {
         main_window: &'a Window,
         tickers_table: &'a TickersTable,
         timezone: UserTimezone,
+        is_replay: bool,
     ) -> Element<'a, Message> {
-        let pane_grid: Element<_> = PaneGrid::new(&self.panes, |id, pane, maximized| {
+        let mut pane_grid = PaneGrid::new(&self.panes, |id, pane, maximized| {
             let is_focused = self.focus == Some((main_window.id, id));
             pane.view(
                 id,
@@ -620,15 +621,21 @@ impl Dashboard {
                 main_window,
                 timezone,
                 tickers_table,
+                is_replay,
             )
         })
         .min_size(240)
         .on_click(pane::Message::PaneClicked)
-        .on_drag(pane::Message::PaneDragged)
-        .on_resize(8, pane::Message::PaneResized)
         .spacing(6)
-        .style(style::pane_grid)
-        .into();
+        .style(style::pane_grid);
+
+        if !is_replay {
+            pane_grid = pane_grid
+                .on_drag(pane::Message::PaneDragged)
+                .on_resize(8, pane::Message::PaneResized);
+        }
+
+        let pane_grid: Element<_> = pane_grid.into();
 
         pane_grid.map(move |message| Message::Pane(main_window.id, message))
     }
@@ -653,6 +660,7 @@ impl Dashboard {
                         main_window,
                         timezone,
                         tickers_table,
+                        false, // popout windows don't support replay
                     )
                 })
                 .on_click(pane::Message::PaneClicked),
@@ -1256,6 +1264,45 @@ impl Dashboard {
             .for_each(|(_, _, state)| {
                 state.content.update_theme(theme);
             });
+    }
+
+    /// リプレイ用にペインの content をクリアし、各ペインの kline StreamKind + pane_id を返す。
+    /// settings / streams はそのまま保持する。
+    pub fn prepare_replay(&mut self, main_window: window::Id) -> Vec<(uuid::Uuid, StreamKind)> {
+        let mut kline_targets = Vec::new();
+
+        for (_, _, state) in self.iter_all_panes_mut(main_window) {
+            let pane_id = state.unique_id();
+
+            // Collect kline streams for this pane
+            if let Some(streams) = state.streams.ready_iter() {
+                for stream in streams {
+                    if matches!(stream, StreamKind::Kline { .. }) {
+                        kline_targets.push((pane_id, *stream));
+                    }
+                }
+            }
+
+            // Rebuild content: clear chart data, preserve layout/indicators/kind
+            state.rebuild_content_for_replay();
+        }
+
+        kline_targets
+    }
+
+    /// リプレイ用に全ペインの trades StreamKind を（重複なしで）収集する。
+    pub fn collect_trade_streams(&self, main_window: window::Id) -> Vec<StreamKind> {
+        let mut seen = Vec::new();
+        for (_, _, state) in self.iter_all_panes(main_window) {
+            if let Some(streams) = state.streams.ready_iter() {
+                for stream in streams {
+                    if matches!(stream, StreamKind::Trades { .. }) && !seen.contains(stream) {
+                        seen.push(*stream);
+                    }
+                }
+            }
+        }
+        seen
     }
 
     fn refresh_streams(&mut self, main_window: window::Id) -> Task<Message> {

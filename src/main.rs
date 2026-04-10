@@ -9,6 +9,8 @@ mod modal;
 mod notify;
 mod screen;
 use screen::login::{self, LoginScreen};
+mod replay;
+use replay::{ReplayMessage, ReplayState};
 mod style;
 mod version;
 mod widget;
@@ -34,7 +36,7 @@ use widget::{
 use iced::{
     Alignment, Element, Subscription, Task, keyboard, padding,
     widget::{
-        button, column, container, pane_grid, pick_list, row, rule, scrollable, text,
+        button, column, container, pane_grid, pick_list, row, rule, scrollable, text, text_input,
         tooltip::Position as TooltipPosition,
     },
 };
@@ -78,6 +80,7 @@ struct Flowsurface {
     timezone: data::UserTimezone,
     theme: data::Theme,
     notifications: Notifications,
+    replay: ReplayState,
 }
 
 #[derive(Debug, Clone)]
@@ -111,6 +114,7 @@ enum Message {
     AudioStream(modal::audio::Message),
     LoginCompleted(Result<exchange::adapter::tachibana::TachibanaSession, String>),
     SessionRestoreResult(Option<exchange::adapter::tachibana::TachibanaSession>),
+    Replay(ReplayMessage),
 }
 
 impl Flowsurface {
@@ -140,6 +144,7 @@ impl Flowsurface {
             theme: saved_state.theme,
             notifications: Notifications::new(),
             network: NetworkManager::new(saved_state.proxy_cfg),
+            replay: ReplayState::default(),
         };
 
         if let Some(err) = audio_init_err {
@@ -262,6 +267,57 @@ impl Flowsurface {
             }
             Message::Tick(now) => {
                 let main_window_id = self.main_window.id;
+
+                // リプレイ再生中の場合はフレームごとに時間を進めて Trades を注入
+                let replay_trades = if let Some(pb) = &mut self.replay.playback {
+                    if pb.status == replay::PlaybackStatus::Playing {
+                        let elapsed_ms = 16.0_f64;
+                        let current_time = pb.advance_time(elapsed_ms);
+
+                        // 各ストリームの TradeBuffer から current_time 以前を収集
+                        let streams: Vec<_> = pb.trade_buffers.keys().copied().collect();
+                        let mut collected = Vec::new();
+
+                        for stream in streams {
+                            if let Some(buffer) = pb.trade_buffers.get_mut(&stream) {
+                                let drained = buffer.drain_until(current_time);
+                                if !drained.is_empty() {
+                                    let update_t = drained.last().map_or(current_time, |t| t.time);
+                                    collected.push((stream, drained.to_vec(), update_t));
+                                }
+                            }
+                        }
+
+                        // current_time >= end_time なら自動停止
+                        if pb.current_time >= pb.end_time {
+                            pb.status = replay::PlaybackStatus::Paused;
+                        }
+
+                        Some(collected)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                if let Some(collected) = replay_trades {
+                    let mut trade_tasks = Vec::new();
+                    for (stream, trades, update_t) in &collected {
+                        let task = self
+                            .active_dashboard_mut()
+                            .ingest_trades(stream, trades, *update_t, main_window_id)
+                            .map(move |msg| Message::Dashboard {
+                                layout_id: None,
+                                event: msg,
+                            });
+                        trade_tasks.push(task);
+                    }
+                    if !trade_tasks.is_empty() {
+                        return Task::batch(trade_tasks);
+                    }
+                    return Task::none();
+                }
 
                 return self
                     .active_dashboard_mut()
@@ -647,6 +703,271 @@ impl Flowsurface {
 
                 return window::collect_window_specs(active_windows, Message::RestartRequested);
             }
+            Message::Replay(msg) => {
+                match msg {
+                    ReplayMessage::ToggleMode => {
+                        let was_replay = self.replay.is_replay();
+                        self.replay.toggle_mode();
+
+                        // Replay → Live に戻る場合はペイン content を再構築
+                        if was_replay && !self.replay.is_replay() {
+                            let main_window_id = self.main_window.id;
+                            let dashboard = self.active_dashboard_mut();
+                            dashboard.prepare_replay(main_window_id);
+                            // WebSocket は subscription() の再評価で自動復帰する
+                        }
+                    }
+                    ReplayMessage::StartTimeChanged(s) => {
+                        self.replay.range_input.start = s;
+                    }
+                    ReplayMessage::EndTimeChanged(s) => {
+                        self.replay.range_input.end = s;
+                    }
+                    ReplayMessage::Play => {
+                        // 日時パース
+                        let (start_ms, end_ms) = match replay::parse_replay_range(
+                            &self.replay.range_input.start,
+                            &self.replay.range_input.end,
+                        ) {
+                            Ok(range) => range,
+                            Err(e) => {
+                                self.notifications
+                                    .push(Toast::error(format!("Replay: {e}")));
+                                return Task::none();
+                            }
+                        };
+
+                        // PlaybackState を初期化（Loading）
+                        self.replay.playback = Some(replay::PlaybackState {
+                            start_time: start_ms,
+                            end_time: end_ms,
+                            current_time: start_ms,
+                            status: replay::PlaybackStatus::Loading,
+                            speed: 1.0,
+                            trade_buffers: std::collections::HashMap::new(),
+                        });
+
+                        let main_window_id = self.main_window.id;
+                        let layout_id = self
+                            .layout_manager
+                            .active_layout_id()
+                            .expect("No active layout")
+                            .unique;
+
+                        // ペインの content をクリアし、kline ストリームを収集
+                        let dashboard = self.active_dashboard_mut();
+                        let kline_targets = dashboard.prepare_replay(main_window_id);
+
+                        // trades ストリームも収集（Binance のみ）
+                        let trade_targets: Vec<_> = dashboard
+                            .collect_trade_streams(main_window_id)
+                            .into_iter()
+                            .filter(|stream| {
+                                let exchange = stream.ticker_info().exchange();
+                                matches!(exchange.venue(), exchange::adapter::Venue::Binance)
+                            })
+                            .collect();
+
+                        // 各 kline ストリームに対して fetch_klines を発行
+                        let mut all_tasks: Vec<Task<Message>> = kline_targets
+                            .into_iter()
+                            .map(|(pane_id, stream)| {
+                                let req_id = uuid::Uuid::new_v4();
+                                connector::fetcher::kline_fetch_task(
+                                    layout_id,
+                                    pane_id,
+                                    stream,
+                                    Some(req_id),
+                                    Some((start_ms, end_ms)),
+                                )
+                                .map(move |update| {
+                                    Message::Dashboard {
+                                        layout_id: Some(layout_id),
+                                        event: update.into(),
+                                    }
+                                })
+                            })
+                            .collect();
+
+                        // Binance trades のフェッチ
+                        for stream in &trade_targets {
+                            let ticker_info = stream.ticker_info();
+                            let stream_kind = *stream;
+                            let data_path = data::data_path(Some("market_data/binance/"));
+
+                            let (task, _handle) = Task::sip(
+                                connector::fetcher::fetch_trades_batched(
+                                    ticker_info,
+                                    start_ms,
+                                    end_ms,
+                                    data_path,
+                                ),
+                                move |batch| {
+                                    Message::Replay(ReplayMessage::TradesBatchReceived(
+                                        stream_kind,
+                                        batch,
+                                    ))
+                                },
+                                move |result| match result {
+                                    Ok(()) => Message::Replay(ReplayMessage::TradesFetchCompleted(
+                                        stream_kind,
+                                    )),
+                                    Err(err) => Message::Replay(ReplayMessage::DataLoadFailed(
+                                        err.ui_message(),
+                                    )),
+                                },
+                            )
+                            .abortable();
+                            all_tasks.push(task);
+                        }
+
+                        if all_tasks.is_empty() {
+                            if let Some(pb) = &mut self.replay.playback {
+                                pb.status = replay::PlaybackStatus::Playing;
+                            }
+                        } else {
+                            // 全 fetch が完了したら DataLoaded を発行
+                            let data_loaded =
+                                Task::done(Message::Replay(ReplayMessage::DataLoaded));
+                            return Task::batch(all_tasks).chain(data_loaded);
+                        }
+                    }
+                    ReplayMessage::Pause => {
+                        if let Some(pb) = &mut self.replay.playback {
+                            pb.status = replay::PlaybackStatus::Paused;
+                        }
+                    }
+                    ReplayMessage::StepForward => {
+                        // 1分早送り: current_time を 60秒先にジャンプし、その区間の Trades を一括注入
+                        let collected = if let Some(pb) = &mut self.replay.playback {
+                            let step_ms = 60_000; // 1分
+                            let new_time = (pb.current_time + step_ms).min(pb.end_time);
+                            pb.current_time = new_time;
+
+                            let streams: Vec<_> = pb.trade_buffers.keys().copied().collect();
+                            let mut result = Vec::new();
+
+                            for stream in streams {
+                                if let Some(buffer) = pb.trade_buffers.get_mut(&stream) {
+                                    let drained = buffer.drain_until(new_time);
+                                    if !drained.is_empty() {
+                                        let update_t = drained.last().map_or(new_time, |t| t.time);
+                                        result.push((stream, drained.to_vec(), update_t));
+                                    }
+                                }
+                            }
+
+                            if pb.current_time >= pb.end_time {
+                                pb.status = replay::PlaybackStatus::Paused;
+                            }
+
+                            result
+                        } else {
+                            Vec::new()
+                        };
+
+                        let main_window_id = self.main_window.id;
+                        let mut tasks = Vec::new();
+                        for (stream, trades, update_t) in &collected {
+                            let task = self
+                                .active_dashboard_mut()
+                                .ingest_trades(stream, trades, *update_t, main_window_id)
+                                .map(move |msg| Message::Dashboard {
+                                    layout_id: None,
+                                    event: msg,
+                                });
+                            tasks.push(task);
+                        }
+                        if !tasks.is_empty() {
+                            return Task::batch(tasks);
+                        }
+                    }
+                    ReplayMessage::CycleSpeed => {
+                        if let Some(pb) = &mut self.replay.playback {
+                            pb.cycle_speed();
+                        }
+                    }
+                    ReplayMessage::StepBackward => {
+                        // 巻き戻し: チャートリセット → Kline 再挿入 → start からの Trades 再注入
+                        // current_time を 1 分前に戻す（最小は start_time）
+                        if let Some(pb) = &mut self.replay.playback {
+                            let step_ms = 60_000u64;
+                            let new_time =
+                                pb.current_time.saturating_sub(step_ms).max(pb.start_time);
+                            pb.current_time = new_time;
+
+                            // TradeBuffer のカーソルをリセットし、new_time まで早送り
+                            for buffer in pb.trade_buffers.values_mut() {
+                                buffer.cursor = 0;
+                                buffer.drain_until(new_time);
+                            }
+                        }
+
+                        // ペインの content をリビルドして Kline を再挿入
+                        let main_window_id = self.main_window.id;
+                        let layout_id = self
+                            .layout_manager
+                            .active_layout_id()
+                            .expect("No active layout")
+                            .unique;
+                        let dashboard = self.active_dashboard_mut();
+                        let kline_targets = dashboard.prepare_replay(main_window_id);
+
+                        let start_ms = self.replay.playback.as_ref().map_or(0, |pb| pb.start_time);
+                        let end_ms = self.replay.playback.as_ref().map_or(0, |pb| pb.end_time);
+
+                        let fetch_tasks: Vec<_> = kline_targets
+                            .into_iter()
+                            .map(|(pane_id, stream)| {
+                                let req_id = uuid::Uuid::new_v4();
+                                connector::fetcher::kline_fetch_task(
+                                    layout_id,
+                                    pane_id,
+                                    stream,
+                                    Some(req_id),
+                                    Some((start_ms, end_ms)),
+                                )
+                                .map(move |update| {
+                                    Message::Dashboard {
+                                        layout_id: Some(layout_id),
+                                        event: update.into(),
+                                    }
+                                })
+                            })
+                            .collect();
+
+                        if !fetch_tasks.is_empty() {
+                            return Task::batch(fetch_tasks);
+                        }
+                    }
+                    ReplayMessage::TradesBatchReceived(stream, batch) => {
+                        if let Some(pb) = &mut self.replay.playback {
+                            let buffer = pb.trade_buffers.entry(stream).or_insert_with(|| {
+                                replay::TradeBuffer {
+                                    trades: Vec::new(),
+                                    cursor: 0,
+                                }
+                            });
+                            buffer.trades.extend(batch);
+                        }
+                    }
+                    ReplayMessage::TradesFetchCompleted(_stream) => {
+                        // trades フェッチ完了（個別ストリーム）。
+                        // DataLoaded は全タスク完了後に .chain() で発行される。
+                    }
+                    ReplayMessage::DataLoaded => {
+                        if let Some(pb) = &mut self.replay.playback {
+                            pb.status = replay::PlaybackStatus::Playing;
+                        }
+                    }
+                    ReplayMessage::DataLoadFailed(err) => {
+                        self.notifications
+                            .push(Toast::error(format!("Replay data load failed: {err}")));
+                        // リプレイモードをリセット
+                        self.replay.playback = None;
+                    }
+                }
+            }
         }
         Task::none()
     }
@@ -669,7 +990,12 @@ impl Flowsurface {
                 .map(Message::Sidebar);
 
             let dashboard_view = dashboard
-                .view(&self.main_window, tickers_table, self.timezone)
+                .view(
+                    &self.main_window,
+                    tickers_table,
+                    self.timezone,
+                    self.replay.is_replay(),
+                )
                 .map(move |msg| Message::Dashboard {
                     layout_id: None,
                     event: msg,
@@ -697,8 +1023,11 @@ impl Flowsurface {
                 }
             };
 
+            let replay_header = self.view_replay_header();
+
             let base = column![
                 header_title,
+                replay_header,
                 match sidebar_pos {
                     sidebar::Position::Left => row![sidebar_view, dashboard_view,],
                     sidebar::Position::Right => row![dashboard_view, sidebar_view],
@@ -737,6 +1066,98 @@ impl Flowsurface {
         .into()
     }
 
+    fn view_replay_header(&self) -> Element<'_, Message> {
+        let time_display = text(replay::format_current_time(&self.replay, self.timezone))
+            .font(style::AZERET_MONO)
+            .size(12);
+
+        let is_replay = self.replay.is_replay();
+
+        let mode_label = if is_replay { "REPLAY" } else { "LIVE" };
+        let mode_toggle = button(text(mode_label).size(11))
+            .on_press(Message::Replay(ReplayMessage::ToggleMode))
+            .style(move |theme, status| style::button::bordered_toggle(theme, status, is_replay))
+            .padding(padding::all(2).left(6).right(6));
+
+        let mut start_input = text_input("Start", &self.replay.range_input.start).size(11);
+        let mut end_input = text_input("End", &self.replay.range_input.end).size(11);
+        if is_replay {
+            start_input =
+                start_input.on_input(|s| Message::Replay(ReplayMessage::StartTimeChanged(s)));
+            end_input = end_input.on_input(|s| Message::Replay(ReplayMessage::EndTimeChanged(s)));
+        }
+
+        let is_playing = self
+            .replay
+            .playback
+            .as_ref()
+            .is_some_and(|pb| pb.status == replay::PlaybackStatus::Playing);
+
+        let play_pause_label = if is_playing { "\u{23F8}" } else { "\u{25B6}" };
+        let mut play_pause_btn =
+            button(text(play_pause_label).size(12)).padding(padding::all(2).left(4).right(4));
+        if is_replay {
+            play_pause_btn = play_pause_btn.on_press(if is_playing {
+                Message::Replay(ReplayMessage::Pause)
+            } else {
+                Message::Replay(ReplayMessage::Play)
+            });
+        }
+
+        // ⏮ StepBackward
+        let mut step_back_btn =
+            button(text("\u{23EE}").size(12)).padding(padding::all(2).left(4).right(4));
+        if is_replay && self.replay.playback.is_some() {
+            step_back_btn = step_back_btn.on_press(Message::Replay(ReplayMessage::StepBackward));
+        }
+
+        // ⏭ StepForward
+        let mut step_fwd_btn =
+            button(text("\u{23ED}").size(12)).padding(padding::all(2).left(4).right(4));
+        if is_replay {
+            step_fwd_btn = step_fwd_btn.on_press(Message::Replay(ReplayMessage::StepForward));
+        }
+
+        // Speed button
+        let speed_label = self
+            .replay
+            .playback
+            .as_ref()
+            .map_or("1x".to_string(), |pb| pb.speed_label());
+        let mut speed_btn =
+            button(text(speed_label).size(11)).padding(padding::all(2).left(4).right(4));
+        if is_replay && self.replay.playback.is_some() {
+            speed_btn = speed_btn.on_press(Message::Replay(ReplayMessage::CycleSpeed));
+        }
+
+        let is_loading = self
+            .replay
+            .playback
+            .as_ref()
+            .is_some_and(|pb| pb.status == replay::PlaybackStatus::Loading);
+
+        let controls = row![step_back_btn, play_pause_btn, step_fwd_btn, speed_btn].spacing(4);
+
+        let mut header = row![
+            time_display,
+            mode_toggle,
+            start_input.width(140),
+            text("~").size(11),
+            end_input.width(140),
+            controls,
+        ];
+
+        if is_loading {
+            header = header.push(text("Loading...").size(11));
+        }
+
+        header
+            .spacing(8)
+            .padding(padding::all(4))
+            .align_y(Alignment::Center)
+            .into()
+    }
+
     fn theme(&self, _window: window::Id) -> iced_core::Theme {
         self.theme.clone().into()
     }
@@ -765,11 +1186,6 @@ impl Flowsurface {
             return Subscription::batch(vec![window_events, sidebar]);
         }
 
-        let exchange_streams = self
-            .active_dashboard()
-            .market_subscriptions()
-            .map(Message::MarketWsEvent);
-
         let tick = iced::window::frames().map(Message::Tick);
 
         let hotkeys = keyboard::listen().filter_map(|event| {
@@ -781,6 +1197,16 @@ impl Flowsurface {
                 _ => None,
             }
         });
+
+        // リプレイモード中は WebSocket ストリームを購読しない
+        if self.replay.is_replay() {
+            return Subscription::batch(vec![window_events, sidebar, tick, hotkeys]);
+        }
+
+        let exchange_streams = self
+            .active_dashboard()
+            .market_subscriptions()
+            .map(Message::MarketWsEvent);
 
         Subscription::batch(vec![
             exchange_streams,

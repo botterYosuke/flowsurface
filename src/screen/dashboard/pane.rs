@@ -420,6 +420,51 @@ impl State {
         }
     }
 
+    /// リプレイ開始時にチャートデータをクリアし、settings/streams/layout/indicators は保持する。
+    pub fn rebuild_content_for_replay(&mut self) {
+        // ticker_info を先に取得してからコンテンツを変更する（借用競合を回避）
+        let ticker_info = self.stream_pair();
+
+        match &mut self.content {
+            Content::Kline {
+                chart,
+                indicators,
+                layout,
+                kind,
+            } => {
+                if let (Some(c), Some(ti)) = (chart.as_ref(), ticker_info) {
+                    let step = c.tick_size();
+                    let saved_layout = c.chart_layout();
+                    let saved_kind = c.kind().clone();
+                    let basis = c.basis();
+                    let saved_indicators = indicators.clone();
+
+                    *chart = Some(KlineChart::new(
+                        saved_layout.clone(),
+                        basis,
+                        step,
+                        &[],
+                        vec![],
+                        &saved_indicators,
+                        ti,
+                        &saved_kind,
+                    ));
+                    *layout = saved_layout;
+                    *kind = saved_kind;
+                }
+            }
+            Content::TimeAndSales(panel) => {
+                if let (Some(p), Some(ti)) = (panel.as_ref(), ticker_info) {
+                    let config = p.config.clone();
+                    *panel = Some(TimeAndSales::new(Some(config), ti));
+                }
+            }
+            _ => {
+                // Heatmap, ShaderHeatmap, Ladder: Phase 3 で「Depth unavailable」を表示
+            }
+        }
+    }
+
     pub fn insert_hist_klines(
         &mut self,
         req_id: Option<uuid::Uuid>,
@@ -507,6 +552,7 @@ impl State {
         main_window: &'a Window,
         timezone: UserTimezone,
         tickers_table: &'a TickersTable,
+        is_replay: bool,
     ) -> pane_grid::Content<'a, Message, Theme, Renderer> {
         let mut top_left_buttons = if Content::Starter == self.content {
             row![]
@@ -1073,6 +1119,16 @@ impl State {
                 top_left_buttons = top_left_buttons.push(text(msg));
             }
             Status::Ready => {}
+        }
+
+        // リプレイ中の Depth 系ペインに注意テキストを表示
+        if is_replay
+            && matches!(
+                self.content,
+                Content::Heatmap { .. } | Content::ShaderHeatmap { .. } | Content::Ladder(_)
+            )
+        {
+            top_left_buttons = top_left_buttons.push(text("Replay: Depth unavailable").size(11));
         }
 
         let content = pane_grid::Content::new(body)
