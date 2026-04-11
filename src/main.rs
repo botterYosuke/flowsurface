@@ -803,16 +803,23 @@ impl Flowsurface {
                             .collect();
 
                         // 各 kline ストリームに対して fetch_klines を発行
+                        // リプレイ開始時点より前のローソク足も表示するため、
+                        // 450本分のヒストリカルデータを含めてフェッチする
                         let kline_tasks: Vec<Task<Message>> = kline_targets
                             .into_iter()
                             .map(|(pane_id, stream)| {
                                 let req_id = uuid::Uuid::new_v4();
+                                let fetch_start = if let Some((_, tf)) = stream.as_kline_stream() {
+                                    start_ms.saturating_sub(450 * tf.to_milliseconds())
+                                } else {
+                                    start_ms
+                                };
                                 connector::fetcher::kline_fetch_task(
                                     layout_id,
                                     pane_id,
                                     stream,
                                     Some(req_id),
-                                    Some((start_ms, end_ms)),
+                                    Some((fetch_start, end_ms)),
                                 )
                                 .map(move |update| {
                                     Message::Dashboard {
