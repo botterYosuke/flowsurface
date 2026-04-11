@@ -15,24 +15,24 @@ fn get_credentials() -> Option<(String, String)> {
     let mut user_id = std::env::var("TACHIBANA_USER_ID").unwrap_or_default();
     let mut password = std::env::var("TACHIBANA_PASSWORD").unwrap_or_default();
 
-    if user_id.is_empty() || password.is_empty() {
-        if let Ok(content) = std::fs::read_to_string(
+    if (user_id.is_empty() || password.is_empty())
+        && let Ok(content) = std::fs::read_to_string(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .parent()
                 .unwrap()
                 .join(".env"),
-        ) {
-            for line in content.lines() {
-                let line = line.trim();
-                if line.is_empty() || line.starts_with('#') {
-                    continue;
-                }
-                if let Some((key, value)) = line.split_once('=') {
-                    match key.trim() {
-                        "TACHIBANA_USER_ID" => user_id = value.trim().to_string(),
-                        "TACHIBANA_PASSWORD" => password = value.trim().to_string(),
-                        _ => {}
-                    }
+        )
+    {
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = line.split_once('=') {
+                match key.trim() {
+                    "TACHIBANA_USER_ID" => user_id = value.trim().to_string(),
+                    "TACHIBANA_PASSWORD" => password = value.trim().to_string(),
+                    _ => {}
                 }
             }
         }

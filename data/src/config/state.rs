@@ -109,7 +109,8 @@ mod tests {
 
     #[test]
     fn replay_config_deserializes_from_json() {
-        let json = r#"{"mode":"replay","range_start":"2026-04-10 09:00","range_end":"2026-04-10 15:00"}"#;
+        let json =
+            r#"{"mode":"replay","range_start":"2026-04-10 09:00","range_end":"2026-04-10 15:00"}"#;
         let cfg: ReplayConfig = serde_json::from_str(json).unwrap();
         assert_eq!(cfg.mode, "replay");
         assert_eq!(cfg.range_start, "2026-04-10 09:00");
@@ -147,5 +148,112 @@ mod tests {
         let json = serde_json::to_value(&state).unwrap();
         assert_eq!(json["replay"]["mode"], "replay");
         assert_eq!(json["replay"]["range_start"], "2026-04-10 09:00");
+    }
+
+    // ── ReplayConfig ラウンドトリップ ──
+
+    #[test]
+    fn replay_config_roundtrip_serialize_deserialize() {
+        let original = ReplayConfig {
+            mode: "replay".into(),
+            range_start: "2026-04-10 09:00".into(),
+            range_end: "2026-04-10 15:00".into(),
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let restored: ReplayConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.mode, original.mode);
+        assert_eq!(restored.range_start, original.range_start);
+        assert_eq!(restored.range_end, original.range_end);
+    }
+
+    #[test]
+    fn replay_config_roundtrip_live_mode() {
+        let original = ReplayConfig::default();
+        let json = serde_json::to_string(&original).unwrap();
+        let restored: ReplayConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.mode, "live");
+        assert!(restored.range_start.is_empty());
+        assert!(restored.range_end.is_empty());
+    }
+
+    // ── 部分的・欠損フィールドのデシリアライズ ──
+
+    #[test]
+    fn replay_config_empty_object_uses_defaults() {
+        let cfg: ReplayConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(cfg.mode, "live");
+        assert!(cfg.range_start.is_empty());
+        assert!(cfg.range_end.is_empty());
+    }
+
+    #[test]
+    fn replay_config_mode_only_uses_default_for_ranges() {
+        let json = r#"{"mode":"replay"}"#;
+        let cfg: ReplayConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.mode, "replay");
+        assert!(cfg.range_start.is_empty());
+        assert!(cfg.range_end.is_empty());
+    }
+
+    #[test]
+    fn replay_config_ranges_only_uses_default_mode() {
+        let json = r#"{"range_start":"2026-04-10 09:00","range_end":"2026-04-10 15:00"}"#;
+        let cfg: ReplayConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.mode, "live");
+        assert_eq!(cfg.range_start, "2026-04-10 09:00");
+        assert_eq!(cfg.range_end, "2026-04-10 15:00");
+    }
+
+    #[test]
+    fn replay_config_unknown_mode_preserved() {
+        // 未知の mode 値はそのまま保持される（String なので制約なし）
+        let json = r#"{"mode":"unknown_value","range_start":"","range_end":""}"#;
+        let cfg: ReplayConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.mode, "unknown_value");
+    }
+
+    #[test]
+    fn replay_config_extra_fields_ignored() {
+        // 将来追加されるかもしれない未知フィールドを無視
+        let json = r#"{"mode":"live","range_start":"","range_end":"","extra_field":42}"#;
+        let cfg: ReplayConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.mode, "live");
+    }
+
+    // ── State ラウンドトリップ (replay 含む) ──
+
+    #[test]
+    fn state_roundtrip_preserves_replay_config() {
+        let original = State {
+            replay: ReplayConfig {
+                mode: "replay".into(),
+                range_start: "2026-04-10 09:00".into(),
+                range_end: "2026-04-10 15:00".into(),
+            },
+            ..State::default()
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let restored: State = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.replay.mode, "replay");
+        assert_eq!(restored.replay.range_start, "2026-04-10 09:00");
+        assert_eq!(restored.replay.range_end, "2026-04-10 15:00");
+    }
+
+    #[test]
+    fn state_empty_json_deserializes_with_all_defaults() {
+        let state: State = serde_json::from_str("{}").unwrap();
+        assert_eq!(state.replay.mode, "live");
+        assert!(state.replay.range_start.is_empty());
+        assert!(state.replay.range_end.is_empty());
+    }
+
+    #[test]
+    fn state_replay_live_with_ranges_preserved() {
+        // Live モードでも range が保存されているケース（ユーザーが入力後にモードを戻した場合等）
+        let json = r#"{"replay":{"mode":"live","range_start":"2026-04-10 09:00","range_end":"2026-04-10 15:00"}}"#;
+        let state: State = serde_json::from_str(json).unwrap();
+        assert_eq!(state.replay.mode, "live");
+        assert_eq!(state.replay.range_start, "2026-04-10 09:00");
+        assert_eq!(state.replay.range_end, "2026-04-10 15:00");
     }
 }

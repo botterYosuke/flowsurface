@@ -455,7 +455,7 @@ impl State {
             }
             Content::TimeAndSales(panel) => {
                 if let (Some(p), Some(ti)) = (panel.as_ref(), ticker_info) {
-                    let config = p.config.clone();
+                    let config = p.config;
                     *panel = Some(TimeAndSales::new(Some(config), ti));
                 }
             }

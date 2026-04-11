@@ -966,6 +966,11 @@ pub fn set_event_http_url(url: String) {
     }
 }
 
+#[cfg(test)]
+fn get_event_ws_url() -> Option<String> {
+    EVENT_WS_URL.read().ok()?.clone()
+}
+
 fn get_event_http_url() -> Option<String> {
     EVENT_HTTP_URL.read().ok()?.clone()
 }
@@ -1783,9 +1788,7 @@ mod tests {
     #[test]
     fn next_p_no_concurrent_calls_return_unique_values() {
         use std::collections::HashSet;
-        let handles: Vec<_> = (0..10)
-            .map(|_| std::thread::spawn(|| next_p_no()))
-            .collect();
+        let handles: Vec<_> = (0..10).map(|_| std::thread::spawn(next_p_no)).collect();
         let values: HashSet<String> = handles.into_iter().map(|h| h.join().unwrap()).collect();
         assert_eq!(
             values.len(),

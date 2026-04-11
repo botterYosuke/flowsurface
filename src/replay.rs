@@ -50,6 +50,7 @@ pub enum ReplayMode {
     Replay,
 }
 
+#[derive(Default)]
 pub struct ReplayRangeInput {
     pub start: String,
     pub end: String,
@@ -117,15 +118,6 @@ impl Default for ReplayState {
             range_input: ReplayRangeInput::default(),
             playback: None,
             last_tick: None,
-        }
-    }
-}
-
-impl Default for ReplayRangeInput {
-    fn default() -> Self {
-        Self {
-            start: String::new(),
-            end: String::new(),
         }
     }
 }
@@ -237,6 +229,7 @@ impl TradeBuffer {
     }
 
     /// バッファの全 trades を消費済みかどうか
+    #[allow(dead_code)]
     pub fn is_exhausted(&self) -> bool {
         self.cursor >= self.trades.len()
     }
@@ -843,5 +836,245 @@ mod tests {
         // Should fall through to realtime (the _ arm)
         assert!(!result.is_empty());
         assert_eq!(result.len(), 19);
+    }
+
+    // ════════════════════════════════════════════════════════
+    // 永続化テスト: ReplayState ↔ ReplayConfig 変換
+    // ════════════════════════════════════════════════════════
+
+    /// save_state_to_disk() と同等の変換ロジック (ReplayState → ReplayConfig)
+    fn to_replay_config(state: &ReplayState) -> data::ReplayConfig {
+        data::ReplayConfig {
+            mode: match state.mode {
+                ReplayMode::Live => "live".into(),
+                ReplayMode::Replay => "replay".into(),
+            },
+            range_start: state.range_input.start.clone(),
+            range_end: state.range_input.end.clone(),
+        }
+    }
+
+    /// Flowsurface::new() と同等の変換ロジック (ReplayConfig → ReplayState)
+    fn from_replay_config(cfg: data::ReplayConfig) -> ReplayState {
+        let replay_mode = match cfg.mode.as_str() {
+            "replay" => ReplayMode::Replay,
+            _ => ReplayMode::Live,
+        };
+        ReplayState {
+            mode: replay_mode,
+            range_input: ReplayRangeInput {
+                start: cfg.range_start,
+                end: cfg.range_end,
+            },
+            playback: None,
+            last_tick: None,
+        }
+    }
+
+    // ── 保存方向: ReplayState → ReplayConfig ──
+
+    #[test]
+    fn persist_live_mode_produces_live_config() {
+        let state = ReplayState::default();
+        let cfg = to_replay_config(&state);
+        assert_eq!(cfg.mode, "live");
+        assert!(cfg.range_start.is_empty());
+        assert!(cfg.range_end.is_empty());
+    }
+
+    #[test]
+    fn persist_replay_mode_with_ranges() {
+        let state = ReplayState {
+            mode: ReplayMode::Replay,
+            range_input: ReplayRangeInput {
+                start: "2026-04-10 09:00".into(),
+                end: "2026-04-10 15:00".into(),
+            },
+            playback: None,
+            last_tick: None,
+        };
+        let cfg = to_replay_config(&state);
+        assert_eq!(cfg.mode, "replay");
+        assert_eq!(cfg.range_start, "2026-04-10 09:00");
+        assert_eq!(cfg.range_end, "2026-04-10 15:00");
+    }
+
+    #[test]
+    fn persist_replay_mode_with_active_playback_ignores_playback() {
+        // playback (current_time, speed, trade_buffers 等) は保存対象外
+        let state = ReplayState {
+            mode: ReplayMode::Replay,
+            range_input: ReplayRangeInput {
+                start: "2026-04-10 09:00".into(),
+                end: "2026-04-10 15:00".into(),
+            },
+            playback: Some(PlaybackState {
+                start_time: 1000,
+                end_time: 2000,
+                current_time: 1500,
+                status: PlaybackStatus::Playing,
+                speed: 5.0,
+                trade_buffers: HashMap::new(),
+            }),
+            last_tick: None,
+        };
+        let cfg = to_replay_config(&state);
+        // mode と range だけが保存される
+        assert_eq!(cfg.mode, "replay");
+        assert_eq!(cfg.range_start, "2026-04-10 09:00");
+        assert_eq!(cfg.range_end, "2026-04-10 15:00");
+    }
+
+    // ── 復元方向: ReplayConfig → ReplayState ──
+
+    #[test]
+    fn restore_live_config_produces_live_state() {
+        let cfg = data::ReplayConfig::default();
+        let state = from_replay_config(cfg);
+        assert_eq!(state.mode, ReplayMode::Live);
+        assert!(!state.is_replay());
+        assert!(state.range_input.start.is_empty());
+        assert!(state.range_input.end.is_empty());
+        assert!(state.playback.is_none());
+        assert!(state.last_tick.is_none());
+    }
+
+    #[test]
+    fn restore_replay_config_produces_replay_state_with_ranges() {
+        let cfg = data::ReplayConfig {
+            mode: "replay".into(),
+            range_start: "2026-04-10 09:00".into(),
+            range_end: "2026-04-10 15:00".into(),
+        };
+        let state = from_replay_config(cfg);
+        assert_eq!(state.mode, ReplayMode::Replay);
+        assert!(state.is_replay());
+        assert_eq!(state.range_input.start, "2026-04-10 09:00");
+        assert_eq!(state.range_input.end, "2026-04-10 15:00");
+        // playback は復元しない（ユーザーが Play を押して開始する形）
+        assert!(state.playback.is_none());
+        assert!(state.last_tick.is_none());
+    }
+
+    #[test]
+    fn restore_unknown_mode_falls_back_to_live() {
+        let cfg = data::ReplayConfig {
+            mode: "unknown".into(),
+            range_start: "".into(),
+            range_end: "".into(),
+        };
+        let state = from_replay_config(cfg);
+        assert_eq!(state.mode, ReplayMode::Live);
+    }
+
+    #[test]
+    fn restore_empty_mode_falls_back_to_live() {
+        let cfg = data::ReplayConfig {
+            mode: "".into(),
+            range_start: "".into(),
+            range_end: "".into(),
+        };
+        let state = from_replay_config(cfg);
+        assert_eq!(state.mode, ReplayMode::Live);
+    }
+
+    // ── ラウンドトリップ: ReplayState → ReplayConfig → JSON → ReplayConfig → ReplayState ──
+
+    #[test]
+    fn roundtrip_live_mode() {
+        let original = ReplayState::default();
+        let cfg = to_replay_config(&original);
+        let json = serde_json::to_string(&cfg).unwrap();
+        let cfg_restored: data::ReplayConfig = serde_json::from_str(&json).unwrap();
+        let restored = from_replay_config(cfg_restored);
+
+        assert_eq!(restored.mode, original.mode);
+        assert_eq!(restored.range_input.start, original.range_input.start);
+        assert_eq!(restored.range_input.end, original.range_input.end);
+        assert!(restored.playback.is_none());
+    }
+
+    #[test]
+    fn roundtrip_replay_mode_with_ranges() {
+        let original = ReplayState {
+            mode: ReplayMode::Replay,
+            range_input: ReplayRangeInput {
+                start: "2026-04-10 09:00".into(),
+                end: "2026-04-10 15:00".into(),
+            },
+            playback: None,
+            last_tick: None,
+        };
+        let cfg = to_replay_config(&original);
+        let json = serde_json::to_string(&cfg).unwrap();
+        let cfg_restored: data::ReplayConfig = serde_json::from_str(&json).unwrap();
+        let restored = from_replay_config(cfg_restored);
+
+        assert_eq!(restored.mode, ReplayMode::Replay);
+        assert_eq!(restored.range_input.start, "2026-04-10 09:00");
+        assert_eq!(restored.range_input.end, "2026-04-10 15:00");
+    }
+
+    #[test]
+    fn roundtrip_via_full_state_json() {
+        // State 全体のシリアライズ→デシリアライズで replay が保たれることを確認
+        let state_json = serde_json::json!({
+            "replay": {
+                "mode": "replay",
+                "range_start": "2026-04-10 09:00",
+                "range_end": "2026-04-10 15:00"
+            }
+        });
+        let state: data::State = serde_json::from_value(state_json).unwrap();
+        let restored = from_replay_config(state.replay);
+        assert_eq!(restored.mode, ReplayMode::Replay);
+        assert_eq!(restored.range_input.start, "2026-04-10 09:00");
+        assert_eq!(restored.range_input.end, "2026-04-10 15:00");
+    }
+
+    // ── 後方互換テスト ──
+
+    #[test]
+    fn backward_compat_no_replay_key_restores_as_live() {
+        let state: data::State = serde_json::from_str("{}").unwrap();
+        let restored = from_replay_config(state.replay);
+        assert_eq!(restored.mode, ReplayMode::Live);
+        assert!(restored.range_input.start.is_empty());
+        assert!(restored.range_input.end.is_empty());
+    }
+
+    #[test]
+    fn backward_compat_empty_replay_object_restores_as_live() {
+        let json = r#"{"replay":{}}"#;
+        let state: data::State = serde_json::from_str(json).unwrap();
+        let restored = from_replay_config(state.replay);
+        assert_eq!(restored.mode, ReplayMode::Live);
+    }
+
+    // ── to_status() が復元後の状態を正しく反映するか ──
+
+    #[test]
+    fn restored_replay_state_status_shows_replay_no_playback() {
+        let cfg = data::ReplayConfig {
+            mode: "replay".into(),
+            range_start: "2026-04-10 09:00".into(),
+            range_end: "2026-04-10 15:00".into(),
+        };
+        let state = from_replay_config(cfg);
+        let status = state.to_status();
+        // mode=Replay だが playback=None → status/current_time/speed は None
+        assert_eq!(status.mode, "Replay");
+        assert!(status.status.is_none());
+        assert!(status.current_time.is_none());
+        assert!(status.speed.is_none());
+    }
+
+    #[test]
+    fn restored_live_state_status_shows_live() {
+        let cfg = data::ReplayConfig::default();
+        let state = from_replay_config(cfg);
+        let status = state.to_status();
+        assert_eq!(status.mode, "Live");
+        assert!(status.status.is_none());
     }
 }

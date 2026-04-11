@@ -339,13 +339,13 @@ impl Flowsurface {
                 }
 
                 // リプレイ中も tick() を呼んでチャートのアニメーション更新を維持する
-                let tick_task = self
-                    .active_dashboard_mut()
-                    .tick(now, main_window_id)
-                    .map(move |msg| Message::Dashboard {
-                        layout_id: None,
-                        event: msg,
-                    });
+                let tick_task =
+                    self.active_dashboard_mut()
+                        .tick(now, main_window_id)
+                        .map(move |msg| Message::Dashboard {
+                            layout_id: None,
+                            event: msg,
+                        });
                 all_tasks.push(tick_task);
 
                 return Task::batch(all_tasks);
@@ -1346,7 +1346,7 @@ impl Flowsurface {
         let load_layout = self.load_layout(active_layout_id.unique, main_window_id);
 
         let close_login = login_win
-            .map(|id| window::close::<Message>(id))
+            .map(window::close::<Message>)
             .unwrap_or_else(Task::none);
 
         close_login

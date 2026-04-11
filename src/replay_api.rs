@@ -1,6 +1,6 @@
 use crate::replay::{ReplayCommand, ReplayStatus};
-use futures::channel::mpsc;
 use futures::SinkExt;
+use futures::channel::mpsc;
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -17,10 +17,10 @@ impl ReplySender {
 
     /// 応答を送信する。2回目以降の呼び出しは何もしない。
     pub fn send(self, status: ReplayStatus) {
-        if let Ok(mut guard) = self.0.lock() {
-            if let Some(tx) = guard.take() {
-                let _ = tx.send(status);
-            }
+        if let Ok(mut guard) = self.0.lock()
+            && let Some(tx) = guard.take()
+        {
+            let _ = tx.send(status);
         }
     }
 }
@@ -92,14 +92,23 @@ async fn run_server(mut sender: mpsc::Sender<ApiMessage>) {
                 continue;
             }
             Err(RouteError::BadRequest) => {
-                let _ = write_response(&mut stream, 400, r#"{"error":"Bad Request: invalid JSON body"}"#).await;
+                let _ = write_response(
+                    &mut stream,
+                    400,
+                    r#"{"error":"Bad Request: invalid JSON body"}"#,
+                )
+                .await;
                 continue;
             }
         };
 
         // oneshot で iced app からのレスポンスを待つ
         let (reply_tx, reply_rx) = oneshot::channel();
-        if sender.send((command, ReplySender::new(reply_tx))).await.is_err() {
+        if sender
+            .send((command, ReplySender::new(reply_tx)))
+            .await
+            .is_err()
+        {
             let _ = write_response(&mut stream, 500, r#"{"error":"App channel closed"}"#).await;
             continue;
         }
