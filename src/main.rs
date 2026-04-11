@@ -1036,6 +1036,11 @@ impl Flowsurface {
                         reply_tx.send(self.replay.to_status());
                         return task;
                     }
+                    ReplayCommand::SaveState => {
+                        let empty_windows = HashMap::new();
+                        self.save_state_to_disk(&empty_windows);
+                        reply_tx.send(self.replay.to_status());
+                    }
                 }
             }
         }

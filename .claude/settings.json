@@ -47,7 +47,9 @@
       "Bash(bash tests/e2e_replay_api.sh)",
       "Bash(/c/Python312/python.exe --version)",
       "Bash(/c/Python311/python.exe --version)",
-      "Bash(cargo clippy:*)"
+      "Bash(cargo clippy:*)",
+      "Edit(/.claude/skills/e2e-replay-api/**)",
+      "Edit(/.claude/skills/e2e-replay/**)"
     ],
     "additionalDirectories": [
       "C:\\Users\\sasai\\Documents\\marimo\\.claude\\plans",

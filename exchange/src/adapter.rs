@@ -810,7 +810,59 @@ pub async fn fetch_ticker_stats(
     }
 }
 
+/// 1リクエストあたりの最大 kline 本数（取引所ごと）
+fn kline_page_size(venue: Venue) -> u64 {
+    match venue {
+        Venue::Okex => 300,
+        Venue::Hyperliquid => 500,
+        // Binance, Bybit, MEXC は 1000
+        _ => 1000,
+    }
+}
+
 pub async fn fetch_klines(
+    ticker_info: TickerInfo,
+    timeframe: Timeframe,
+    range: Option<(u64, u64)>,
+) -> Result<Vec<Kline>, AdapterError> {
+    let venue = ticker_info.ticker.exchange.venue();
+
+    if venue == Venue::Tachibana {
+        return Err(AdapterError::InvalidRequest(
+            "立花証券の日足データは fetch_daily_history() を使用してください".to_string(),
+        ));
+    }
+
+    let Some((range_start, range_end)) = range else {
+        return fetch_klines_single(ticker_info, timeframe, None).await;
+    };
+
+    let interval_ms = timeframe.to_milliseconds();
+    let page_size = kline_page_size(venue);
+    let num_intervals = (range_end - range_start) / interval_ms;
+
+    // 1ページで収まる場合はそのまま
+    if num_intervals <= page_size {
+        return fetch_klines_single(ticker_info, timeframe, Some((range_start, range_end))).await;
+    }
+
+    // ページング: page_size 本ずつ分割取得
+    let chunk_ms = page_size * interval_ms;
+    let mut all_klines = Vec::with_capacity(num_intervals as usize);
+    let mut cursor = range_start;
+
+    while cursor < range_end {
+        let chunk_end = (cursor + chunk_ms).min(range_end);
+        let chunk =
+            fetch_klines_single(ticker_info.clone(), timeframe, Some((cursor, chunk_end))).await?;
+        all_klines.extend(chunk);
+        cursor = chunk_end;
+    }
+
+    Ok(all_klines)
+}
+
+async fn fetch_klines_single(
     ticker_info: TickerInfo,
     timeframe: Timeframe,
     range: Option<(u64, u64)>,
@@ -821,10 +873,7 @@ pub async fn fetch_klines(
         Venue::Hyperliquid => hyperliquid::fetch_klines(ticker_info, timeframe, range).await,
         Venue::Okex => okex::fetch_klines(ticker_info, timeframe, range).await,
         Venue::Mexc => mexc::fetch_klines(ticker_info, timeframe, range).await,
-        // 立花証券は CLMMfdsGetMarketPriceHistory で日足取得（TODO: Phase 3 で実装）
-        Venue::Tachibana => Err(AdapterError::InvalidRequest(
-            "立花証券の日足データは fetch_daily_history() を使用してください".to_string(),
-        )),
+        Venue::Tachibana => unreachable!(),
     }
 }
 

@@ -176,6 +176,7 @@ fn route(method: &str, path: &str, body: &str) -> Result<ReplayCommand, RouteErr
         ("POST", "/api/replay/step-forward") => Ok(ReplayCommand::StepForward),
         ("POST", "/api/replay/step-backward") => Ok(ReplayCommand::StepBackward),
         ("POST", "/api/replay/speed") => Ok(ReplayCommand::CycleSpeed),
+        ("POST", "/api/app/save") => Ok(ReplayCommand::SaveState),
         _ => Err(RouteError::NotFound),
     }
 }
@@ -378,5 +379,11 @@ mod tests {
         let body = r#"{"start":123,"end":456}"#;
         let result = route("POST", "/api/replay/play", body);
         assert!(matches!(result, Err(RouteError::BadRequest)));
+    }
+
+    #[test]
+    fn route_post_app_save() {
+        let cmd = route("POST", "/api/app/save", "").unwrap();
+        assert!(matches!(cmd, ReplayCommand::SaveState));
     }
 }

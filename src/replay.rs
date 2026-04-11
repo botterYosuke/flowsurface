@@ -14,6 +14,8 @@ pub enum ReplayCommand {
     StepForward,
     StepBackward,
     CycleSpeed,
+    /// 状態をディスクに保存（E2E テスト用）
+    SaveState,
 }
 
 /// iced app から API へ返すレスポンス
@@ -30,6 +32,9 @@ pub struct ReplayStatus {
     pub start_time: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub end_time: Option<u64>,
+    /// UI の範囲入力テキスト（永続化復元の検証用）
+    pub range_start: String,
+    pub range_end: String,
 }
 
 /// リプレイモードの状態を管理する
@@ -149,6 +154,9 @@ impl ReplayState {
             ReplayMode::Replay => "Replay".to_string(),
         };
 
+        let range_start = self.range_input.start.clone();
+        let range_end = self.range_input.end.clone();
+
         match &self.playback {
             Some(pb) => ReplayStatus {
                 mode,
@@ -161,6 +169,8 @@ impl ReplayState {
                 speed: Some(pb.speed_label()),
                 start_time: Some(pb.start_time),
                 end_time: Some(pb.end_time),
+                range_start,
+                range_end,
             },
             None => ReplayStatus {
                 mode,
@@ -169,20 +179,18 @@ impl ReplayState {
                 speed: None,
                 start_time: None,
                 end_time: None,
+                range_start,
+                range_end,
             },
         }
     }
 }
-
-/// 最大リプレイ範囲（6時間）
-const MAX_REPLAY_DURATION_MS: u64 = 6 * 60 * 60 * 1000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParseRangeError {
     InvalidStartFormat,
     InvalidEndFormat,
     StartAfterEnd,
-    RangeTooLong,
 }
 
 impl std::fmt::Display for ParseRangeError {
@@ -191,7 +199,6 @@ impl std::fmt::Display for ParseRangeError {
             ParseRangeError::InvalidStartFormat => write!(f, "Invalid start time format"),
             ParseRangeError::InvalidEndFormat => write!(f, "Invalid end time format"),
             ParseRangeError::StartAfterEnd => write!(f, "Start time must be before end time"),
-            ParseRangeError::RangeTooLong => write!(f, "Range must be 6 hours or less"),
         }
     }
 }
@@ -209,9 +216,6 @@ pub fn parse_replay_range(start: &str, end: &str) -> Result<(u64, u64), ParseRan
 
     if start_ms >= end_ms {
         return Err(ParseRangeError::StartAfterEnd);
-    }
-    if end_ms - start_ms > MAX_REPLAY_DURATION_MS {
-        return Err(ParseRangeError::RangeTooLong);
     }
 
     Ok((start_ms, end_ms))
@@ -377,15 +381,19 @@ mod tests {
     }
 
     #[test]
-    fn parse_replay_range_exceeds_6_hours() {
-        let result = parse_replay_range("2026-04-01 09:00", "2026-04-01 15:01");
-        assert_eq!(result, Err(ParseRangeError::RangeTooLong));
+    fn parse_replay_range_24_hours_is_ok() {
+        let result = parse_replay_range("2026-04-01 09:00", "2026-04-02 09:00");
+        assert!(result.is_ok());
+        let (start, end) = result.unwrap();
+        assert_eq!(end - start, 24 * 60 * 60 * 1000);
     }
 
     #[test]
-    fn parse_replay_range_exactly_6_hours_is_ok() {
-        let result = parse_replay_range("2026-04-01 09:00", "2026-04-01 15:00");
+    fn parse_replay_range_multi_day_is_ok() {
+        let result = parse_replay_range("2026-04-01 09:00", "2026-04-08 09:00");
         assert!(result.is_ok());
+        let (start, end) = result.unwrap();
+        assert_eq!(end - start, 7 * 24 * 60 * 60 * 1000);
     }
 
     #[test]
@@ -499,6 +507,8 @@ mod tests {
         assert!(status.speed.is_none());
         assert!(status.start_time.is_none());
         assert!(status.end_time.is_none());
+        assert!(status.range_start.is_empty());
+        assert!(status.range_end.is_empty());
     }
 
     #[test]
@@ -562,6 +572,24 @@ mod tests {
         let status = state.to_status();
         assert_eq!(status.status.as_deref(), Some("Paused"));
         assert_eq!(status.speed.as_deref(), Some("5x"));
+    }
+
+    #[test]
+    fn to_status_includes_range_input() {
+        let state = ReplayState {
+            mode: ReplayMode::Replay,
+            range_input: ReplayRangeInput {
+                start: "2026-04-10 09:00".to_string(),
+                end: "2026-04-10 15:00".to_string(),
+            },
+            playback: None,
+            last_tick: None,
+        };
+        let status = state.to_status();
+        assert_eq!(status.mode, "Replay");
+        assert!(status.status.is_none());
+        assert_eq!(status.range_start, "2026-04-10 09:00");
+        assert_eq!(status.range_end, "2026-04-10 15:00");
     }
 
     // ── to_status() serialization test ──

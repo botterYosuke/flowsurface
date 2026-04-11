@@ -3,6 +3,7 @@
 **作成日**: 2026-04-11
 **対象**: saved-state.json にリプレイモード・範囲入力を保存し、再起動後も復元する
 **状態**: ✅ 完了 (2026-04-11)
+**追加対応**: 6時間制限撤廃 + fetch_klines ページング + E2E テスト基盤整備 (2026-04-11)
 
 ---
 
@@ -211,7 +212,10 @@ pub struct SavedState {
 |---------|---------|
 | `data/src/config/state.rs` | `ReplayConfig` 追加、`State` にフィールド追加、`from_parts()` 引数追加 |
 | `src/layout.rs` | `SavedState` にフィールド追加、`load_saved_state()` で変換 |
-| `src/main.rs` | `save_state_to_disk()` で replay 保存、`new()` で replay 復元 |
+| `src/main.rs` | `save_state_to_disk()` で replay 保存、`new()` で replay 復元、`SaveState` コマンド処理追加 |
+| `src/replay.rs` | `ReplayStatus` に `range_start`/`range_end` 追加、6時間制限(`MAX_REPLAY_DURATION_MS`/`RangeTooLong`)を撤廃 |
+| `src/replay_api.rs` | `POST /api/app/save` ルート追加 |
+| `exchange/src/adapter.rs` | `fetch_klines` にページング追加（取引所ごとの上限で自動分割取得） |
 
 ---
 
@@ -219,17 +223,33 @@ pub struct SavedState {
 
 | リスク | 対策 |
 |--------|------|
-| 古い saved-state.json に `replay` キーがない | `#[serde(default)]` で安全にフォールバック |
+| 古い saved-state.json に `replay` キーがない | `#[serde(default)]` で安全にフォールバック。E2E テスト（後方互換テスト）で検証済み |
 | Replay モードで保存→再起動すると、playback=None で UI が中途半端 | 復元時は mode=Replay + 範囲入力済みだが Paused 相当。ユーザーが Play を押して開始する形で自然 |
 | `data` crate に `ReplayMode` 依存を持ち込む | String ベースの `ReplayConfig` で回避済み |
+| `taskkill //f` で強制終了すると保存されない | `POST /api/app/save` で明示的に保存してから kill する（E2E テストで検証済み） |
+| 長大な範囲のリプレイでメモリ圧迫 | `fetch_klines` はページング取得するが、trades バッファは全量メモリに保持。極端な範囲（数ヶ月以上）は実用的でない可能性あり |
 
 ---
 
 ## 7. 実装ログ
 
-**2026-04-11 実装完了**
+**2026-04-11 永続化実装完了**
 
 - TDD アプローチで実装。data crate に 6 テスト追加（RED→GREEN 確認済み）
 - 既存の replay テスト 62 件 + data crate 9 件 = 計 71 テスト全パス
 - `ReplayConfig::default()` の `mode` は `"live"` (空文字ではない)。`#[serde(default)]` と組み合わせて後方互換を実現
 - `src/replay.rs` に存在した `is_exhausted()` メソッドの削除（ワーキングツリー上の未コミット変更）を復元して修正
+
+**2026-04-11 E2E テスト基盤整備 + 6時間制限撤廃**
+
+- `ReplayStatus` に `range_start`/`range_end` フィールドを追加（永続化検証用）
+- `POST /api/app/save` エンドポイントを追加（`taskkill //f` では保存されないため）
+- 6時間制限（`MAX_REPLAY_DURATION_MS` / `ParseRangeError::RangeTooLong`）を撤廃
+- `exchange/src/adapter.rs` の `fetch_klines` にページング追加:
+  - 取引所ごとの1リクエスト上限: OKEx 300, Hyperliquid 500, Binance/Bybit/MEXC 1000
+  - 範囲が上限を超える場合、自動で chunk_ms 単位に分割して結合
+- ユニットテスト: 78 件 PASS（replay + replay_api）
+- E2E テスト結果:
+  - 永続化テスト: 11/11 PASS（復元・後方互換・往復保存）
+  - 再生ライフサイクル: 20/20 PASS（Play→Pause→Resume→Speed→Step→Toggle）
+  - 6時間超テスト: 5/5 PASS（12時間範囲で Loading→Playing 遷移確認）
