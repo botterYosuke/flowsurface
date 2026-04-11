@@ -493,4 +493,355 @@ mod tests {
         // フォーマットが "YYYY-MM-DD HH:MM:SS" 形式であることを確認
         assert_eq!(result.len(), 19);
     }
+
+    // ── to_status() tests ──
+
+    #[test]
+    fn to_status_live_mode_no_playback() {
+        let state = ReplayState::default();
+        let status = state.to_status();
+        assert_eq!(status.mode, "Live");
+        assert!(status.status.is_none());
+        assert!(status.current_time.is_none());
+        assert!(status.speed.is_none());
+        assert!(status.start_time.is_none());
+        assert!(status.end_time.is_none());
+    }
+
+    #[test]
+    fn to_status_replay_playing() {
+        let state = ReplayState {
+            mode: ReplayMode::Replay,
+            range_input: ReplayRangeInput::default(),
+            playback: Some(PlaybackState {
+                start_time: 1000,
+                end_time: 2000,
+                current_time: 1500,
+                status: PlaybackStatus::Playing,
+                speed: 2.0,
+                trade_buffers: HashMap::new(),
+            }),
+            last_tick: None,
+        };
+        let status = state.to_status();
+        assert_eq!(status.mode, "Replay");
+        assert_eq!(status.status.as_deref(), Some("Playing"));
+        assert_eq!(status.current_time, Some(1500));
+        assert_eq!(status.speed.as_deref(), Some("2x"));
+        assert_eq!(status.start_time, Some(1000));
+        assert_eq!(status.end_time, Some(2000));
+    }
+
+    #[test]
+    fn to_status_replay_loading() {
+        let state = ReplayState {
+            mode: ReplayMode::Replay,
+            range_input: ReplayRangeInput::default(),
+            playback: Some(PlaybackState {
+                start_time: 0,
+                end_time: 1000,
+                current_time: 0,
+                status: PlaybackStatus::Loading,
+                speed: 1.0,
+                trade_buffers: HashMap::new(),
+            }),
+            last_tick: None,
+        };
+        let status = state.to_status();
+        assert_eq!(status.status.as_deref(), Some("Loading"));
+    }
+
+    #[test]
+    fn to_status_replay_paused() {
+        let state = ReplayState {
+            mode: ReplayMode::Replay,
+            range_input: ReplayRangeInput::default(),
+            playback: Some(PlaybackState {
+                start_time: 0,
+                end_time: 1000,
+                current_time: 500,
+                status: PlaybackStatus::Paused,
+                speed: 5.0,
+                trade_buffers: HashMap::new(),
+            }),
+            last_tick: None,
+        };
+        let status = state.to_status();
+        assert_eq!(status.status.as_deref(), Some("Paused"));
+        assert_eq!(status.speed.as_deref(), Some("5x"));
+    }
+
+    // ── to_status() serialization test ──
+
+    #[test]
+    fn to_status_live_serializes_without_optional_fields() {
+        let state = ReplayState::default();
+        let status = state.to_status();
+        let json = serde_json::to_string(&status).unwrap();
+        // Live mode: only "mode" should be present (skip_serializing_if = None)
+        assert!(json.contains(r#""mode":"Live""#));
+        assert!(!json.contains("status"));
+        assert!(!json.contains("current_time"));
+        assert!(!json.contains("speed"));
+    }
+
+    #[test]
+    fn to_status_replay_serializes_all_fields() {
+        let state = ReplayState {
+            mode: ReplayMode::Replay,
+            range_input: ReplayRangeInput::default(),
+            playback: Some(PlaybackState {
+                start_time: 1000,
+                end_time: 2000,
+                current_time: 1500,
+                status: PlaybackStatus::Playing,
+                speed: 1.0,
+                trade_buffers: HashMap::new(),
+            }),
+            last_tick: None,
+        };
+        let json = serde_json::to_string(&state.to_status()).unwrap();
+        assert!(json.contains(r#""mode":"Replay""#));
+        assert!(json.contains(r#""status":"Playing""#));
+        assert!(json.contains(r#""current_time":1500"#));
+        assert!(json.contains(r#""speed":"1x""#));
+    }
+
+    // ── TradeBuffer edge cases ──
+
+    #[test]
+    fn empty_trade_buffer_is_exhausted() {
+        let buffer = TradeBuffer {
+            trades: vec![],
+            cursor: 0,
+        };
+        assert!(buffer.is_exhausted());
+    }
+
+    #[test]
+    fn drain_empty_buffer_returns_empty_slice() {
+        let mut buffer = TradeBuffer {
+            trades: vec![],
+            cursor: 0,
+        };
+        let drained = buffer.drain_until(9999);
+        assert!(drained.is_empty());
+        assert!(buffer.is_exhausted());
+    }
+
+    #[test]
+    fn drain_trades_same_time_returns_all() {
+        let mut buffer = TradeBuffer {
+            trades: vec![test_trade(100), test_trade(100), test_trade(100)],
+            cursor: 0,
+        };
+        let drained = buffer.drain_until(100);
+        assert_eq!(drained.len(), 3);
+        assert!(buffer.is_exhausted());
+    }
+
+    #[test]
+    fn drain_trades_sequential_exhaustion() {
+        let mut buffer = TradeBuffer {
+            trades: vec![test_trade(10), test_trade(20), test_trade(30)],
+            cursor: 0,
+        };
+
+        let d1 = buffer.drain_until(10);
+        assert_eq!(d1.len(), 1);
+        assert!(!buffer.is_exhausted());
+
+        let d2 = buffer.drain_until(20);
+        assert_eq!(d2.len(), 1);
+        assert!(!buffer.is_exhausted());
+
+        let d3 = buffer.drain_until(30);
+        assert_eq!(d3.len(), 1);
+        assert!(buffer.is_exhausted());
+
+        // After exhaustion, further drains return empty
+        let d4 = buffer.drain_until(9999);
+        assert!(d4.is_empty());
+    }
+
+    // ── advance_time edge cases ──
+
+    #[test]
+    fn advance_time_zero_elapsed_no_change() {
+        let mut pb = PlaybackState {
+            start_time: 1000,
+            end_time: 2000,
+            current_time: 1500,
+            status: PlaybackStatus::Playing,
+            speed: 1.0,
+            trade_buffers: HashMap::new(),
+        };
+        let t = pb.advance_time(0.0);
+        assert_eq!(t, 1500);
+    }
+
+    #[test]
+    fn advance_time_already_at_end() {
+        let mut pb = PlaybackState {
+            start_time: 1000,
+            end_time: 2000,
+            current_time: 2000,
+            status: PlaybackStatus::Playing,
+            speed: 10.0,
+            trade_buffers: HashMap::new(),
+        };
+        let t = pb.advance_time(1000.0);
+        assert_eq!(t, 2000); // stays at end_time
+    }
+
+    #[test]
+    fn advance_time_large_elapsed_clamped() {
+        let mut pb = PlaybackState {
+            start_time: 0,
+            end_time: 100,
+            current_time: 0,
+            status: PlaybackStatus::Playing,
+            speed: 1.0,
+            trade_buffers: HashMap::new(),
+        };
+        let t = pb.advance_time(999999.0);
+        assert_eq!(t, 100); // clamped to end_time
+    }
+
+    // ── speed_label tests ──
+
+    #[test]
+    fn speed_label_all_presets() {
+        let mut pb = PlaybackState {
+            start_time: 0,
+            end_time: 1000,
+            current_time: 0,
+            status: PlaybackStatus::Playing,
+            speed: 1.0,
+            trade_buffers: HashMap::new(),
+        };
+        assert_eq!(pb.speed_label(), "1x");
+        pb.speed = 2.0;
+        assert_eq!(pb.speed_label(), "2x");
+        pb.speed = 5.0;
+        assert_eq!(pb.speed_label(), "5x");
+        pb.speed = 10.0;
+        assert_eq!(pb.speed_label(), "10x");
+    }
+
+    #[test]
+    fn speed_label_fractional() {
+        let pb = PlaybackState {
+            start_time: 0,
+            end_time: 1000,
+            current_time: 0,
+            status: PlaybackStatus::Playing,
+            speed: 1.5,
+            trade_buffers: HashMap::new(),
+        };
+        assert_eq!(pb.speed_label(), "1.5x");
+    }
+
+    // ── parse_replay_range edge cases ──
+
+    #[test]
+    fn parse_replay_range_same_start_and_end() {
+        let result = parse_replay_range("2026-04-01 09:00", "2026-04-01 09:00");
+        assert_eq!(result, Err(ParseRangeError::StartAfterEnd));
+    }
+
+    #[test]
+    fn parse_replay_range_with_seconds_format_rejected() {
+        // Our format is "%Y-%m-%d %H:%M", seconds should fail
+        let result = parse_replay_range("2026-04-01 09:00:00", "2026-04-01 15:00");
+        assert_eq!(result, Err(ParseRangeError::InvalidStartFormat));
+    }
+
+    #[test]
+    fn parse_replay_range_empty_strings() {
+        let result = parse_replay_range("", "");
+        assert_eq!(result, Err(ParseRangeError::InvalidStartFormat));
+    }
+
+    #[test]
+    fn parse_replay_range_1_minute_apart_is_ok() {
+        let result = parse_replay_range("2026-04-01 09:00", "2026-04-01 09:01");
+        assert!(result.is_ok());
+        let (start, end) = result.unwrap();
+        assert_eq!(end - start, 60_000); // 1 minute in ms
+    }
+
+    // ── toggle_mode edge cases ──
+
+    #[test]
+    fn toggle_mode_with_active_playback_clears_it() {
+        let mut state = ReplayState {
+            mode: ReplayMode::Replay,
+            range_input: ReplayRangeInput {
+                start: "2026-04-01 09:00".to_string(),
+                end: "2026-04-01 15:00".to_string(),
+            },
+            playback: Some(PlaybackState {
+                start_time: 1000,
+                end_time: 2000,
+                current_time: 1500,
+                status: PlaybackStatus::Playing,
+                speed: 5.0,
+                trade_buffers: HashMap::new(),
+            }),
+            last_tick: None,
+        };
+
+        state.toggle_mode(); // Replay → Live
+        assert_eq!(state.mode, ReplayMode::Live);
+        assert!(state.playback.is_none());
+        assert!(state.range_input.start.is_empty());
+    }
+
+    #[test]
+    fn toggle_mode_round_trip() {
+        let mut state = ReplayState::default();
+        assert_eq!(state.mode, ReplayMode::Live);
+
+        state.toggle_mode(); // Live → Replay
+        assert_eq!(state.mode, ReplayMode::Replay);
+
+        state.toggle_mode(); // Replay → Live
+        assert_eq!(state.mode, ReplayMode::Live);
+        assert!(!state.is_replay());
+    }
+
+    // ── cycle_speed edge case ──
+
+    #[test]
+    fn cycle_speed_from_unknown_value_resets_to_second_preset() {
+        let mut pb = PlaybackState {
+            start_time: 0,
+            end_time: 1000,
+            current_time: 0,
+            status: PlaybackStatus::Playing,
+            speed: 99.0, // not in SPEEDS
+            trade_buffers: HashMap::new(),
+        };
+        pb.cycle_speed();
+        // unwrap_or(0) → (0+1) % 4 = 1 → 2.0
+        assert_eq!(pb.speed, 2.0);
+    }
+
+    // ── format_current_time edge case ──
+
+    #[test]
+    fn format_current_time_replay_no_playback_uses_realtime() {
+        // mode=Replay but playback=None (e.g., toggled to Replay but not yet started play)
+        let state = ReplayState {
+            mode: ReplayMode::Replay,
+            range_input: ReplayRangeInput::default(),
+            playback: None,
+            last_tick: None,
+        };
+        let result = format_current_time(&state, data::UserTimezone::Utc);
+        // Should fall through to realtime (the _ arm)
+        assert!(!result.is_empty());
+        assert_eq!(result.len(), 19);
+    }
 }

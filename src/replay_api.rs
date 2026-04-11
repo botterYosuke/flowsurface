@@ -136,6 +136,7 @@ fn parse_request(raw: &str) -> Option<(String, String, String)> {
     Some((method, path, body))
 }
 
+#[derive(Debug)]
 enum RouteError {
     NotFound,
     BadRequest,
@@ -197,4 +198,176 @@ async fn write_response(
 
     stream.write_all(response.as_bytes()).await?;
     stream.flush().await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::replay::ReplayCommand;
+
+    // ── parse_request tests ──
+
+    #[test]
+    fn parse_request_valid_get() {
+        let raw = "GET /api/replay/status HTTP/1.1\r\nHost: 127.0.0.1:9876\r\n\r\n";
+        let (method, path, body) = parse_request(raw).unwrap();
+        assert_eq!(method, "GET");
+        assert_eq!(path, "/api/replay/status");
+        assert!(body.is_empty());
+    }
+
+    #[test]
+    fn parse_request_valid_post_with_body() {
+        let raw = "POST /api/replay/play HTTP/1.1\r\nHost: 127.0.0.1:9876\r\nContent-Type: application/json\r\n\r\n{\"start\":\"2026-04-01 09:00\",\"end\":\"2026-04-01 15:00\"}";
+        let (method, path, body) = parse_request(raw).unwrap();
+        assert_eq!(method, "POST");
+        assert_eq!(path, "/api/replay/play");
+        assert!(body.contains("start"));
+        assert!(body.contains("end"));
+    }
+
+    #[test]
+    fn parse_request_empty_string_returns_none() {
+        assert!(parse_request("").is_none());
+    }
+
+    #[test]
+    fn parse_request_malformed_returns_none() {
+        // Only method, no path
+        assert!(parse_request("GET\r\n\r\n").is_none());
+    }
+
+    #[test]
+    fn parse_request_post_without_body() {
+        let raw = "POST /api/replay/toggle HTTP/1.1\r\nHost: localhost\r\n\r\n";
+        let (method, path, body) = parse_request(raw).unwrap();
+        assert_eq!(method, "POST");
+        assert_eq!(path, "/api/replay/toggle");
+        assert!(body.is_empty());
+    }
+
+    #[test]
+    fn parse_request_no_double_crlf_body_empty() {
+        // No \r\n\r\n separator → body should be empty
+        let raw = "GET /api/replay/status HTTP/1.1\r\nHost: localhost";
+        let result = parse_request(raw);
+        assert!(result.is_some());
+        let (_, _, body) = result.unwrap();
+        assert!(body.is_empty());
+    }
+
+    // ── route tests ──
+
+    #[test]
+    fn route_get_status() {
+        let cmd = route("GET", "/api/replay/status", "").unwrap();
+        assert!(matches!(cmd, ReplayCommand::GetStatus));
+    }
+
+    #[test]
+    fn route_post_toggle() {
+        let cmd = route("POST", "/api/replay/toggle", "").unwrap();
+        assert!(matches!(cmd, ReplayCommand::Toggle));
+    }
+
+    #[test]
+    fn route_post_pause() {
+        let cmd = route("POST", "/api/replay/pause", "").unwrap();
+        assert!(matches!(cmd, ReplayCommand::Pause));
+    }
+
+    #[test]
+    fn route_post_resume() {
+        let cmd = route("POST", "/api/replay/resume", "").unwrap();
+        assert!(matches!(cmd, ReplayCommand::Resume));
+    }
+
+    #[test]
+    fn route_post_step_forward() {
+        let cmd = route("POST", "/api/replay/step-forward", "").unwrap();
+        assert!(matches!(cmd, ReplayCommand::StepForward));
+    }
+
+    #[test]
+    fn route_post_step_backward() {
+        let cmd = route("POST", "/api/replay/step-backward", "").unwrap();
+        assert!(matches!(cmd, ReplayCommand::StepBackward));
+    }
+
+    #[test]
+    fn route_post_speed() {
+        let cmd = route("POST", "/api/replay/speed", "").unwrap();
+        assert!(matches!(cmd, ReplayCommand::CycleSpeed));
+    }
+
+    #[test]
+    fn route_post_play_valid_json() {
+        let body = r#"{"start":"2026-04-01 09:00","end":"2026-04-01 15:00"}"#;
+        let cmd = route("POST", "/api/replay/play", body).unwrap();
+        match cmd {
+            ReplayCommand::Play { start, end } => {
+                assert_eq!(start, "2026-04-01 09:00");
+                assert_eq!(end, "2026-04-01 15:00");
+            }
+            _ => panic!("Expected Play command"),
+        }
+    }
+
+    #[test]
+    fn route_post_play_invalid_json() {
+        let result = route("POST", "/api/replay/play", "not json");
+        assert!(matches!(result, Err(RouteError::BadRequest)));
+    }
+
+    #[test]
+    fn route_post_play_missing_start() {
+        let body = r#"{"end":"2026-04-01 15:00"}"#;
+        let result = route("POST", "/api/replay/play", body);
+        assert!(matches!(result, Err(RouteError::BadRequest)));
+    }
+
+    #[test]
+    fn route_post_play_missing_end() {
+        let body = r#"{"start":"2026-04-01 09:00"}"#;
+        let result = route("POST", "/api/replay/play", body);
+        assert!(matches!(result, Err(RouteError::BadRequest)));
+    }
+
+    #[test]
+    fn route_post_play_empty_body() {
+        let result = route("POST", "/api/replay/play", "");
+        assert!(matches!(result, Err(RouteError::BadRequest)));
+    }
+
+    #[test]
+    fn route_unknown_path_not_found() {
+        let result = route("GET", "/api/replay/unknown", "");
+        assert!(matches!(result, Err(RouteError::NotFound)));
+    }
+
+    #[test]
+    fn route_get_on_post_endpoint_not_found() {
+        // GET on POST-only endpoints should return NotFound
+        let result = route("GET", "/api/replay/toggle", "");
+        assert!(matches!(result, Err(RouteError::NotFound)));
+    }
+
+    #[test]
+    fn route_post_on_get_endpoint_not_found() {
+        let result = route("POST", "/api/replay/status", "");
+        assert!(matches!(result, Err(RouteError::NotFound)));
+    }
+
+    #[test]
+    fn route_root_path_not_found() {
+        let result = route("GET", "/", "");
+        assert!(matches!(result, Err(RouteError::NotFound)));
+    }
+
+    #[test]
+    fn route_post_play_non_string_values() {
+        let body = r#"{"start":123,"end":456}"#;
+        let result = route("POST", "/api/replay/play", body);
+        assert!(matches!(result, Err(RouteError::BadRequest)));
+    }
 }

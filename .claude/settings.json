@@ -37,11 +37,21 @@
       "Bash(./target/release/flowsurface.exe)",
       "Bash(git reset:*)",
       "Bash(grep -n \"pub async fn fetch_trades\\\\|pub fn fetch_trades\" /c/Users/sasai/Documents/flowsurface/exchange/src/adapter/*.rs)",
-      "Bash(grep -l \"pub async fn fetch_trades\\\\|pub fn fetch_trades\" /c/Users/sasai/Documents/flowsurface/exchange/src/adapter/*.rs)"
+      "Bash(grep -l \"pub async fn fetch_trades\\\\|pub fn fetch_trades\" /c/Users/sasai/Documents/flowsurface/exchange/src/adapter/*.rs)",
+      "Edit(/.claude/skills/replay-test/**)",
+      "Bash(taskkill //f //im flowsurface.exe)",
+      "Bash(export FLOWSURFACE_DATA_PATH=/tmp/flowsurface-e2e-test)",
+      "Bash(export FLOWSURFACE_API_PORT=9877)",
+      "Bash(target/release/flowsurface.exe)",
+      "Bash(echo \"App starting with PID $!\")",
+      "Bash(bash tests/e2e_replay_api.sh)",
+      "Bash(/c/Python312/python.exe --version)",
+      "Bash(/c/Python311/python.exe --version)"
     ],
     "additionalDirectories": [
       "C:\\Users\\sasai\\Documents\\marimo\\.claude\\plans",
-      "\\tmp"
+      "\\tmp",
+      "c:\\Users\\sasai\\Documents\\flowsurface\\.claude\\skills"
     ]
   }
 }

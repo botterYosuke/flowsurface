@@ -1,7 +1,9 @@
 # リプレイヘッダー機能 — 実装プラン
 
 **作成日**: 2026-04-10
+**最終更新**: 2026-04-11
 **対象**: メインウィンドウにヘッダーバーを追加し、ライブ/リプレイモードの切替と再生制御を実現する
+**状態**: Phase 1-5 全て完了 ✅
 
 ---
 
@@ -117,6 +119,8 @@ pub struct ReplayState {
     pub range_input: ReplayRangeInput,
     /// リプレイ実行中の状態（再生開始後に Some になる）
     pub playback: Option<PlaybackState>,
+    /// 前回の Tick 時刻（フレーム間経過時間を計算するため）
+    pub last_tick: Option<std::time::Instant>,
 }
 
 pub enum ReplayMode {
@@ -181,17 +185,19 @@ enum ReplayMessage {
     Pause,
     /// 進むボタン（1分早送り）
     StepForward,
+    /// 巻き戻し（1分前にジャンプ）  ← Phase 4 で追加
+    StepBackward,
     /// Trades バッチ受信（Straw ストリームから逐次到着）
     TradesBatchReceived(StreamKind, Vec<Trade>),
+    /// 全 Trades のフェッチ完了
+    TradesFetchCompleted(StreamKind),
+    /// 再生速度変更  ← Phase 4 で追加
+    CycleSpeed,
     /// 全データのプリフェッチ完了
     DataLoaded,
     /// データプリフェッチ失敗
     DataLoadFailed(String),
 }
-
-// Phase 4 で追加:
-//   SpeedChanged(f64)    — 再生速度変更
-//   StepBackward          — チャートリセット＋再注入が必要
 ```
 
 ### 3.3 ヘッダーバー UI (`src/main.rs` の view)
@@ -311,28 +317,30 @@ ToggleMode → Live に切替
 fn subscription(&self) -> Subscription<Message> {
     let window_events = window::events().map(Message::WindowEvent);
     let sidebar = self.sidebar.subscription().map(Message::Sidebar);
+    let replay_api = Subscription::run(replay_api::subscription).map(Message::ReplayApi);
 
     if self.login_window.is_some() {
-        return Subscription::batch(vec![window_events, sidebar]);
+        return Subscription::batch(vec![window_events, sidebar, replay_api]);
     }
 
     let tick = iced::window::frames().map(Message::Tick);
     let hotkeys = keyboard::listen().filter_map(/* ... */);
 
     // リプレイモード中は WebSocket ストリームを購読しない
-    if matches!(self.replay.mode, ReplayMode::Replay) {
-        return Subscription::batch(vec![window_events, sidebar, tick, hotkeys]);
+    if self.replay.is_replay() {
+        return Subscription::batch(vec![window_events, sidebar, tick, hotkeys, replay_api]);
     }
 
     let exchange_streams = self.active_dashboard()
         .market_subscriptions()
         .map(Message::MarketWsEvent);
 
-    Subscription::batch(vec![exchange_streams, sidebar, window_events, tick, hotkeys])
+    Subscription::batch(vec![exchange_streams, sidebar, window_events, tick, hotkeys, replay_api])
 }
 ```
 
 → Iced の `Subscription` は宣言的に動作するため、`exchange_streams` を返さなくなった時点で WebSocket 接続は自動的にドロップされる。ライブに戻した際も自動再接続される。
+→ `replay_api` は全状態（ログイン画面中含む）で常時購読。HTTP サーバーはアプリ起動と同時に `127.0.0.1:9876` で待機する。
 
 ---
 
@@ -435,13 +443,15 @@ fn subscription(&self) -> Subscription<Message> {
 
 ## 5. 変更対象ファイル
 
-| ファイル | 変更内容 |
-|---------|---------|
-| `src/replay.rs` | **新規**: ReplayState, PlaybackState, TradeBuffer, ReplayMessage, 再生エンジン |
-| `src/main.rs` | Flowsurface に replay フィールド追加、Message::Replay 追加、view_replay_header(), update() でのリプレイ制御, subscription() の分岐 |
-| `src/screen/dashboard.rs` | リプレイ用のペイン content 再構築関数、リプレイ中のペイン操作無効化 |
-| `src/screen/dashboard/pane.rs` | Heatmap の「Depth unavailable」オーバーレイ表示 |
-| `src/connector/fetcher.rs` | (軽微) リプレイ用のフェッチリクエスト分岐（既存 `request_fetch()` を再利用） |
+| ファイル | 変更内容 | Phase |
+|---------|---------|-------|
+| `src/replay.rs` | **新規**: ReplayState, PlaybackState, TradeBuffer, ReplayMessage, 再生エンジン, ReplayCommand/ReplayStatus (API型) | 1-5 |
+| `src/replay_api.rs` | **新規**: ローカル HTTP サーバー（`tokio::net::TcpListener`）、ReplySender ラッパー、ルーティング | 5 |
+| `src/main.rs` | Flowsurface に replay フィールド追加、Message::Replay/ReplayApi 追加、view_replay_header(), update() でのリプレイ制御・API ハンドラ, subscription() の分岐 | 1-5 |
+| `src/screen/dashboard.rs` | リプレイ用のペイン content 再構築関数、リプレイ中のペイン操作無効化 | 2 |
+| `src/screen/dashboard/pane.rs` | Heatmap の「Depth unavailable」オーバーレイ表示 | 3 |
+| `src/connector/fetcher.rs` | (軽微) リプレイ用のフェッチリクエスト分岐（既存 `request_fetch()` を再利用） | 2 |
+| `Cargo.toml` | `tokio` (net, io-util, sync) + `futures` 依存追加 | 5 |
 
 ---
 
@@ -526,10 +536,9 @@ fn subscription(&self) -> Subscription<Message> {
 5. **~~ペインの動的変更~~** → **解決済み**
    - リプレイ中はペインの追加/削除/ティッカー変更を無効化する（設計判断 6.5）
 
-6. **StepBackward（巻き戻し）の複雑性**
+6. **~~StepBackward（巻き戻し）の複雑性~~** → **解決済み (Phase 4)**
    - `current_time` を戻すだけではチャートに既に注入済みのデータは消えない
-   - チャートリセット → Kline 再挿入 → `start_time` から `new_current_time` まで Trades 一括再注入が必要
-   - Phase 4 に延期して複雑度を管理する
+   - チャートリセット → Kline 再挿入 → TradeBuffer カーソルリセット + `drain_until(new_time)` で早送りする方式で解決
 
 7. **~~StreamKind の Hash 実装~~** → **解決済み**
    - `StreamKind` は `Hash + Eq` を既に derive 済み → `HashMap<StreamKind, TradeBuffer>` で問題なし
@@ -636,7 +645,21 @@ curl -X POST http://127.0.0.1:9876/api/replay/toggle
 - `Message::ReplayApi` ハンドラは `self.update(Message::Replay(...))` を再帰呼び出しして既存ロジックに委譲
 - `Subscription::run(replay_api::subscription)` でログイン画面中も含め常時 API サーバーを起動
 - 依存追加: `tokio` (net, io-util, sync) + `futures` を `Cargo.toml` に追加（tokio は iced 経由で利用可能だが直接参照が必要）
+- エラーハンドリング: `route()` を `Result<ReplayCommand, RouteError>` に変更し、パス不一致(404) と不正 JSON(400) を区別
 - 既存テスト 16 件全てパス
+- E2E テスト全 18 ケースパス（正常系 15 + エラー系 3）:
+  - `GET /status` → `{"mode":"Live"}` ✅
+  - `POST /toggle` → Live↔Replay 切替 ✅
+  - `POST /play` (JSON body) → Loading 状態に遷移 ✅
+  - `POST /pause` → Paused ✅
+  - `POST /resume` → Playing 再開 ✅
+  - `POST /step-forward` → current_time +60s ✅
+  - `POST /step-backward` → current_time -60s (start にクランプ) ✅
+  - `POST /speed` x4 → 1x→2x→5x→10x→1x サイクル ✅
+  - `POST /toggle` → Live 復帰 ✅
+  - 存在しないパス → 404 `{"error":"Not Found"}` ✅
+  - 不正 JSON body → 400 `{"error":"Bad Request: invalid JSON body"}` ✅
+  - フィールド不足 JSON → 400 `{"error":"Bad Request: invalid JSON body"}` ✅
 
 ### 9.7 参照すべき既存コード
 
@@ -646,4 +669,12 @@ curl -X POST http://127.0.0.1:9876/api/replay/toggle
 | `exchange/src/adapter/binance.rs:356-422` | `channel()` の実用例（WS接続 → Event ストリーム） |
 | `src/main.rs` の `subscription()` | 複数 Subscription の `batch` 結合パターン |
 | `src/main.rs` の `Message::Replay` ハンドラ | 各 ReplayMessage の処理ロジック（そのまま委譲可能） |
-| `src/replay.rs` | ReplayState / PlaybackState / ReplayMessage の全型定義 |
+| `src/replay.rs` | ReplayState / PlaybackState / ReplayMessage / ReplayCommand / ReplayStatus の全型定義 |
+| `src/replay_api.rs` | HTTP サーバー本体、ReplySender、ルーティング |
+
+### 9.8 設計上の知見・Tips
+
+- **iced の `Message: Clone` 制約**: `tokio::sync::oneshot::Sender` は `Clone` を実装しないため、`Arc<Mutex<Option<Sender>>>` でラップする `ReplySender` パターンが必要。`take()` で一度だけ送信し、Clone された複製からの二重送信を防ぐ
+- **`self.update()` 再帰呼び出し**: `Message::ReplayApi` ハンドラから `self.update(Message::Replay(...))` を呼ぶことで、既存の全 ReplayMessage ロジックをそのまま委譲できる。新しい ReplayMessage が追加されても API 側の変更は最小限
+- **HTTP パースの簡易実装**: `\r\n\r\n` でヘッダー/ボディを分割する最小限のパーサーで十分。keep-alive は不要（`Connection: close`）
+- **`Subscription::run` vs `Subscription::run_with`**: 引数なしのストリーム生成には `run`、設定値を渡す場合は `run_with` を使う。API サーバーは設定不要なので `run` を使用
