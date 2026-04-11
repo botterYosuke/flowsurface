@@ -7,7 +7,7 @@ user-invocable: true
 
 # リプレイ機能テスト手法
 
-仕様: `docs/plan/replay_header.md`
+仕様: `docs\plan\replay_state_persistence.md`
 
 ## テストデータの制御: saved-state.json カスタマイズ
 
@@ -19,15 +19,21 @@ user-invocable: true
 本番: C:\Users\{user}\AppData\Roaming\flowsurface\saved-state.json
 ```
 
-本番データを汚さず、テスト専用ディレクトリを使う:
+テスト前に本番データをバックアップし、テスト用 JSON を配置する:
 
 ```bash
-export FLOWSURFACE_DATA_PATH=/tmp/flowsurface-test
-mkdir -p $FLOWSURFACE_DATA_PATH
+DATA_DIR="$APPDATA/flowsurface"
+cp "$DATA_DIR/saved-state.json" "$DATA_DIR/saved-state.json.bak"
+
 # テスト用 JSON を配置してから起動
-cp test-fixture.json $FLOWSURFACE_DATA_PATH/saved-state.json
+cp test-fixture.json "$DATA_DIR/saved-state.json"
 cargo run --release
+
+# テスト後に復元
+cp "$DATA_DIR/saved-state.json.bak" "$DATA_DIR/saved-state.json"
 ```
+
+> **⚠ `FLOWSURFACE_DATA_PATH` の制限**: この環境変数は `data_path()` のベースパスを丸ごと置き換える設計だが、`path_name` 引数（`"saved-state.json"` 等）が**無視される**バグがある（`data/src/lib.rs:133-144`）。ディレクトリとして使えないため、現時点ではテスト用の環境分離には上記のバックアップ方式を使う。
 
 ### 全フィールドに `#[serde(default)]` — 空 JSON `{}` でも起動する
 
@@ -61,6 +67,40 @@ cargo run --release
   "timezone": "UTC",
   "trade_fetch_enabled": false,
   "size_in_quote_ccy": "Base"
+}
+```
+
+**最小構成 + リプレイ復元テスト** — 永続化された Replay モードで起動するか確認用:
+
+```json
+{
+  "layout_manager": {
+    "layouts": [{
+      "name": "Test",
+      "dashboard": {
+        "pane": {
+          "KlineChart": {
+            "layout": { "splits": [0.78], "autoscale": "FitToVisible" },
+            "kind": "Candles",
+            "stream_type": [{ "Kline": { "ticker": "BinanceLinear:BTCUSDT", "timeframe": "M1" } }],
+            "settings": { "tick_multiply": null, "visual_config": null, "selected_basis": { "Time": "M1" } },
+            "indicators": ["Volume"],
+            "link_group": "A"
+          }
+        },
+        "popout": []
+      }
+    }],
+    "active_layout": "Test"
+  },
+  "timezone": "UTC",
+  "trade_fetch_enabled": false,
+  "size_in_quote_ccy": "Base",
+  "replay": {
+    "mode": "replay",
+    "range_start": "2026-04-10 09:00",
+    "range_end": "2026-04-10 15:00"
+  }
 }
 ```
 
@@ -195,6 +235,52 @@ done
 - **エラーレスポンス**: 不正パス → 404、不正 JSON body → 400 `{"error":"Bad Request: invalid JSON body"}`
 - **ポート変更**: `FLOWSURFACE_API_PORT=9877 cargo run --release` で別ポート起動可能。複数インスタンスの競合回避に使う
 
+### 永続化の E2E 検証
+
+リプレイ設定が `saved-state.json` に保存・復元されることを確認する手順:
+
+```bash
+API="http://127.0.0.1:9876/api/replay"
+DATA_DIR="$APPDATA/flowsurface"
+
+# 1. Replay モードに切替 + 範囲入力して保存（UI で操作して終了）
+
+# 2. saved-state.json の replay フィールドを確認
+node -e "const fs=require('fs'); const p=process.env.APPDATA+'/flowsurface/saved-state.json'; const s=JSON.parse(fs.readFileSync(p,'utf8')); console.log(JSON.stringify(s.replay,null,2))"
+# 期待: {"mode":"replay","range_start":"...","range_end":"..."}
+# 注意: Windows では $APPDATA のバックスラッシュが node のダブルクォート内で
+#        エスケープされるため、bash 変数展開ではなく process.env.APPDATA を使う
+
+# 3. 再起動して API で復元を確認
+cargo run --release &
+for i in $(seq 1 30); do curl -s $API/status && break; sleep 1; done
+curl -s $API/status
+# 期待: {"mode":"Replay"} (playback は null — Play 押下前)
+```
+
+**テンプレートを使った復元テスト**:
+
+```bash
+# replay 付きテンプレートを直接配置
+cp "$DATA_DIR/saved-state.json" "$DATA_DIR/saved-state.json.bak"
+# 「最小構成 + リプレイ復元テスト」テンプレートを saved-state.json にコピー
+
+cargo run --release &
+for i in $(seq 1 30); do curl -s $API/status && break; sleep 1; done
+curl -s $API/status
+# 期待: {"mode":"Replay"} — Replay モードで起動し、range_start/end が復元されている
+```
+
+**後方互換テスト**: `replay` フィールドなしの JSON（旧バージョン形式）で起動:
+
+```bash
+# replay キーなしの最小構成テンプレートを配置
+cargo run --release &
+for i in $(seq 1 30); do curl -s $API/status && break; sleep 1; done
+curl -s $API/status
+# 期待: {"mode":"Live"} — デフォルトの Live モードで起動
+```
+
 ### Windows 固有の注意
 
 - exe 起動中は `cargo build` が「アクセスが拒否されました」で失敗する → `taskkill //f //im flowsurface.exe` で先に停止
@@ -204,8 +290,11 @@ done
 
 ```bash
 cargo test --bin flowsurface replay   # replay モジュールのみ
-cargo test --bin flowsurface          # 全テスト
+cargo test --bin flowsurface          # bin 内の全テスト
+cargo test -p flowsurface-data        # data crate のテスト（ReplayConfig 含む）
 ```
+
+> **注意**: data crate のパッケージ名は `flowsurface-data`（`cargo test -p data` ではない）。`Cargo.toml` の `[package] name` で確認可能。
 
 ### テスト設計のパターン
 
@@ -217,3 +306,24 @@ cargo test --bin flowsurface          # 全テスト
 | クランプテスト | `advance_time` | `end_time` を超えないことを検証 |
 | サイクルテスト | `cycle_speed` | 4 回呼んで元に戻ることを検証 |
 | ヘルパー関数 | `test_trade(time: u64)` | price/qty は固定値でテスト対象外のフィールドを簡略化 |
+| ラウンドトリップ | `ReplayConfig` serialize→deserialize | 保存→読込で値が完全に保たれることを検証 |
+| 変換ロジック | `ReplayState → ReplayConfig` | `to_replay_config()` / `from_replay_config()` を分離テスト |
+| 後方互換 | `State` の JSON に `replay` キーなし | `#[serde(default)]` で Live にフォールバックすることを検証 |
+| フォールバック | 未知の `mode` 値 (`"unknown"`) | `_ =>` パターンで Live に復帰することを検証 |
+| 部分フィールド | `ReplayConfig` の一部キーだけの JSON | 欠損フィールドが `Default` で補完されることを検証 |
+
+### 永続化テストの設計指針
+
+`ReplayState`（ランタイム）と `ReplayConfig`（永続化用）は別の構造体。テストは変換の双方向を独立して検証する:
+
+```
+保存:  ReplayState → ReplayConfig → JSON
+復元:  JSON → ReplayConfig → ReplayState
+```
+
+**保存しない項目を確認するテスト**も重要:
+- `PlaybackState` (current_time, speed, status, trade_buffers) は `ReplayConfig` に含まれない
+- `last_tick` (`std::time::Instant`) は serialize 不可で永続化対象外
+- 復元後の `playback` は常に `None`（ユーザーが Play を押して再開する設計）
+
+テストヘルパーは `replay.rs` の `#[cfg(test)]` 内に `to_replay_config()` / `from_replay_config()` として定義し、`main.rs` の実装ロジックと同じ変換を独立して検証する。
