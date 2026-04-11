@@ -439,7 +439,7 @@ impl State {
                     let basis = c.basis();
                     let saved_indicators = indicators.clone();
 
-                    *chart = Some(KlineChart::new(
+                    let mut new_chart = KlineChart::new(
                         saved_layout.clone(),
                         basis,
                         step,
@@ -448,7 +448,9 @@ impl State {
                         &saved_indicators,
                         ti,
                         &saved_kind,
-                    ));
+                    );
+                    new_chart.enable_replay_mode();
+                    *chart = Some(new_chart);
                     *layout = saved_layout;
                     *kind = saved_kind;
                 }
@@ -1824,6 +1826,15 @@ impl State {
         if let Content::ShaderHeatmap { chart, .. } = &mut self.content {
             *chart = None;
             self.status = Status::Ready;
+        }
+    }
+
+    /// リプレイ進行: kline バッファから current_time 以下のデータを挿入する
+    pub fn replay_advance_klines(&mut self, current_time: u64) {
+        if let Content::Kline { chart, .. } = &mut self.content {
+            if let Some(c) = chart {
+                c.replay_advance(current_time);
+            }
         }
     }
 

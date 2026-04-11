@@ -160,6 +160,15 @@ pub struct KlineChart {
     request_handler: RequestHandler,
     study_configurator: study::Configurator<FootprintStudy>,
     last_tick: Instant,
+    /// リプレイモード: kline をバッファリングして段階的に挿入する
+    replay_kline_buffer: Option<ReplayKlineBuffer>,
+}
+
+/// リプレイ用 kline バッファ。時系列順にソートされた kline を保持し、
+/// current_time に追いつくまで段階的に挿入する。
+struct ReplayKlineBuffer {
+    klines: Vec<Kline>,
+    cursor: usize,
 }
 
 impl KlineChart {
@@ -250,6 +259,7 @@ impl KlineChart {
                     kind: kind.clone(),
                     study_configurator: study::Configurator::new(),
                     last_tick: Instant::now(),
+                    replay_kline_buffer: None,
                 }
             }
             Basis::Tick(interval) => {
@@ -306,9 +316,72 @@ impl KlineChart {
                     kind: kind.clone(),
                     study_configurator: study::Configurator::new(),
                     last_tick: Instant::now(),
+                    replay_kline_buffer: None,
                 }
             }
         }
+    }
+
+    /// リプレイモードを有効にする。以降の insert_hist_klines はバッファに格納される。
+    pub fn enable_replay_mode(&mut self) {
+        self.replay_kline_buffer = Some(ReplayKlineBuffer {
+            klines: Vec::new(),
+            cursor: 0,
+        });
+    }
+
+    /// リプレイモードを無効にする。
+    pub fn disable_replay_mode(&mut self) {
+        self.replay_kline_buffer = None;
+    }
+
+    /// リプレイ進行: current_time 以下の kline をバッファからチャートに挿入する。
+    /// 新しい kline が挿入された場合は true を返す。
+    pub fn replay_advance(&mut self, current_time: u64) -> bool {
+        let buf = match &mut self.replay_kline_buffer {
+            Some(b) => b,
+            None => return false,
+        };
+
+        let start = buf.cursor;
+        while buf.cursor < buf.klines.len() && buf.klines[buf.cursor].time <= current_time {
+            buf.cursor += 1;
+        }
+
+        if buf.cursor == start {
+            return false;
+        }
+
+        let new_klines = &buf.klines[start..buf.cursor];
+
+        match &mut self.data_source {
+            PlotData::TimeBased(timeseries) => {
+                timeseries.insert_klines(new_klines);
+                timeseries.insert_trades_existing_buckets(&self.raw_trades);
+
+                if let Some(ts_latest) = timeseries.latest_timestamp() {
+                    if ts_latest > self.chart.latest_x {
+                        self.chart.latest_x = ts_latest;
+                    }
+                }
+
+                self.indicators
+                    .values_mut()
+                    .filter_map(Option::as_mut)
+                    .for_each(|indi| indi.on_insert_klines(new_klines));
+
+                if let Some(last_k) = new_klines.last() {
+                    self.chart.last_price =
+                        Some(PriceInfoLabel::new(last_k.close, last_k.open));
+                }
+            }
+            PlotData::TickBased(_) => {
+                // TickBased は trades ベースで構築されるため kline バッファ不要
+            }
+        }
+
+        self.invalidate(None);
+        true
     }
 
     pub fn update_latest_kline(&mut self, kline: &Kline) {
@@ -601,6 +674,18 @@ impl KlineChart {
             }
             PlotData::TimeBased(ref mut timeseries) => {
                 timeseries.insert_trades_existing_buckets(buffer);
+
+                if let Some(last_trade) = buffer.last() {
+                    let rounded =
+                        (last_trade.time / timeseries.interval.to_milliseconds())
+                            * timeseries.interval.to_milliseconds();
+                    if let Some(dp) = timeseries.datapoints.get(&rounded) {
+                        self.chart.last_price =
+                            Some(PriceInfoLabel::new(dp.kline.close, dp.kline.open));
+                    }
+                }
+
+                self.invalidate(None);
             }
         }
     }
@@ -623,6 +708,33 @@ impl KlineChart {
     }
 
     pub fn insert_hist_klines(&mut self, req_id: uuid::Uuid, klines_raw: &[Kline]) {
+        // リプレイモード時はバッファに格納して段階的に挿入する
+        if let Some(ref mut buf) = self.replay_kline_buffer {
+            // cursor 直前ま��の最大時刻を記録（��ート後にカーソル位置を復元す���ため）
+            let last_inserted_time = if buf.cursor > 0 {
+                buf.klines.get(buf.cursor - 1).map(|k| k.time)
+            } else {
+                None
+            };
+
+            buf.klines.extend_from_slice(klines_raw);
+            buf.klines.sort_by_key(|k| k.time);
+            buf.klines.dedup_by_key(|k| k.time);
+
+            // ソート後にカーソルを正しい位置に復元
+            if let Some(last_t) = last_inserted_time {
+                buf.cursor = buf.klines.partition_point(|k| k.time <= last_t);
+            }
+
+            if !klines_raw.is_empty() {
+                self.request_handler.mark_completed(req_id);
+            } else {
+                self.request_handler
+                    .mark_failed(req_id, "No new data received".to_string());
+            }
+            return;
+        }
+
         match self.data_source {
             PlotData::TimeBased(ref mut timeseries) => {
                 let before = timeseries.datapoints.len();

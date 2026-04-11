@@ -639,6 +639,112 @@ curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:9876/api/replay/toggle"
 | レイアウト CRUD | 作成→一覧確認→削除→一覧確認 | 名前の一意性 |
 | 設定変更 | POST→GET で反映確認 | 再起動後の永続化も確認 |
 
+### カテゴリ 4: マルチペイン・リプレイ回帰テスト（7項目、全PASS確認済み 2026-04-12）
+
+**背景**: kline/trades 分離修正（trades を `Task::sip` でバックグラウンド実行）の回帰テスト。
+単一ペイン構成では trades フェッチの遅延が顕在化しないため、マルチペイン + 長時間レンジで検証する。
+
+**テンプレート**: マルチペイン構成（BTCUSDT KlineChart + ETHUSDT KlineChart + BTCUSDT TimeAndSales）
+
+```json
+{
+  "layout_manager": {
+    "layouts": [{
+      "name": "E2E-MultiPane-Replay",
+      "dashboard": {
+        "pane": {
+          "Split": {
+            "axis": "Vertical", "ratio": 0.33,
+            "a": {
+              "KlineChart": {
+                "layout": { "splits": [0.78], "autoscale": "FitToVisible" },
+                "kind": "Candles",
+                "stream_type": [{ "Kline": { "ticker": "BinanceLinear:BTCUSDT", "timeframe": "M1" } }],
+                "settings": { "tick_multiply": null, "visual_config": null, "selected_basis": { "Time": "M1" } },
+                "indicators": ["Volume"],
+                "link_group": "A"
+              }
+            },
+            "b": {
+              "Split": {
+                "axis": "Vertical", "ratio": 0.5,
+                "a": {
+                  "KlineChart": {
+                    "layout": { "splits": [0.78], "autoscale": "FitToVisible" },
+                    "kind": "Candles",
+                    "stream_type": [{ "Kline": { "ticker": "BinanceLinear:ETHUSDT", "timeframe": "M1" } }],
+                    "settings": { "tick_multiply": null, "visual_config": null, "selected_basis": { "Time": "M1" } },
+                    "indicators": ["Volume"],
+                    "link_group": "B"
+                  }
+                },
+                "b": {
+                  "TimeAndSales": {
+                    "stream_type": [{ "Trades": { "ticker": "BinanceLinear:BTCUSDT" } }],
+                    "settings": { "tick_multiply": null, "visual_config": null, "selected_basis": { "Time": "MS100" } },
+                    "link_group": "A"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "popout": []
+      }
+    }],
+    "active_layout": "E2E-MultiPane-Replay"
+  },
+  "timezone": "UTC",
+  "trade_fetch_enabled": false,
+  "size_in_quote_ccy": "Base",
+  "replay": {
+    "mode": "replay",
+    "range_start": "YYYY-MM-DD HH:MM",
+    "range_end": "YYYY-MM-DD HH:MM"
+  }
+}
+```
+
+**注意**: `range_start` / `range_end` は過去 24-48h 以内、12 時間レンジを推奨。
+
+```bash
+# Test A: Playing transition within 15 seconds (regression for kline/trades separation)
+PLAY_RESULT=$(curl -s -X POST "$API/replay/play" \
+  -H "Content-Type: application/json" \
+  -d "{\"start\":\"$RS\",\"end\":\"$RE\"}")
+PLAY_ST=$(jqn "$PLAY_RESULT" "d.status")
+# Accept Loading or Playing
+START_TIME=$(date +%s)
+for i in $(seq 1 15); do
+  ST=$(jqn "$(curl -s "$API/replay/status")" "d.status")
+  [ "$ST" = "Playing" ] && break
+  sleep 1
+done
+ELAPSED=$(($(date +%s) - START_TIME))
+# MUST reach Playing within 15s — if not, trades may be blocking kline gate
+
+# Test B: current_time progression
+CT1=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
+sleep 3
+CT2=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
+# CT2 > CT1 (use BigInt for comparison)
+
+# Test C: App stability after 10s (trades arriving in background)
+sleep 10
+ST=$(jqn "$(curl -s "$API/replay/status")" "d.status")
+# Still "Playing" — app not crashed by background trades
+```
+
+### 検証の指針（追加）
+
+| 検証対象 | 方法 | 注意 |
+|---------|------|------|
+| Loading→Playing 高速遷移 | 15秒タイムアウト付きポーリング | **マルチペイン構成必須**。単一ペインでは trades 影響が小さく検出不能 |
+| trades バックグラウンド | Playing 遷移後 10s 経過しても Playing 継続 | 直接 API なし。間接検証 |
+| BigInt 比較 | `node -e "console.log(BigInt(a)>BigInt(b))"` | current_time は大きい数値。JS Number で精度不足の場合あり |
+
+---
+
 ## Windows 固有の注意
 
 - **`jq` がインストールされていない** → `node -e` でJSON パースする（上記 `jqn` ヘルパー）

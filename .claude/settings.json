@@ -49,7 +49,20 @@
       "Bash(/c/Python311/python.exe --version)",
       "Bash(cargo clippy:*)",
       "Edit(/.claude/skills/e2e-replay-api/**)",
-      "Edit(/.claude/skills/e2e-replay/**)"
+      "Edit(/.claude/skills/e2e-replay/**)",
+      "Skill(e2e-test)",
+      "Skill(e2e-test:*)",
+      "Bash(tee /tmp/replay_debug.log)",
+      "Bash(echo \"App started in background, PID=$!\")",
+      "Bash(tee /tmp/replay_debug2.log)",
+      "Bash(echo \"App started, PID=$!\")",
+      "Bash(tee /tmp/replay_debug3.log)",
+      "Bash(tee /tmp/replay_final.log)",
+      "Bash(tee /tmp/replay_test.log)",
+      "Bash(tee /tmp/replay_dbg4.log)",
+      "Bash(tee /tmp/replay_dbg5.log)",
+      "Bash(tee /tmp/replay_dbg6.log)",
+      "Bash(tee /tmp/replay_dbg7.log)"
     ],
     "additionalDirectories": [
       "C:\\Users\\sasai\\Documents\\marimo\\.claude\\plans",

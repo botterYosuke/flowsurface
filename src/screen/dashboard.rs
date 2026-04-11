@@ -1032,10 +1032,16 @@ impl Dashboard {
         main_window: window::Id,
     ) -> Task<Message> {
         let mut found_match = false;
+        let trade_ticker = stream.ticker_info();
 
         self.iter_all_panes_mut(main_window)
             .for_each(|(_, _, pane_state)| {
-                if pane_state.matches_stream(stream) {
+                // 完全一致 または 同一 ticker_info を持つペインにマッチ
+                let matched = pane_state.matches_stream(stream)
+                    || pane_state
+                        .stream_pair()
+                        .map_or(false, |ti| ti == trade_ticker);
+                if matched {
                     match &mut pane_state.content {
                         pane::Content::Heatmap { chart, .. } => {
                             if let Some(c) = chart {
@@ -1075,6 +1081,14 @@ impl Dashboard {
         } else {
             self.refresh_streams(main_window)
         }
+    }
+
+    /// リプレイ進行: 全ペインの kline バッファから current_time 以下のデータを挿入する
+    pub fn replay_advance_klines(&mut self, current_time: u64, main_window: window::Id) {
+        self.iter_all_panes_mut(main_window)
+            .for_each(|(_, _, state)| {
+                state.replay_advance_klines(current_time);
+            });
     }
 
     pub fn invalidate_all_panes(&mut self, main_window: window::Id) {

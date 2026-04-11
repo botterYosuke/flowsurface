@@ -1,7 +1,7 @@
 # リプレイヘッダー機能 — 実装プラン
 
 **作成日**: 2026-04-10
-**最終更新**: 2026-04-11
+**最終更新**: 2026-04-12
 **対象**: メインウィンドウにヘッダーバーを追加し、ライブ/リプレイモードの切替と再生制御を実現する
 **状態**: Phase 1-5 全て完了 ✅
 
@@ -144,8 +144,7 @@ pub struct PlaybackState {
     /// 再生速度倍率（1x, 2x, 5x, 10x, ...）
     pub speed: f64,
     /// プリフェッチ済み Trades バッファ（ストリームごと）
-    /// ※ Kline は再生開始時に insert_hist_klines() で一括挿入するためバッファ不要
-    /// NOTE: StreamKind が Hash+Eq を derive していない場合は Vec<(StreamKind, TradeBuffer)> に変更
+    /// ※ Kline は KlineChart 内の ReplayKlineBuffer に格納し、Tick で段階挿入
     pub trade_buffers: HashMap<StreamKind, TradeBuffer>,
 }
 
@@ -269,8 +268,9 @@ Play 押下
     │      （settings / streams は保持、content のみ KlineChart::new() 等で再生成）
     ├── 4. PlaybackState を初期化（status = Loading）、ヘッダーに "Loading..." 表示
     ├── 5. 既存の fetcher::request_fetch() を利用して過去データを取得:
-    │       ├── FetchRange::Kline(start, end) → Kline は一括 insert_hist_klines(req_id, klines)
+    │       ├── FetchRange::Kline(start, end) → KlineChart の ReplayKlineBuffer にバッファリング
     │       │   ※ req_id はリプレイ用にダミー Uuid::new_v4() を生成して渡す
+    │       │   ※ insert_hist_klines() がリプレイモード検出 → バッファに格納（チャートには直接挿入しない）
     │       └── FetchRange::Trades(start, end) → fetch_trades_batched() を Task::sip() で消費
     │           各バッチ → TradesBatchReceived → TradeBuffer に追記
     │           全バッチ完了 → DataLoaded → status を Playing に遷移
@@ -290,11 +290,12 @@ PlaybackState を初期化 (current_time = start_time, status = Playing)
     ▼
 リプレイモード & Playing の場合:
     ├── current_time += elapsed_ms * speed
+    ├── dashboard.replay_advance_klines(current_time) で kline バッファから current_time 以下の kline を段階挿入
     ├── current_time <= t の Trades を trade_buffers から取り出す
     ├── dashboard.ingest_trades(stream, buffer, update_t, main_window) に注入
     │   ※ update_t = バッチ内最終トレードの time
-    │   ※ ingest_trades() は Heatmap / ShaderHeatmap / Kline / TimeAndSales / Ladder に分配
-    │   （Kline は再生開始時に一括挿入済みのため、フレーム毎の注入は Trades のみ）
+    │   ※ ingest_trades() は ticker_info ベースでペインをマッチング（StreamKind 完全一致 OR 同一 ticker_info）
+    │   ※ Heatmap / ShaderHeatmap / Kline / TimeAndSales / Ladder に分配
     └── current_time >= end_time なら Paused に遷移
 
 [ライブに戻す]
@@ -420,6 +421,18 @@ fn subscription(&self) -> Subscription<Message> {
 - Depth unavailable: `pane::State::view()` に `is_replay: bool` パラメータ追加、`top_left_buttons` に条件付きテキスト追加
 - テスト追加: drain_trades (3件), advance_time (1件), cycle_speed (1件) → 計 16 件
 
+**Phase 3 追加修正 (2026-04-12) — チャート段階更新対応**:
+- **問題**: Kline を再生開始時に一括挿入していたため、チャートが最初から完成状態で表示され、リプレイ進行に合わせた更新が行われなかった
+- **原因（3つ）**:
+  1. 全 kline が `insert_hist_klines()` で一括ロード → チャートが即座に全ローソク足を表示
+  2. `ingest_trades()` の `matches_stream()` が `StreamKind` の完全一致のみ → Kline ペインは `StreamKind::Trades` を持たないため trades が届かない
+  3. TimeBased パスの `insert_trades()` で `invalidate()` / `last_price` 更新が欠落 → チャートが再描画されない
+- **修正**:
+  1. `KlineChart` に `ReplayKlineBuffer` 追加。`enable_replay_mode()` で有効化し、`insert_hist_klines()` はバッファに格納。Tick ループで `replay_advance(current_time)` により段階挿入。バッファは `dedup_by_key` で重複除去し、`partition_point` でカーソル位置を復元
+  2. `ingest_trades()` で `matches_stream()` に加え `stream_pair()` の `ticker_info` 一致でもマッチするよう変更
+  3. TimeBased `insert_trades()` に `invalidate(None)` と `last_price` 更新を追加
+- **変更ファイル**: `src/chart/kline.rs`, `src/screen/dashboard.rs`, `src/screen/dashboard/pane.rs`, `src/main.rs`
+
 ### Phase 4: ライブ復帰・巻き戻し・クリーンアップ
 
 | Step | 内容 | ファイル | 状態 |
@@ -447,9 +460,10 @@ fn subscription(&self) -> Subscription<Message> {
 |---------|---------|-------|
 | `src/replay.rs` | **新規**: ReplayState, PlaybackState, TradeBuffer, ReplayMessage, 再生エンジン, ReplayCommand/ReplayStatus (API型) | 1-5 |
 | `src/replay_api.rs` | **新規**: ローカル HTTP サーバー（`tokio::net::TcpListener`）、ReplySender ラッパー、ルーティング | 5 |
-| `src/main.rs` | Flowsurface に replay フィールド追加、Message::Replay/ReplayApi 追加、view_replay_header(), update() でのリプレイ制御・API ハンドラ, subscription() の分岐 | 1-5 |
-| `src/screen/dashboard.rs` | リプレイ用のペイン content 再構築関数、リプレイ中のペイン操作無効化 | 2 |
-| `src/screen/dashboard/pane.rs` | Heatmap の「Depth unavailable」オーバーレイ表示 | 3 |
+| `src/main.rs` | Flowsurface に replay フィールド追加、Message::Replay/ReplayApi 追加、view_replay_header(), update() でのリプレイ制御・API ハンドラ, subscription() の分岐、Tick ループで kline 段階挿入 | 1-5 |
+| `src/screen/dashboard.rs` | リプレイ用のペイン content 再構築関数、リプレイ中のペイン操作無効化、`replay_advance_klines()`, `ingest_trades()` の ticker_info マッチング | 2-3 |
+| `src/screen/dashboard/pane.rs` | Heatmap の「Depth unavailable」オーバーレイ表示、`rebuild_content_for_replay()` で replay モード有効化、`replay_advance_klines()` | 3 |
+| `src/chart/kline.rs` | `ReplayKlineBuffer` 追加、`enable_replay_mode()` / `replay_advance()` 実装、TimeBased `insert_trades()` の invalidate/last_price 修正 | 3 |
 | `src/connector/fetcher.rs` | (軽微) リプレイ用のフェッチリクエスト分岐（既存 `request_fetch()` を再利用） | 2 |
 | `Cargo.toml` | `tokio` (net, io-util, sync) + `futures` 依存追加 | 5 |
 
@@ -457,12 +471,14 @@ fn subscription(&self) -> Subscription<Message> {
 
 ## 6. 設計判断とトレードオフ
 
-### 6.1 データ注入方式: Kline 一括挿入 + Trades フレーム注入
+### 6.1 データ注入方式: Kline 段階挿入 + Trades フレーム注入
 
-**採用**: Kline は `insert_hist_klines()` で再生開始時に一括挿入、Trades は `ingest_trades()` でフレーム毎に注入
+**採用（2026-04-12 改訂）**: Kline は `ReplayKlineBuffer` にバッファリングし `current_time` に合わせて段階的に挿入。Trades は `ingest_trades()` でフレーム毎に注入
 
-- メリット: Kline の再生ロジックが不要（バッファ・カーソル管理なし）。チャート描画コードの変更が不要
-- デメリット: リプレイ開始時にペインの content を再構築（`KlineChart::new()` 等）してクリアする必要がある
+- 初期方式では Kline を再生開始時に一括挿入していたが、リプレイ進行に合わせてチャートが更新されない問題が発生したため、Kline もバッファリング＋段階挿入に変更
+- **KlineChart に `ReplayKlineBuffer` を追加**: `enable_replay_mode()` で有効化。`insert_hist_klines()` はバッファに格納し、Tick ループで `replay_advance(current_time)` を呼んで `current_time` 以下の kline を段階的にチャートに挿入
+- **`ingest_trades()` の ticker_info マッチング**: Kline ペインは `StreamKind::Trades` をストリームに持たないため、`ticker_info` ベースでマッチングするよう修正
+- **TimeBased `insert_trades` の invalidate 修正**: TimeBased パスに `invalidate()` と `last_price` 更新が欠落していたため追加
 - チャートリセット方式: ペインの `settings` / `streams` は保持したまま `content` のみ再生成する
 
 ### 6.2 WebSocket 停止方式: subscription 除外 vs フラグ制御

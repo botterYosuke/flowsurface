@@ -292,38 +292,46 @@ impl Flowsurface {
                     .unwrap_or(16.0);
                 self.replay.last_tick = Some(now);
 
-                let replay_trades = if let Some(pb) = &mut self.replay.playback {
-                    if pb.status == replay::PlaybackStatus::Playing {
-                        let current_time = pb.advance_time(elapsed_ms);
+                let (replay_trades, replay_current_time) =
+                    if let Some(pb) = &mut self.replay.playback {
+                        if pb.status == replay::PlaybackStatus::Playing {
+                            let current_time = pb.advance_time(elapsed_ms);
 
-                        // 各ストリームの TradeBuffer から current_time 以前を収集
-                        let streams: Vec<_> = pb.trade_buffers.keys().copied().collect();
-                        let mut collected = Vec::new();
+                            // 各ストリームの TradeBuffer から current_time 以前を収集
+                            let streams: Vec<_> = pb.trade_buffers.keys().copied().collect();
+                            let mut collected = Vec::new();
 
-                        for stream in streams {
-                            if let Some(buffer) = pb.trade_buffers.get_mut(&stream) {
-                                let drained = buffer.drain_until(current_time);
-                                if !drained.is_empty() {
-                                    let update_t = drained.last().map_or(current_time, |t| t.time);
-                                    collected.push((stream, drained.to_vec(), update_t));
+                            for stream in streams {
+                                if let Some(buffer) = pb.trade_buffers.get_mut(&stream) {
+                                    let drained = buffer.drain_until(current_time);
+                                    if !drained.is_empty() {
+                                        let update_t =
+                                            drained.last().map_or(current_time, |t| t.time);
+                                        collected.push((stream, drained.to_vec(), update_t));
+                                    }
                                 }
                             }
-                        }
 
-                        // current_time >= end_time なら自動停止
-                        if pb.current_time >= pb.end_time {
-                            pb.status = replay::PlaybackStatus::Paused;
-                        }
+                            // current_time >= end_time なら自動停止
+                            if pb.current_time >= pb.end_time {
+                                pb.status = replay::PlaybackStatus::Paused;
+                            }
 
-                        Some(collected)
+                            (Some(collected), Some(current_time))
+                        } else {
+                            (None, None)
+                        }
                     } else {
-                        None
-                    }
-                } else {
-                    None
-                };
+                        (None, None)
+                    };
 
                 let mut all_tasks: Vec<Task<Message>> = Vec::new();
+
+                // kline バッファから current_time 以下のローソク足を段階的にチャートに挿入
+                if let Some(current_time) = replay_current_time {
+                    self.active_dashboard_mut()
+                        .replay_advance_klines(current_time, main_window_id);
+                }
 
                 if let Some(collected) = replay_trades {
                     for (stream, trades, update_t) in &collected {
@@ -792,7 +800,7 @@ impl Flowsurface {
                             .collect();
 
                         // 各 kline ストリームに対して fetch_klines を発行
-                        let mut all_tasks: Vec<Task<Message>> = kline_targets
+                        let kline_tasks: Vec<Task<Message>> = kline_targets
                             .into_iter()
                             .map(|(pane_id, stream)| {
                                 let req_id = uuid::Uuid::new_v4();
@@ -812,7 +820,8 @@ impl Flowsurface {
                             })
                             .collect();
 
-                        // Binance trades のフェッチ
+                        // Binance trades のフェッチ（バックグラウンドで独立実行）
+                        let mut trade_tasks: Vec<Task<Message>> = Vec::new();
                         for stream in &trade_targets {
                             let ticker_info = stream.ticker_info();
                             let stream_kind = *stream;
@@ -841,18 +850,28 @@ impl Flowsurface {
                                 },
                             )
                             .abortable();
-                            all_tasks.push(task);
+                            trade_tasks.push(task);
                         }
 
-                        if all_tasks.is_empty() {
+                        // kline タスク完了後に DataLoaded → Playing へ遷移
+                        // trades は独立してバックグラウンドでストリーミング
+                        let mut all_tasks: Vec<Task<Message>> = Vec::new();
+
+                        if kline_tasks.is_empty() {
                             if let Some(pb) = &mut self.replay.playback {
                                 pb.status = replay::PlaybackStatus::Playing;
                             }
                         } else {
-                            // 全 fetch が完了したら DataLoaded を発行
                             let data_loaded =
                                 Task::done(Message::Replay(ReplayMessage::DataLoaded));
-                            return Task::batch(all_tasks).chain(data_loaded);
+                            all_tasks
+                                .push(Task::batch(kline_tasks).chain(data_loaded));
+                        }
+
+                        all_tasks.extend(trade_tasks);
+
+                        if !all_tasks.is_empty() {
+                            return Task::batch(all_tasks);
                         }
                     }
                     ReplayMessage::Pause => {
@@ -976,7 +995,6 @@ impl Flowsurface {
                     }
                     ReplayMessage::TradesFetchCompleted(_stream) => {
                         // trades フェッチ完了（個別ストリーム）。
-                        // DataLoaded は全タスク完了後に .chain() で発行される。
                     }
                     ReplayMessage::DataLoaded => {
                         if let Some(pb) = &mut self.replay.playback {
