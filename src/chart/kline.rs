@@ -161,14 +161,14 @@ pub struct KlineChart {
     study_configurator: study::Configurator<FootprintStudy>,
     last_tick: Instant,
     /// リプレイモード: kline をバッファリングして段階的に挿入する
-    replay_kline_buffer: Option<ReplayKlineBuffer>,
+    pub(crate) replay_kline_buffer: Option<ReplayKlineBuffer>,
 }
 
 /// リプレイ用 kline バッファ。時系列順にソートされた kline を保持し、
 /// current_time に追いつくまで段階的に挿入する。
-struct ReplayKlineBuffer {
-    klines: Vec<Kline>,
-    cursor: usize,
+pub(crate) struct ReplayKlineBuffer {
+    pub(crate) klines: Vec<Kline>,
+    pub(crate) cursor: usize,
 }
 
 impl KlineChart {
@@ -1997,4 +1997,64 @@ impl BidAskArea {
 #[inline]
 fn should_show_text(cell_height_unscaled: f32, cell_width_unscaled: f32, min_w: f32) -> bool {
     cell_height_unscaled > 8.0 && cell_width_unscaled > min_w
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_buffer(klines: Vec<Kline>, cursor: usize) -> ReplayKlineBuffer {
+        ReplayKlineBuffer { klines, cursor }
+    }
+
+    fn make_kline(time: u64) -> Kline {
+        use exchange::{Volume, unit::{Qty, price::Price}};
+        Kline {
+            time,
+            open: Price::from_f32(100.0),
+            high: Price::from_f32(110.0),
+            low: Price::from_f32(90.0),
+            close: Price::from_f32(105.0),
+            volume: Volume::TotalOnly(Qty::zero()),
+        }
+    }
+
+    #[test]
+    fn buffer_cursor_reset_allows_full_reinsert() {
+        // 5 本の kline を持つバッファを作成し、cursor を全進行(5)にする
+        let klines: Vec<Kline> = (1..=5).map(|i| make_kline(i * 60_000)).collect();
+        let mut buf = make_buffer(klines, 5);
+
+        // cursor をリセット
+        buf.cursor = 0;
+
+        // cursor=0 から time=180_000 まで進行 → 3 本が対象
+        let start = buf.cursor;
+        while buf.cursor < buf.klines.len() && buf.klines[buf.cursor].time <= 180_000 {
+            buf.cursor += 1;
+        }
+        assert_eq!(buf.cursor, 3, "cursor should advance to 3 (klines at 60k, 120k, 180k)");
+        assert_eq!(buf.cursor - start, 3, "3 klines should be selected");
+    }
+
+    #[test]
+    fn buffer_take_and_restore_preserves_klines() {
+        // pub(crate) アクセスによるバッファの退避・復元をテスト
+        let klines: Vec<Kline> = (1..=10).map(|i| make_kline(i * 60_000)).collect();
+        let mut buf = Some(make_buffer(klines, 7));
+
+        // take で退避
+        let mut saved = buf.take();
+        assert!(buf.is_none(), "original should be None after take");
+
+        // cursor リセットして復元
+        if let Some(ref mut b) = saved {
+            b.cursor = 0;
+        }
+        buf = saved;
+
+        let b = buf.as_ref().unwrap();
+        assert_eq!(b.klines.len(), 10, "all klines preserved");
+        assert_eq!(b.cursor, 0, "cursor reset to 0");
+    }
 }

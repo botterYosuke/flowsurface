@@ -956,8 +956,7 @@ impl Flowsurface {
                         }
                     }
                     ReplayMessage::StepBackward => {
-                        // 巻き戻し: チャートリセット → Kline 再挿入 → start からの Trades 再注入
-                        // current_time を 1 分前に戻す（最小は start_time）
+                        // 巻き戻し: バッファ保持版リビルド → kline 再挿入（フェッチ不要）
                         if let Some(pb) = &mut self.replay.playback {
                             let step_ms = 60_000u64;
                             let new_time =
@@ -970,55 +969,21 @@ impl Flowsurface {
                                 buffer.drain_until(new_time);
                             }
 
-                            // kline 再取得中は tick が current_time を進めないよう Loading にする
-                            pb.status = replay::PlaybackStatus::Loading;
-                            // DataLoaded 後は Paused にして、ユーザーが戻った位置を確認できるようにする
-                            pb.resume_status = replay::PlaybackStatus::Paused;
+                            // StepBackward 後は Paused で止める（Loading 不要）
+                            pb.status = replay::PlaybackStatus::Paused;
                         }
 
-                        // ペインの content をリビルドして Kline を再挿入
                         let main_window_id = self.main_window.id;
-                        let layout_id = self
-                            .layout_manager
-                            .active_layout_id()
-                            .expect("No active layout")
-                            .unique;
-                        let dashboard = self.active_dashboard_mut();
-                        let kline_targets = dashboard.prepare_replay(main_window_id);
 
-                        let start_ms = self.replay.playback.as_ref().map_or(0, |pb| pb.start_time);
-                        let end_ms = self.replay.playback.as_ref().map_or(0, |pb| pb.end_time);
+                        // バッファ保持版リビルド
+                        self.active_dashboard_mut()
+                            .rebuild_for_step_backward(main_window_id);
 
-                        let fetch_tasks: Vec<_> = kline_targets
-                            .into_iter()
-                            .map(|(pane_id, stream)| {
-                                let req_id = uuid::Uuid::new_v4();
-                                connector::fetcher::kline_fetch_task(
-                                    layout_id,
-                                    pane_id,
-                                    stream,
-                                    Some(req_id),
-                                    Some((start_ms, end_ms)),
-                                )
-                                .map(move |update| {
-                                    Message::Dashboard {
-                                        layout_id: Some(layout_id),
-                                        event: update.into(),
-                                    }
-                                })
-                            })
-                            .collect();
-
-                        if fetch_tasks.is_empty() {
-                            // kline ストリームがない場合は即座に resume_status に戻す
-                            if let Some(pb) = &mut self.replay.playback {
-                                pb.status = pb.resume_status;
-                            }
-                        } else {
-                            // kline fetch 完了後に DataLoaded → resume_status へ遷移
-                            let data_loaded =
-                                Task::done(Message::Replay(ReplayMessage::DataLoaded));
-                            return Task::batch(fetch_tasks).chain(data_loaded);
+                        // new_time まで kline を再挿入（フェッチ不要）
+                        let current_time = self.replay.playback.as_ref().map(|pb| pb.current_time);
+                        if let Some(ct) = current_time {
+                            self.active_dashboard_mut()
+                                .replay_advance_klines(ct, main_window_id);
                         }
                     }
                     ReplayMessage::TradesBatchReceived(stream, batch) => {

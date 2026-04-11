@@ -62,7 +62,9 @@
       "Bash(tee /tmp/replay_dbg4.log)",
       "Bash(tee /tmp/replay_dbg5.log)",
       "Bash(tee /tmp/replay_dbg6.log)",
-      "Bash(tee /tmp/replay_dbg7.log)"
+      "Bash(tee /tmp/replay_dbg7.log)",
+      "Bash(node -e ':*)",
+      "Bash(bash C:/tmp/e2e-full-test.sh)"
     ],
     "additionalDirectories": [
       "C:\\Users\\sasai\\Documents\\marimo\\.claude\\plans",

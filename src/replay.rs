@@ -349,6 +349,7 @@ mod tests {
                 status: PlaybackStatus::Playing,
                 speed: 1.0,
                 trade_buffers: HashMap::new(),
+                resume_status: PlaybackStatus::Playing,
             }),
             last_tick: None,
         };
@@ -455,6 +456,7 @@ mod tests {
             status: PlaybackStatus::Playing,
             speed: 2.0,
             trade_buffers: HashMap::new(),
+            resume_status: PlaybackStatus::Playing,
         };
 
         // 16ms elapsed at 2x speed = 32ms advance
@@ -477,6 +479,7 @@ mod tests {
             status: PlaybackStatus::Playing,
             speed: 1.0,
             trade_buffers: HashMap::new(),
+            resume_status: PlaybackStatus::Playing,
         };
 
         pb.cycle_speed();
@@ -527,6 +530,7 @@ mod tests {
                 status: PlaybackStatus::Playing,
                 speed: 2.0,
                 trade_buffers: HashMap::new(),
+                resume_status: PlaybackStatus::Playing,
             }),
             last_tick: None,
         };
@@ -551,6 +555,7 @@ mod tests {
                 status: PlaybackStatus::Loading,
                 speed: 1.0,
                 trade_buffers: HashMap::new(),
+                resume_status: PlaybackStatus::Playing,
             }),
             last_tick: None,
         };
@@ -570,6 +575,7 @@ mod tests {
                 status: PlaybackStatus::Paused,
                 speed: 5.0,
                 trade_buffers: HashMap::new(),
+                resume_status: PlaybackStatus::Playing,
             }),
             last_tick: None,
         };
@@ -622,6 +628,7 @@ mod tests {
                 status: PlaybackStatus::Playing,
                 speed: 1.0,
                 trade_buffers: HashMap::new(),
+                resume_status: PlaybackStatus::Playing,
             }),
             last_tick: None,
         };
@@ -700,6 +707,7 @@ mod tests {
             status: PlaybackStatus::Playing,
             speed: 1.0,
             trade_buffers: HashMap::new(),
+            resume_status: PlaybackStatus::Playing,
         };
         let t = pb.advance_time(0.0);
         assert_eq!(t, 1500);
@@ -714,6 +722,7 @@ mod tests {
             status: PlaybackStatus::Playing,
             speed: 10.0,
             trade_buffers: HashMap::new(),
+            resume_status: PlaybackStatus::Playing,
         };
         let t = pb.advance_time(1000.0);
         assert_eq!(t, 2000); // stays at end_time
@@ -728,6 +737,7 @@ mod tests {
             status: PlaybackStatus::Playing,
             speed: 1.0,
             trade_buffers: HashMap::new(),
+            resume_status: PlaybackStatus::Playing,
         };
         let t = pb.advance_time(999999.0);
         assert_eq!(t, 100); // clamped to end_time
@@ -744,6 +754,7 @@ mod tests {
             status: PlaybackStatus::Playing,
             speed: 1.0,
             trade_buffers: HashMap::new(),
+            resume_status: PlaybackStatus::Playing,
         };
         assert_eq!(pb.speed_label(), "1x");
         pb.speed = 2.0;
@@ -763,6 +774,7 @@ mod tests {
             status: PlaybackStatus::Playing,
             speed: 1.5,
             trade_buffers: HashMap::new(),
+            resume_status: PlaybackStatus::Playing,
         };
         assert_eq!(pb.speed_label(), "1.5x");
     }
@@ -813,6 +825,7 @@ mod tests {
                 status: PlaybackStatus::Playing,
                 speed: 5.0,
                 trade_buffers: HashMap::new(),
+                resume_status: PlaybackStatus::Playing,
             }),
             last_tick: None,
         };
@@ -847,6 +860,7 @@ mod tests {
             status: PlaybackStatus::Playing,
             speed: 99.0, // not in SPEEDS
             trade_buffers: HashMap::new(),
+            resume_status: PlaybackStatus::Playing,
         };
         pb.cycle_speed();
         // unwrap_or(0) → (0+1) % 4 = 1 → 2.0
@@ -947,6 +961,7 @@ mod tests {
                 status: PlaybackStatus::Playing,
                 speed: 5.0,
                 trade_buffers: HashMap::new(),
+                resume_status: PlaybackStatus::Playing,
             }),
             last_tick: None,
         };

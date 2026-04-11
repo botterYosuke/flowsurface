@@ -1084,6 +1084,14 @@ impl Dashboard {
     }
 
     /// リプレイ進行: 全ペインの kline バッファから current_time 以下のデータを挿入する
+    /// StepBackward 用: 全ペインのチャートをリビルドしつつ kline バッファを保持する。
+    pub fn rebuild_for_step_backward(&mut self, main_window: window::Id) {
+        self.iter_all_panes_mut(main_window)
+            .for_each(|(_, _, state)| {
+                state.rebuild_content_for_step_backward();
+            });
+    }
+
     pub fn replay_advance_klines(&mut self, current_time: u64, main_window: window::Id) {
         self.iter_all_panes_mut(main_window)
             .for_each(|(_, _, state)| {
@@ -1302,6 +1310,13 @@ impl Dashboard {
         }
 
         kline_targets
+    }
+
+    /// Replay→Live 切替時にペインの content をリビルドする（replay_kline_buffer を無効化）。
+    pub fn rebuild_for_live(&mut self, main_window: window::Id) {
+        for (_, _, state) in self.iter_all_panes_mut(main_window) {
+            state.rebuild_content_for_live();
+        }
     }
 
     /// リプレイ用に全ペインの trades StreamKind を（重複なしで）収集する。

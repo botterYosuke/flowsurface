@@ -422,6 +422,35 @@ impl State {
 
     /// リプレイ開始時にチャートデータをクリアし、settings/streams/layout/indicators は保持する。
     pub fn rebuild_content_for_replay(&mut self) {
+        self.rebuild_content(true);
+    }
+
+    pub fn rebuild_content_for_live(&mut self) {
+        self.rebuild_content(false);
+    }
+
+    /// StepBackward 用: チャートをリビルドしつつ kline バッファを保持する。
+    pub fn rebuild_content_for_step_backward(&mut self) {
+        // バッファを退避
+        let saved_buf = match &mut self.content {
+            Content::Kline { chart, .. } => {
+                chart.as_mut().and_then(|c| c.replay_kline_buffer.take())
+            }
+            _ => None,
+        };
+
+        self.rebuild_content(true);
+
+        // バッファを復元（cursor=0 にリセット）
+        if let (Content::Kline { chart, .. }, Some(mut buf)) = (&mut self.content, saved_buf) {
+            if let Some(c) = chart.as_mut() {
+                buf.cursor = 0;
+                c.replay_kline_buffer = Some(buf);
+            }
+        }
+    }
+
+    fn rebuild_content(&mut self, replay_mode: bool) {
         // ticker_info を先に取得してからコンテンツを変更する（借用競合を回避）
         let ticker_info = self.stream_pair();
 
@@ -449,7 +478,9 @@ impl State {
                         ti,
                         &saved_kind,
                     );
-                    new_chart.enable_replay_mode();
+                    if replay_mode {
+                        new_chart.enable_replay_mode();
+                    }
                     *chart = Some(new_chart);
                     *layout = saved_layout;
                     *kind = saved_kind;
