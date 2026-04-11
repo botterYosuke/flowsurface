@@ -73,6 +73,8 @@ pub struct PlaybackState {
     pub speed: f64,
     /// プリフェッチ済み Trades バッファ
     pub trade_buffers: HashMap<StreamKind, TradeBuffer>,
+    /// DataLoaded 後に復帰するステータス（StepBackward 時は Paused にする）
+    pub resume_status: PlaybackStatus,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,8 +98,10 @@ pub enum ReplayMessage {
     StartTimeChanged(String),
     /// 終了日時の入力変更
     EndTimeChanged(String),
-    /// 再生ボタン押下
+    /// 再生ボタン押下（最初から開始）
     Play,
+    /// 一時停止から再開
+    Resume,
     /// 停止ボタン押下
     Pause,
     /// 進むボタン（1分早送り）

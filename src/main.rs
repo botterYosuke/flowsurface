@@ -741,10 +741,12 @@ impl Flowsurface {
                         self.replay.toggle_mode();
 
                         // Replay → Live に戻る場合はペイン content を再構築
+                        // （replay_kline_buffer を無効化してライブデータが直接チャートに入るようにする）
                         if was_replay && !self.replay.is_replay() {
+                            self.replay.playback = None;
                             let main_window_id = self.main_window.id;
                             let dashboard = self.active_dashboard_mut();
-                            dashboard.prepare_replay(main_window_id);
+                            dashboard.rebuild_for_live(main_window_id);
                             // WebSocket は subscription() の再評価で自動復帰する
                         }
                     }
@@ -776,6 +778,7 @@ impl Flowsurface {
                             status: replay::PlaybackStatus::Loading,
                             speed: 1.0,
                             trade_buffers: std::collections::HashMap::new(),
+                            resume_status: replay::PlaybackStatus::Playing,
                         });
 
                         let main_window_id = self.main_window.id;
@@ -859,7 +862,7 @@ impl Flowsurface {
 
                         if kline_tasks.is_empty() {
                             if let Some(pb) = &mut self.replay.playback {
-                                pb.status = replay::PlaybackStatus::Playing;
+                                pb.status = pb.resume_status;
                             }
                         } else {
                             let data_loaded =
@@ -872,6 +875,21 @@ impl Flowsurface {
 
                         if !all_tasks.is_empty() {
                             return Task::batch(all_tasks);
+                        }
+                    }
+                    ReplayMessage::Resume => {
+                        if let Some(pb) = &mut self.replay.playback {
+                            // end_time に到達済みの場合は最初から再生（Play に委譲）
+                            if pb.current_time >= pb.end_time {
+                                let saved_speed = pb.speed;
+                                let task = self.update(Message::Replay(ReplayMessage::Play));
+                                // Play で再作成された PlaybackState に speed を復元
+                                if let Some(pb) = &mut self.replay.playback {
+                                    pb.speed = saved_speed;
+                                }
+                                return task;
+                            }
+                            pb.status = replay::PlaybackStatus::Playing;
                         }
                     }
                     ReplayMessage::Pause => {
@@ -909,6 +927,14 @@ impl Flowsurface {
                         };
 
                         let main_window_id = self.main_window.id;
+
+                        // kline バッファから new_time 以下のローソク足を即座にチャートに挿入
+                        let current_time = self.replay.playback.as_ref().map(|pb| pb.current_time);
+                        if let Some(ct) = current_time {
+                            self.active_dashboard_mut()
+                                .replay_advance_klines(ct, main_window_id);
+                        }
+
                         let mut tasks = Vec::new();
                         for (stream, trades, update_t) in &collected {
                             let task = self
@@ -943,6 +969,11 @@ impl Flowsurface {
                                 buffer.cursor = 0;
                                 buffer.drain_until(new_time);
                             }
+
+                            // kline 再取得中は tick が current_time を進めないよう Loading にする
+                            pb.status = replay::PlaybackStatus::Loading;
+                            // DataLoaded 後は Paused にして、ユーザーが戻った位置を確認できるようにする
+                            pb.resume_status = replay::PlaybackStatus::Paused;
                         }
 
                         // ペインの content をリビルドして Kline を再挿入
@@ -978,8 +1009,16 @@ impl Flowsurface {
                             })
                             .collect();
 
-                        if !fetch_tasks.is_empty() {
-                            return Task::batch(fetch_tasks);
+                        if fetch_tasks.is_empty() {
+                            // kline ストリームがない場合は即座に resume_status に戻す
+                            if let Some(pb) = &mut self.replay.playback {
+                                pb.status = pb.resume_status;
+                            }
+                        } else {
+                            // kline fetch 完了後に DataLoaded → resume_status へ遷移
+                            let data_loaded =
+                                Task::done(Message::Replay(ReplayMessage::DataLoaded));
+                            return Task::batch(fetch_tasks).chain(data_loaded);
                         }
                     }
                     ReplayMessage::TradesBatchReceived(stream, batch) => {
@@ -998,7 +1037,17 @@ impl Flowsurface {
                     }
                     ReplayMessage::DataLoaded => {
                         if let Some(pb) = &mut self.replay.playback {
-                            pb.status = replay::PlaybackStatus::Playing;
+                            pb.status = pb.resume_status;
+                        }
+
+                        // Paused で復帰する場合、kline バッファから current_time までを即座にチャートに挿入
+                        if let Some(pb) = &self.replay.playback {
+                            if pb.status == replay::PlaybackStatus::Paused {
+                                let current_time = pb.current_time;
+                                let main_window_id = self.main_window.id;
+                                self.active_dashboard_mut()
+                                    .replay_advance_klines(current_time, main_window_id);
+                            }
                         }
                     }
                     ReplayMessage::DataLoadFailed(err) => {
@@ -1034,10 +1083,9 @@ impl Flowsurface {
                         return task;
                     }
                     ReplayCommand::Resume => {
-                        if let Some(pb) = &mut self.replay.playback {
-                            pb.status = replay::PlaybackStatus::Playing;
-                        }
+                        let task = self.update(Message::Replay(ReplayMessage::Resume));
                         reply_tx.send(self.replay.to_status());
+                        return task;
                     }
                     ReplayCommand::StepForward => {
                         let task = self.update(Message::Replay(ReplayMessage::StepForward));
@@ -1180,6 +1228,12 @@ impl Flowsurface {
             end_input = end_input.on_input(|s| Message::Replay(ReplayMessage::EndTimeChanged(s)));
         }
 
+        let is_loading = self
+            .replay
+            .playback
+            .as_ref()
+            .is_some_and(|pb| pb.status == replay::PlaybackStatus::Loading);
+
         let is_playing = self
             .replay
             .playback
@@ -1189,9 +1243,16 @@ impl Flowsurface {
         let play_pause_label = if is_playing { "\u{23F8}" } else { "\u{25B6}" };
         let mut play_pause_btn =
             button(text(play_pause_label).size(12)).padding(padding::all(2).left(4).right(4));
-        if is_replay {
+        if is_replay && !is_loading {
+            let is_paused = self
+                .replay
+                .playback
+                .as_ref()
+                .is_some_and(|pb| pb.status == replay::PlaybackStatus::Paused);
             play_pause_btn = play_pause_btn.on_press(if is_playing {
                 Message::Replay(ReplayMessage::Pause)
+            } else if is_paused {
+                Message::Replay(ReplayMessage::Resume)
             } else {
                 Message::Replay(ReplayMessage::Play)
             });
@@ -1200,14 +1261,14 @@ impl Flowsurface {
         // ⏮ StepBackward
         let mut step_back_btn =
             button(text("\u{23EE}").size(12)).padding(padding::all(2).left(4).right(4));
-        if is_replay && self.replay.playback.is_some() {
+        if is_replay && self.replay.playback.is_some() && !is_loading {
             step_back_btn = step_back_btn.on_press(Message::Replay(ReplayMessage::StepBackward));
         }
 
         // ⏭ StepForward
         let mut step_fwd_btn =
             button(text("\u{23ED}").size(12)).padding(padding::all(2).left(4).right(4));
-        if is_replay {
+        if is_replay && !is_loading {
             step_fwd_btn = step_fwd_btn.on_press(Message::Replay(ReplayMessage::StepForward));
         }
 
@@ -1219,15 +1280,9 @@ impl Flowsurface {
             .map_or("1x".to_string(), |pb| pb.speed_label());
         let mut speed_btn =
             button(text(speed_label).size(11)).padding(padding::all(2).left(4).right(4));
-        if is_replay && self.replay.playback.is_some() {
+        if is_replay && self.replay.playback.is_some() && !is_loading {
             speed_btn = speed_btn.on_press(Message::Replay(ReplayMessage::CycleSpeed));
         }
-
-        let is_loading = self
-            .replay
-            .playback
-            .as_ref()
-            .is_some_and(|pb| pb.status == replay::PlaybackStatus::Loading);
 
         let controls = row![step_back_btn, play_pause_btn, step_fwd_btn, speed_btn].spacing(4);
 
