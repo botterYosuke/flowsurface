@@ -146,7 +146,21 @@ impl Flowsurface {
             theme: saved_state.theme,
             notifications: Notifications::new(),
             network: NetworkManager::new(saved_state.proxy_cfg),
-            replay: ReplayState::default(),
+            replay: {
+                let replay_mode = match saved_state.replay_config.mode.as_str() {
+                    "replay" => replay::ReplayMode::Replay,
+                    _ => replay::ReplayMode::Live,
+                };
+                ReplayState {
+                    mode: replay_mode,
+                    range_input: replay::ReplayRangeInput {
+                        start: saved_state.replay_config.range_start,
+                        end: saved_state.replay_config.range_end,
+                    },
+                    playback: None,
+                    last_tick: None,
+                }
+            },
         };
 
         if let Some(err) = audio_init_err {
@@ -1867,6 +1881,15 @@ impl Flowsurface {
             p
         });
 
+        let replay_cfg = data::ReplayConfig {
+            mode: match self.replay.mode {
+                replay::ReplayMode::Live => "live".into(),
+                replay::ReplayMode::Replay => "replay".into(),
+            },
+            range_start: self.replay.range_input.start.clone(),
+            range_end: self.replay.range_input.end.clone(),
+        };
+
         let state = data::State::from_parts(
             layouts,
             self.theme.clone(),
@@ -1879,6 +1902,7 @@ impl Flowsurface {
             connector::fetcher::is_trade_fetch_enabled(),
             self.volume_size_unit,
             proxy_cfg_persisted,
+            replay_cfg,
         );
 
         match serde_json::to_string(&state) {

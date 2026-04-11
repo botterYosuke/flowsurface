@@ -6,6 +6,27 @@ use crate::{AudioStream, Layout, Theme};
 
 use serde::{Deserialize, Serialize};
 
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ReplayConfig {
+    /// "live" or "replay"
+    pub mode: String,
+    /// 開始日時の入力文字列 (例: "2026-04-10 09:00")
+    pub range_start: String,
+    /// 終了日時の入力文字列 (例: "2026-04-10 15:00")
+    pub range_end: String,
+}
+
+impl Default for ReplayConfig {
+    fn default() -> Self {
+        Self {
+            mode: "live".into(),
+            range_start: String::new(),
+            range_end: String::new(),
+        }
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize, Default)]
 pub struct Layouts {
     pub layouts: Vec<Layout>,
@@ -26,6 +47,7 @@ pub struct State {
     pub trade_fetch_enabled: bool,
     pub size_in_quote_ccy: exchange::SizeUnit,
     pub proxy_cfg: Option<exchange::proxy::Proxy>,
+    pub replay: ReplayConfig,
 }
 
 impl State {
@@ -41,6 +63,7 @@ impl State {
         trade_fetch_enabled: bool,
         volume_size_unit: exchange::SizeUnit,
         proxy_cfg: Option<exchange::proxy::Proxy>,
+        replay: ReplayConfig,
     ) -> Self {
         State {
             layout_manager,
@@ -54,6 +77,75 @@ impl State {
             trade_fetch_enabled,
             size_in_quote_ccy: volume_size_unit,
             proxy_cfg,
+            replay,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn replay_config_default_is_live_with_empty_strings() {
+        let cfg = ReplayConfig::default();
+        assert_eq!(cfg.mode, "live");
+        assert!(cfg.range_start.is_empty());
+        assert!(cfg.range_end.is_empty());
+    }
+
+    #[test]
+    fn replay_config_serializes_to_json() {
+        let cfg = ReplayConfig {
+            mode: "replay".into(),
+            range_start: "2026-04-10 09:00".into(),
+            range_end: "2026-04-10 15:00".into(),
+        };
+        let json = serde_json::to_value(&cfg).unwrap();
+        assert_eq!(json["mode"], "replay");
+        assert_eq!(json["range_start"], "2026-04-10 09:00");
+        assert_eq!(json["range_end"], "2026-04-10 15:00");
+    }
+
+    #[test]
+    fn replay_config_deserializes_from_json() {
+        let json = r#"{"mode":"replay","range_start":"2026-04-10 09:00","range_end":"2026-04-10 15:00"}"#;
+        let cfg: ReplayConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.mode, "replay");
+        assert_eq!(cfg.range_start, "2026-04-10 09:00");
+        assert_eq!(cfg.range_end, "2026-04-10 15:00");
+    }
+
+    #[test]
+    fn state_without_replay_field_deserializes_with_default_replay() {
+        // 後方互換: replay フィールドなしの JSON でも ReplayConfig::default() が使われる
+        let json = r#"{"layout_manager":{"layouts":[],"active_layout":null}}"#;
+        let state: State = serde_json::from_str(json).unwrap();
+        assert_eq!(state.replay.mode, "live");
+        assert!(state.replay.range_start.is_empty());
+    }
+
+    #[test]
+    fn state_with_replay_field_deserializes_correctly() {
+        let json = r#"{"replay":{"mode":"replay","range_start":"2026-04-10 09:00","range_end":"2026-04-10 15:00"}}"#;
+        let state: State = serde_json::from_str(json).unwrap();
+        assert_eq!(state.replay.mode, "replay");
+        assert_eq!(state.replay.range_start, "2026-04-10 09:00");
+        assert_eq!(state.replay.range_end, "2026-04-10 15:00");
+    }
+
+    #[test]
+    fn state_serializes_replay_field() {
+        let state = State {
+            replay: ReplayConfig {
+                mode: "replay".into(),
+                range_start: "2026-04-10 09:00".into(),
+                range_end: "2026-04-10 15:00".into(),
+            },
+            ..State::default()
+        };
+        let json = serde_json::to_value(&state).unwrap();
+        assert_eq!(json["replay"]["mode"], "replay");
+        assert_eq!(json["replay"]["range_start"], "2026-04-10 09:00");
     }
 }

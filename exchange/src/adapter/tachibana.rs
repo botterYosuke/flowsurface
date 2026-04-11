@@ -970,10 +970,6 @@ fn get_event_http_url() -> Option<String> {
     EVENT_HTTP_URL.read().ok()?.clone()
 }
 
-fn get_event_ws_url() -> Option<String> {
-    EVENT_WS_URL.read().ok()?.clone()
-}
-
 /// EVENT I/F の接続パラメータを構築する。
 /// 公式サンプル準拠: パラメータ順序は固定（順番の変更は不可）。
 /// p_rid → p_board_no → p_gyou_no → p_mkt_code → p_eno → p_evt_cmd → p_issue_code
