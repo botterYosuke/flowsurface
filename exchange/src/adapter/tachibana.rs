@@ -593,14 +593,13 @@ fn date_str_to_epoch_ms(date: &str) -> Option<u64> {
 
 use crate::{Exchange, Ticker, TickerInfo};
 use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 /// 全マスタダウンロードの各レコードをパースするための汎用型。
 /// sCLMID でレコード種別を判定し、CLMIssueMstKabu のみ抽出する。
 #[derive(Debug, Deserialize, Clone)]
 pub struct MasterRecord {
-    #[serde(rename = "sCLMID")]
+    #[serde(rename = "sCLMID", default)]
     pub clm_id: String,
     #[serde(rename = "sIssueCode", default)]
     pub issue_code: String,
@@ -757,7 +756,7 @@ pub async fn fetch_all_master(
 
 // ── マスタキャッシュ ─────────────────────────────────────────────────────────
 
-static ISSUE_MASTER_CACHE: RwLock<Option<Arc<Vec<MasterRecord>>>> = RwLock::const_new(None);
+static ISSUE_MASTER_CACHE: RwLock<Option<Arc<Vec<MasterRecord>>>> = RwLock::new(None);
 
 /// ログイン成功時に呼び出し、銘柄マスタをキャッシュに格納する。
 pub async fn init_issue_master(
@@ -765,13 +764,15 @@ pub async fn init_issue_master(
     session: &TachibanaSession,
 ) -> Result<(), TachibanaError> {
     let records = fetch_all_master(client, session).await?;
-    *ISSUE_MASTER_CACHE.write().await = Some(Arc::new(records));
+    if let Ok(mut guard) = ISSUE_MASTER_CACHE.write() {
+        *guard = Some(Arc::new(records));
+    }
     Ok(())
 }
 
 /// キャッシュ済みの銘柄マスタを返す。未取得なら None。
 pub async fn get_cached_issue_master() -> Option<Arc<Vec<MasterRecord>>> {
-    ISSUE_MASTER_CACHE.read().await.clone()
+    ISSUE_MASTER_CACHE.read().ok()?.clone()
 }
 
 /// バックグラウンドで銘柄マスタをダウンロードしキャッシュに格納する。
@@ -798,6 +799,68 @@ pub async fn cached_ticker_metadata() -> HashMap<Ticker, Option<TickerInfo>> {
         }
     }
     out
+}
+
+// ── E2E テスト用 fixture 注入バックドア ─────────────────────────────────────
+//
+// `e2e-mock` feature を有効にした場合のみコンパイルされる。本番ビルドには
+// 一切含まれない。認証フロー・MASTER I/F・日足取得をバイパスし、
+// Tachibana D1 リプレイ経路の E2E 検証を可能にする。
+// 詳細: docs/plan/tachibana_e2e_phase_t1.md
+
+#[cfg(feature = "e2e-mock")]
+pub mod e2e_mock {
+    use super::{ISSUE_MASTER_CACHE, MasterRecord};
+    use crate::Kline;
+    use std::collections::HashMap;
+    use std::sync::{Arc, RwLock};
+
+    /// `fetch_daily_history` を mock 経路へ分岐させるためのテーブル。
+    /// キーは issue_code（例: "7203"）。
+    /// std::sync::RwLock を使うのは、test backdoor が iced の update() ループから
+    /// 同期的に呼び出されるため（tokio::sync::RwLock だと await が必要で、
+    /// block_in_place の利用条件を満たさないケースで動作しない）。
+    pub(super) static MOCK_DAILY_HISTORY: RwLock<Option<HashMap<String, Vec<Kline>>>> =
+        RwLock::new(None);
+
+    /// ISSUE_MASTER_CACHE にレコードを直接格納する。
+    /// MASTER I/F ストリーミングをバイパスするため、`init_issue_master` を経由せずに
+    /// `cached_ticker_metadata` から参照可能な状態を作れる。
+    pub fn inject_master_cache(records: Vec<MasterRecord>) {
+        if let Ok(mut guard) = ISSUE_MASTER_CACHE.write() {
+            *guard = Some(Arc::new(records));
+        }
+    }
+
+    /// 指定 issue_code の日足 mock データを設定する（累積）。
+    /// 以降の `fetch_tachibana_daily_klines` 呼び出しはネットワークを叩かず、
+    /// ここで設定した Kline 列を返す（range フィルタは呼び出し側でそのまま効く）。
+    pub fn inject_daily_klines(issue_code: String, klines: Vec<Kline>) {
+        if let Ok(mut guard) = MOCK_DAILY_HISTORY.write() {
+            let map = guard.get_or_insert_with(HashMap::new);
+            map.insert(issue_code, klines);
+        }
+    }
+
+    /// Mock テーブル全体をクリアする。テスト後のクリーンアップ用。
+    pub fn clear_daily_klines() {
+        if let Ok(mut guard) = MOCK_DAILY_HISTORY.write() {
+            *guard = None;
+        }
+    }
+
+    /// ISSUE_MASTER_CACHE をクリアする。テスト後のクリーンアップ用。
+    pub fn clear_master_cache() {
+        if let Ok(mut guard) = ISSUE_MASTER_CACHE.write() {
+            *guard = None;
+        }
+    }
+
+    /// 指定 issue_code の mock 日足を取り出す。`fetch_tachibana_daily_klines` から参照される。
+    pub fn get_mock_daily_klines(issue_code: &str) -> Option<Vec<Kline>> {
+        let guard = MOCK_DAILY_HISTORY.read().ok()?;
+        guard.as_ref()?.get(issue_code).cloned()
+    }
 }
 
 // ── EVENT I/F パーサー ───────────────────────────────────────────────────────

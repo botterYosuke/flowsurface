@@ -467,6 +467,21 @@ pub async fn fetch_tachibana_daily_klines(
     issue_code: &str,
     range: Option<(u64, u64)>,
 ) -> Result<Vec<Kline>, String> {
+    // E2E テスト: mock 経路。feature 有効かつ該当 issue_code が注入されている場合、
+    // ネットワークを叩かず mock 済み Kline をそのまま返す（range フィルタは下で適用）。
+    #[cfg(feature = "e2e-mock")]
+    if let Some(mock) = exchange::adapter::tachibana::e2e_mock::get_mock_daily_klines(issue_code) {
+        let mut klines = mock;
+        if let Some((start, end)) = range {
+            klines.retain(|k| k.time >= start && k.time <= end);
+        }
+        log::info!(
+            "Tachibana [e2e-mock]: returned {} daily klines for {issue_code}",
+            klines.len()
+        );
+        return Ok(klines);
+    }
+
     let session = super::auth::get_session()
         .ok_or_else(|| "セッションが存在しません。再ログインしてください。".to_string())?;
 

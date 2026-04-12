@@ -94,6 +94,22 @@ pub async fn try_restore_session() -> Option<TachibanaSession> {
     }
 }
 
+/// E2E テスト用: keyring を経由せず、ダミー `TachibanaSession` をメモリに格納する。
+/// 本番ビルドには含まれない（`e2e-mock` feature gate）。
+/// URL は test backdoor API から呼ばれる前提なので、フォーマットだけ有効な
+/// ダミー値を埋める（EVENT I/F や REST は mock 経路に分岐するため実際には叩かれない）。
+#[cfg(feature = "e2e-mock")]
+pub fn inject_dummy_session() {
+    let session = exchange::adapter::tachibana::TachibanaSession {
+        url_request: "https://e2e-mock.invalid/request/".to_string(),
+        url_master: "https://e2e-mock.invalid/master/".to_string(),
+        url_price: "https://e2e-mock.invalid/price/".to_string(),
+        url_event: "https://e2e-mock.invalid/event/".to_string(),
+        url_event_ws: "wss://e2e-mock.invalid/ws/".to_string(),
+    };
+    store_session(session);
+}
+
 /// TachibanaError をユーザー向けメッセージに変換する。
 fn tachibana_error_to_message(err: TachibanaError) -> String {
     use crate::screen::login::tachibana_error_message;

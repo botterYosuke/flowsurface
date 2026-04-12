@@ -11,6 +11,24 @@ use tokio::sync::oneshot;
 pub enum ApiCommand {
     Replay(ReplayCommand),
     Pane(PaneCommand),
+    /// E2E テスト用の fixture 注入コマンド（`e2e-mock` feature でのみ有効）。
+    #[cfg(feature = "e2e-mock")]
+    Test(TestCommand),
+}
+
+/// E2E テスト fixture 注入コマンド。
+/// 認証・MASTER I/F・日足取得をバイパスし、mock データで Tachibana D1 リプレイを検証する。
+/// 詳細: docs/plan/tachibana_e2e_phase_t1.md
+#[cfg(feature = "e2e-mock")]
+#[derive(Debug, Clone)]
+pub enum TestCommand {
+    /// ダミー `TachibanaSession` をメモリに格納する（keyring 非経由）
+    TachibanaInjectSession,
+    /// `ISSUE_MASTER_CACHE` に MasterRecord を直接注入する。
+    /// body は `/api/test/tachibana/inject-master` で受け取った JSON 文字列そのまま。
+    TachibanaInjectMaster { raw_body: String },
+    /// `MOCK_DAILY_HISTORY` に issue_code → Vec<Kline> を登録する。
+    TachibanaInjectDailyHistory { raw_body: String },
 }
 
 /// ペイン CRUD 系コマンド（§6.2 #2/#5/#6/#7/#8 テスト用）。
@@ -288,6 +306,27 @@ fn route(method: &str, path: &str, body: &str) -> Result<ApiCommand, RouteError>
                 pane_id,
                 ticker,
                 kind,
+            }))
+        }
+        #[cfg(feature = "e2e-mock")]
+        ("POST", "/api/test/tachibana/inject-session") => {
+            Ok(ApiCommand::Test(TestCommand::TachibanaInjectSession))
+        }
+        #[cfg(feature = "e2e-mock")]
+        ("POST", "/api/test/tachibana/inject-master") => {
+            // body のフィールド存在だけ先に軽く検証
+            let _: serde_json::Value =
+                serde_json::from_str(body).map_err(|_| RouteError::BadRequest)?;
+            Ok(ApiCommand::Test(TestCommand::TachibanaInjectMaster {
+                raw_body: body.to_string(),
+            }))
+        }
+        #[cfg(feature = "e2e-mock")]
+        ("POST", "/api/test/tachibana/inject-daily-history") => {
+            let _: serde_json::Value =
+                serde_json::from_str(body).map_err(|_| RouteError::BadRequest)?;
+            Ok(ApiCommand::Test(TestCommand::TachibanaInjectDailyHistory {
+                raw_body: body.to_string(),
             }))
         }
         _ => Err(RouteError::NotFound),
@@ -651,5 +690,78 @@ mod tests {
         let body = r#"{"pane_id":"00000000-0000-0000-0000-000000000007"}"#;
         let result = route("POST", "/api/sidebar/select-ticker", body);
         assert!(matches!(result, Err(RouteError::BadRequest)));
+    }
+
+    // ── route tests: test backdoor (e2e-mock only) ──
+
+    #[cfg(feature = "e2e-mock")]
+    fn unwrap_test(cmd: ApiCommand) -> TestCommand {
+        match cmd {
+            ApiCommand::Test(c) => c,
+            _ => panic!("Expected ApiCommand::Test, got {cmd:?}"),
+        }
+    }
+
+    #[cfg(feature = "e2e-mock")]
+    #[test]
+    fn route_post_tachibana_inject_session() {
+        let cmd = route("POST", "/api/test/tachibana/inject-session", "").unwrap();
+        assert!(matches!(
+            unwrap_test(cmd),
+            TestCommand::TachibanaInjectSession
+        ));
+    }
+
+    #[cfg(feature = "e2e-mock")]
+    #[test]
+    fn route_post_tachibana_inject_master_valid() {
+        let body = r#"{"records":[{"sIssueCode":"7203","sIssueName":"トヨタ","sIssueNameEizi":"TOYOTA"}]}"#;
+        let cmd = route("POST", "/api/test/tachibana/inject-master", body).unwrap();
+        match unwrap_test(cmd) {
+            TestCommand::TachibanaInjectMaster { raw_body } => {
+                assert!(raw_body.contains("7203"));
+            }
+            _ => panic!("Expected TachibanaInjectMaster"),
+        }
+    }
+
+    #[cfg(feature = "e2e-mock")]
+    #[test]
+    fn route_post_tachibana_inject_master_invalid_json() {
+        let result = route("POST", "/api/test/tachibana/inject-master", "not json");
+        assert!(matches!(result, Err(RouteError::BadRequest)));
+    }
+
+    #[cfg(feature = "e2e-mock")]
+    #[test]
+    fn route_post_tachibana_inject_daily_history_valid() {
+        let body = r#"{"issue_code":"7203","klines":[{"time":1700000000000,"open":100.0,"high":110.0,"low":90.0,"close":105.0,"volume":1000.0}]}"#;
+        let cmd = route("POST", "/api/test/tachibana/inject-daily-history", body).unwrap();
+        match unwrap_test(cmd) {
+            TestCommand::TachibanaInjectDailyHistory { raw_body } => {
+                assert!(raw_body.contains("7203"));
+                assert!(raw_body.contains("klines"));
+            }
+            _ => panic!("Expected TachibanaInjectDailyHistory"),
+        }
+    }
+
+    #[cfg(feature = "e2e-mock")]
+    #[test]
+    fn route_post_tachibana_inject_daily_history_invalid_json() {
+        let result = route("POST", "/api/test/tachibana/inject-daily-history", "xx");
+        assert!(matches!(result, Err(RouteError::BadRequest)));
+    }
+
+    // backdoor エンドポイントは feature OFF 時は 404 であるべき
+    #[cfg(not(feature = "e2e-mock"))]
+    #[test]
+    fn route_test_backdoor_disabled_when_feature_off() {
+        let r1 = route("POST", "/api/test/tachibana/inject-session", "");
+        let r2 = route("POST", "/api/test/tachibana/inject-master", "{}");
+        let r3 = route("POST", "/api/test/tachibana/inject-daily-history", "{}");
+        assert!(matches!(r1, Err(RouteError::NotFound)));
+        assert!(matches!(r2, Err(RouteError::NotFound)));
+        assert!(matches!(r3, Err(RouteError::NotFound)));
     }
 }

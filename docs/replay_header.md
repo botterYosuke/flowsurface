@@ -5,7 +5,8 @@
 **関連ドキュメント**:
 - [docs/plan/archive/tachibana_replay.md](plan/archive/tachibana_replay.md) — 立花証券 D1 対応の実装経緯（完了、アーカイブ）
 - [docs/plan/archive/replay_unified_step.md](plan/archive/replay_unified_step.md) — 統一 Tick ハンドラ設計メモ（完了、アーカイブ）
-- [docs/plan/refactor_tachibana_replay.md](plan/refactor_tachibana_replay.md) — 未着手のリファクタ計画
+- [docs/plan/archive/refactor_tachibana_replay.md](plan/archive/refactor_tachibana_replay.md) — 未着手のリファクタ計画（archived）
+- [docs/tachibana_spec.md §8](tachibana_spec.md#8-リプレイ対応の設計判断) — 立花証券リプレイ設計の「なぜ」
 
 本書は flowsurface のリプレイ機能を、実装・API 利用・運用に十分な粒度で説明するリファレンス仕様書である。実装履歴は本文では触れず、必要に応じて §15 の付録を参照する。
 
@@ -27,7 +28,7 @@
 12. [定数と設計不変条件](#12-定数と設計不変条件)
 13. [スコープ外・既知の制限](#13-スコープ外既知の制限)
 14. [実装ファイルマップ](#14-実装ファイルマップ)
-15. [付録: 実装履歴](#15-付録-実装履歴)
+15. [付録: 実装履歴と設計判断](#15-付録-実装履歴と設計判断)
 
 ---
 
@@ -576,7 +577,7 @@ fn subscription(&self) -> Subscription<Message> {
 3. **D1 自動再生スロットリング**: `COARSE_CUTOFF_MS` 境界（1h）で粗補正モードが発動し、1 バー/秒 × speed で進行
 4. **Play 時の挙動**: 設計上は自動再生可能だが、UX として日足は StepForward / StepBackward での逐次操作を推奨
 
-詳細は [docs/plan/archive/tachibana_replay.md](plan/archive/tachibana_replay.md) を参照。
+設計判断の背景（なぜこの実装か）は [docs/tachibana_spec.md §8](tachibana_spec.md#8-リプレイ対応の設計判断) を参照。実装経緯（Phase 1〜3 作業ログ）は [docs/plan/archive/tachibana_replay.md](plan/archive/tachibana_replay.md) に保存。
 
 ---
 
@@ -878,7 +879,9 @@ curl -X POST http://127.0.0.1:9876/api/app/save
 
 ---
 
-## 15. 付録: 実装履歴
+## 15. 付録: 実装履歴と設計判断
+
+### 15.1 実装フェーズ
 
 本機能は以下の Phase で段階的に実装された。詳細な作業ログは各計画書を参照:
 
@@ -892,10 +895,92 @@ curl -X POST http://127.0.0.1:9876/api/app/save
 | Phase 6 | 統一 Tick ハンドラ（D1 分岐撤廃） | [docs/plan/archive/replay_unified_step.md](plan/archive/replay_unified_step.md) |
 | Phase 7 | mid-replay ペイン操作許容 | 本書 §8 |
 | Phase 8 | レビュー駆動の設計不整合修正 | 本書 §12.3 |
-| Tachibana Phase 1〜3 | 立花証券 D1 対応 | [docs/plan/archive/tachibana_replay.md](plan/archive/tachibana_replay.md) |
+| Tachibana Phase 1〜3 | 立花証券 D1 対応 | [docs/tachibana_spec.md §8](tachibana_spec.md) / [docs/plan/archive/tachibana_replay.md](plan/archive/tachibana_replay.md) |
 
-未着手のリファクタ計画は [docs/plan/refactor_tachibana_replay.md](plan/refactor_tachibana_replay.md) を参照（main.rs スリム化、Tachibana static 撤去、命名統一 など）。
+未着手のリファクタ計画は [docs/plan/archive/refactor_tachibana_replay.md](plan/archive/refactor_tachibana_replay.md) を参照（main.rs スリム化、Tachibana static 撤去、命名統一 など）。
+
+### 15.2 統一 Tick ハンドラの設計判断
+
+§7.1 の `process_tick` と `COARSE_CUTOFF_MS` 境界による threshold 切替は、いくつかの代替案との比較を経て選定された。将来の設計変更時にトレードオフを見失わないよう、議論の要点を保存する。
+
+#### 15.2.1 問題: D1 分岐が脆かった
+
+初期実装（Tachibana Phase 3）では、Tick ハンドラを `Dashboard::is_all_d1_klines()` による 2 分岐にしていた:
+
+- **D1-only**: `advance_d1()` で 1 秒/本の離散ジャンプ
+- **非 D1**: `advance_time(elapsed_ms)` で連続前進 + `drain_until`
+
+この設計の問題点:
+
+1. **混在構成で D1 が停止**: M1 + D1 混在ペインだと非 D1 経路に落ち、D1 は 24 時間/本のペースになる
+2. **ペイン構成依存**: リプレイ中にペインを追加・削除すると `is_all_d1_klines()` の返値が切り替わり、再生速度がペイン操作で変わる脆さ
+3. **新規ペインが fire できない**: `advance_time` は buffer の末尾を見ないため、バックフィル待機中か終端かを区別できない
+
+#### 15.2.2 検討した 3 案
+
+| 案 | 概要 | 評価 |
+|---|---|---|
+| **A: 全 tf で 1 bar/sec 統一** | `SPEEDS` を「bars/sec」として再解釈し、timeframe に関わらず「1 tick = 次バーへ離散ジャンプ」 | M1 リプレイの「実時間感覚」を失う。ライブと同じ UX で観察したい要件に合わない |
+| **B: 全 tf で実時間連動** | `threshold = delta_to_next` とし、timeframe に比例して実時間で進む | D1 が 24 時間/本で実用不能（Phase 3 で既に却下済み） |
+| **C: 混合（実時間連動 + 粗 tf 補正）** | `delta < COARSE_CUTOFF_MS` → 実時間、`delta >= COARSE_CUTOFF_MS` → 1 bar/sec | **採用**。M1 の UX を守りつつ、D1 を救済できる |
+
+#### 15.2.3 案 C の採用理由
+
+- **M1 単独**: `delta = 60_000ms` → `threshold = 60_000ms` → 1x = 実時間、10x = 10 倍速。既存 UX を維持
+- **H1 以上**: `delta >= 3_600_000ms` → `threshold = COARSE_BAR_MS = 1000ms` → 1x = 1 bar/sec、10x = 10 bars/sec。D1 リプレイが実用時間内に収まる
+- **M1 + D1 混在**: min = M1 の境界 60_000ms → M1 基準で進行し、D1 は越境 Tick で自然追従（実質 1440 Tick/本だが、M1 観察が主の場合は許容）
+
+#### 15.2.4 既知のトレードオフ
+
+| # | トレードオフ | 受容理由 |
+|---|---|---|
+| 1 | H1 境界の 360× 不連続性 | M30 (6 分/本) と H1 (1 秒/本) の間で速度がジャンプ。単一 timeframe 運用では無関係。混在は tooltip で明示 |
+| 2 | 混在 M1+D1 での D1 実質停止 | M1 観察が主で D1 は補助という想定。D1 主体で観察したい場合は D1 単独ペインに切替 |
+| 3 | 高速再生時のデータ粒度劣化 | 10x では 1 フレーム間に複数バー分の trades が集中するが、cursor ベース drain で欠損は発生しない |
+| 4 | 境界判定 `>=` の決め打ち | H1 を粗補正側に入れるか実時間側に残すかは議論の余地あり。現状は「H1 で 60 分待ち」を避けるため `>=` 固定。実機検証で要望があれば再検討 |
+
+#### 15.2.5 `FireStatus` 3 状態の必要性
+
+`next_time_after()` が `None` を返すケースは 2 種類あり、`Option<u64>` だけでは区別できない:
+
+- **(A) buffer 末尾**: 全データ投入済み = 終端 → `Paused` へ遷移
+- **(B) buffer 未到着**: バックフィル中で klines がまだ空 → 待機
+
+これを `FireStatus::{Ready(u64), Pending, Terminal}` enum で明示的に区別する。`Pending` と `Terminal` を混同して `Paused` に落とすと、mid-replay ペイン追加時に全体が Pause する重大バグになる。
+
+#### 15.2.6 「穴 A」と「穴 B」
+
+統一 Tick の設計で発見された 2 つの落とし穴:
+
+- **穴 A（未達 Tick でも trades を流す）**: `Ready(t)` 経路で `virtual_elapsed_ms < threshold` のときも、まず `drain_all_trade_buffers()` を実行してから return する。これを忘れると M1 単独の毎フレーム trades 流入が止まる
+- **穴 B（バックフィル中 stream の除外）**: `drain_all_trade_buffers()` は `pending_trade_streams` に含まれる stream をスキップする。これを忘れると新規ペインのバックフィル途中で過去分 trades が既存 chart に漏れる
+
+どちらも §7 のアルゴリズム本体に織り込み済み（`drain_all_trade_buffers` [src/replay.rs:394-422](../src/replay.rs#L394-L422) 参照）。
+
+### 15.3 Phase 8 レビュー駆動の設計不整合修正
+
+Phase 6/7 完了後のコードレビューで発覚した 4 件のバグを修正した。いずれも TDD（RED → GREEN）で修正し、`§12.3` の設計不変条件として固定化した:
+
+| # | 問題 | 修正 | 不変条件 |
+|---|---|---|---|
+| 1 | `KlineChart::set_basis()` が `replay_kline_buffer` を再初期化せず、mid-replay の timeframe 変更が壊れる | `set_basis()` 末尾で `replay_kline_buffer` が `Some` なら `klines.clear()` + `cursor = 0`。Some/None 状態は維持 | #1 |
+| 2 | `TradesBatchReceived` が `or_insert_with` で orphan trade buffer を自己復活させ、mid-replay 削除後に無限 flap ループ | `PlaybackState::ingest_trades_batch` を新設し、登録済み stream のみ accept。未登録は黙って drop | #2 |
+| 3 | Tooltip 文言「H1 以下: 実時間連動 / H4 以上: 1 バー/sec × speed」が `COARSE_CUTOFF_MS = 3_600_000ms`（H1 境界）と不整合 | 「M30 以下: 実時間連動 × speed / H1 以上: 1 バー/秒 × speed」に修正。`coarse_cutoff_boundary_matches_h1_in_ms` テストで固定化 | #4 |
+| 4 | `Message::Sidebar::TickerSelected` → `init_focused_pane()` が `Task::none()` を返すケース（heatmap-only）で `SyncReplayBuffers` chain が発火しない | `Message::Sidebar` ハンドラ return path に明示的に `.chain(Task::done(SyncReplayBuffers))` を追加 | #3 |
+
+これらの修正から得られた教訓が §12.3 の 4 件の不変条件である。新機能追加時は該当不変条件に抵触しないか必ず確認すること。
+
+### 15.4 残課題
+
+以下は Phase 8 時点で認識されているが、現状スコープ外として残している:
+
+| 項目 | 影響 | 将来の解決策 |
+|---|---|---|
+| linear advance フォールバック経路の `pending_trade_streams` 未対応 | heatmap-only リプレイ中の mid-replay ペイン追加で pending ガードが効かない | `fire_status()` が `None` を返さない形に統一すれば解消 |
+| fetch タスクの abort 経路不在 | orphan 削除後も残存 fetch が自然完了まで稼働 | `trade_fetch_handles: HashMap<StreamKind, AbortHandle>` を追加 |
+| クリッピング警告 6 件 | 既存コード起因、リプレイとは無関係 | 別 PR で clippy 一斉対応 |
+| Tachibana D1 の実機 E2E 検証 | Fix 1 (timeframe 変更) / Fix 4 (heatmap ticker 選択) は実動作確認が未完 | 実機検証タスクで追跡 |
 
 ---
 
-**変更時の注意**: §12.3 の不変条件を破る変更を行う場合は、必ず該当テスト（`coarse_cutoff_boundary_matches_h1_in_ms` 等）の見直しと本仕様書の同期更新を行うこと。
+**変更時の注意**: §12.3 の不変条件を破る変更を行う場合は、必ず該当テスト（`coarse_cutoff_boundary_matches_h1_in_ms` 等）の見直しと本仕様書の同期更新を行うこと。設計代替案を再検討する場合は §15.2 の「却下理由」と照らし合わせ、同じ議論を再発明しないこと。

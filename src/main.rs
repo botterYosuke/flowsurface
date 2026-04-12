@@ -1298,6 +1298,12 @@ impl Flowsurface {
                         reply_tx.send(body);
                         return task;
                     }
+                    #[cfg(feature = "e2e-mock")]
+                    ApiCommand::Test(cmd) => {
+                        let (body, task) = self.handle_test_api(cmd);
+                        reply_tx.send(body);
+                        return task;
+                    }
                 }
             }
         }
@@ -1600,6 +1606,155 @@ impl Flowsurface {
 
     /// Pane CRUD API コマンドを処理する。
     /// 返り値: (JSON レスポンス, 続行する Task)。
+    /// E2E テスト用 fixture 注入コマンドを処理する。
+    /// `e2e-mock` feature でのみコンパイルされ、本番ビルドには含まれない。
+    /// 詳細: docs/plan/tachibana_e2e_phase_t1.md
+    #[cfg(feature = "e2e-mock")]
+    fn handle_test_api(
+        &mut self,
+        cmd: replay_api::TestCommand,
+    ) -> (String, Task<Message>) {
+        use exchange::adapter::tachibana;
+        use replay_api::TestCommand;
+
+        match cmd {
+            TestCommand::TachibanaInjectSession => {
+                connector::auth::inject_dummy_session();
+                (
+                    serde_json::json!({"ok": true, "action": "inject-session"}).to_string(),
+                    Task::none(),
+                )
+            }
+            TestCommand::TachibanaInjectMaster { raw_body } => {
+                // body 形式: {"records": [{"sIssueCode":"7203", ...}, ...]}
+                let err_body = |msg: String| -> (String, Task<Message>) {
+                    (format!(r#"{{"error":"{}"}}"#, msg.replace('"', "'")), Task::none())
+                };
+                let parsed: serde_json::Value = match serde_json::from_str(&raw_body) {
+                    Ok(v) => v,
+                    Err(e) => return err_body(format!("invalid JSON body: {e}")),
+                };
+                let records_value = match parsed.get("records") {
+                    Some(v) => v.clone(),
+                    None => return err_body("missing 'records' field".to_string()),
+                };
+                let records: Vec<tachibana::MasterRecord> =
+                    match serde_json::from_value(records_value) {
+                        Ok(r) => r,
+                        Err(e) => return err_body(format!("failed to parse records: {e}")),
+                    };
+
+                // MasterRecord のデフォルト sCLMID は空。master_record_to_ticker_info が
+                // "CLMIssueMstKabu" でフィルタするため、空のままだと無視されてしまう。
+                // テスト注入では issue_code があるレコードを Kabu 扱いにする。
+                let count = records.len();
+                let normalized: Vec<tachibana::MasterRecord> = records
+                    .into_iter()
+                    .map(|mut r| {
+                        if r.clm_id.is_empty() {
+                            r.clm_id = "CLMIssueMstKabu".to_string();
+                        }
+                        r
+                    })
+                    .collect();
+
+                tachibana::e2e_mock::inject_master_cache(normalized);
+
+                // ISSUE_MASTER_CACHE は埋まったが、Sidebar 側の `tickers_info` は
+                // `Message::Sidebar(TickersTable(UpdateMetadata))` で更新される。
+                // `cached_ticker_metadata()` は内部的に std::sync::RwLock を読むだけなので、
+                // Task::perform 経由で async ブリッジしつつ UpdateMetadata を発火する。
+                use exchange::adapter::Venue;
+                let task = Task::perform(
+                    async { exchange::adapter::tachibana::cached_ticker_metadata().await },
+                    |metadata| {
+                        Message::Sidebar(dashboard::sidebar::Message::TickersTable(
+                            dashboard::tickers_table::Message::UpdateMetadata(
+                                Venue::Tachibana,
+                                metadata,
+                            ),
+                        ))
+                    },
+                );
+
+                let body = serde_json::json!({
+                    "ok": true,
+                    "action": "inject-master",
+                    "count": count,
+                })
+                .to_string();
+                (body, task)
+            }
+            TestCommand::TachibanaInjectDailyHistory { raw_body } => {
+                // body 形式: {"issue_code":"7203","klines":[{"time":...,"open":...,"high":...,"low":...,"close":...,"volume":...}, ...]}
+                let err_body = |msg: String| -> (String, Task<Message>) {
+                    (format!(r#"{{"error":"{}"}}"#, msg.replace('"', "'")), Task::none())
+                };
+                let parsed: serde_json::Value = match serde_json::from_str(&raw_body) {
+                    Ok(v) => v,
+                    Err(e) => return err_body(format!("invalid JSON body: {e}")),
+                };
+                let Some(issue_code) = parsed
+                    .get("issue_code")
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+                else {
+                    return err_body("missing 'issue_code' field".to_string());
+                };
+                let Some(klines_arr) = parsed.get("klines").and_then(|v| v.as_array()) else {
+                    return err_body("missing 'klines' field or not an array".to_string());
+                };
+
+                let mut klines: Vec<exchange::Kline> = Vec::with_capacity(klines_arr.len());
+                for item in klines_arr.iter() {
+                    let Some(time) = item.get("time").and_then(|v| v.as_u64()) else {
+                        return err_body("kline missing 'time' (u64)".to_string());
+                    };
+                    let Some(open) = item.get("open").and_then(|v| v.as_f64()) else {
+                        return err_body("kline missing 'open' (number)".to_string());
+                    };
+                    let Some(high) = item.get("high").and_then(|v| v.as_f64()) else {
+                        return err_body("kline missing 'high' (number)".to_string());
+                    };
+                    let Some(low) = item.get("low").and_then(|v| v.as_f64()) else {
+                        return err_body("kline missing 'low' (number)".to_string());
+                    };
+                    let Some(close) = item.get("close").and_then(|v| v.as_f64()) else {
+                        return err_body("kline missing 'close' (number)".to_string());
+                    };
+                    let Some(volume) = item.get("volume").and_then(|v| v.as_f64()) else {
+                        return err_body("kline missing 'volume' (number)".to_string());
+                    };
+
+                    // 日本株は整数円なので min_ticksize = 10^0 = 1（daily_record_to_kline と同じ前提）
+                    let min_ticksize = exchange::unit::MinTicksize::new(0);
+                    let qty = exchange::unit::qty::Qty::from_f32(volume as f32);
+                    klines.push(exchange::Kline::new(
+                        time,
+                        open as f32,
+                        high as f32,
+                        low as f32,
+                        close as f32,
+                        exchange::Volume::TotalOnly(qty),
+                        min_ticksize,
+                    ));
+                }
+
+                let count = klines.len();
+                tachibana::e2e_mock::inject_daily_klines(issue_code.clone(), klines);
+
+                let body = serde_json::json!({
+                    "ok": true,
+                    "action": "inject-daily-history",
+                    "issue_code": issue_code,
+                    "count": count,
+                })
+                .to_string();
+                (body, Task::none())
+            }
+        }
+    }
+
     fn handle_pane_api(
         &mut self,
         cmd: replay_api::PaneCommand,
