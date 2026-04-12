@@ -425,6 +425,21 @@ impl State {
         self.rebuild_content(true);
     }
 
+    /// mid-replay バックフィル用: この kline chart が replay モードに入っていなければ入れる。
+    /// - 既に `replay_kline_buffer` が Some なら no-op（冪等）
+    /// - 非 kline ペインなら no-op
+    ///
+    /// 戻り値: 実際に replay モードへ切り替えた（= バックフィル発火が必要）なら true
+    pub fn enable_replay_mode_if_needed(&mut self) -> bool {
+        if let Content::Kline { chart: Some(c), .. } = &mut self.content
+            && c.replay_kline_buffer.is_none()
+        {
+            c.enable_replay_mode();
+            return true;
+        }
+        false
+    }
+
     pub fn rebuild_content_for_live(&mut self) {
         self.rebuild_content(false);
     }
@@ -1857,6 +1872,36 @@ impl State {
         if let Content::ShaderHeatmap { chart, .. } = &mut self.content {
             *chart = None;
             self.status = Status::Ready;
+        }
+    }
+
+    /// リプレイ用 kline バッファの準備状態（§2.1 `fire_status` 判定用）。
+    /// - `None`: このペインは kline ではない（判定対象外）
+    /// - `Some(false)`: kline だがバッファ未 ready（未初期化 or バックフィル中）
+    /// - `Some(true)`: kline かつバッファにデータあり（`replay_next_kline_time` を使う）
+    pub fn replay_kline_chart_ready(&self) -> Option<bool> {
+        if let Content::Kline { chart, .. } = &self.content {
+            chart.as_ref().map(|c| c.replay_buffer_ready())
+        } else {
+            None
+        }
+    }
+
+    /// リプレイバッファのカーソル位置（挿入済み件数）。kline でない場合は None。
+    pub fn replay_buffer_cursor(&self) -> Option<usize> {
+        if let Content::Kline { chart, .. } = &self.content {
+            chart.as_ref().and_then(|c| c.replay_buffer_cursor())
+        } else {
+            None
+        }
+    }
+
+    /// リプレイバッファ内の kline 総数。kline でない場合は None。
+    pub fn replay_buffer_len(&self) -> Option<usize> {
+        if let Content::Kline { chart, .. } = &self.content {
+            chart.as_ref().and_then(|c| c.replay_buffer_len())
+        } else {
+            None
         }
     }
 

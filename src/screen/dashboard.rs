@@ -12,6 +12,7 @@ use crate::{
         ResolvedStream,
         fetcher::{self, FetchedData, InfoKind},
     },
+    replay,
     screen::dashboard::tickers_table::TickersTable,
     style,
     widget::toast::Toast,
@@ -577,7 +578,7 @@ impl Dashboard {
             .map(|(_, _, state)| state)
     }
 
-    fn iter_all_panes(
+    pub fn iter_all_panes(
         &self,
         main_window: window::Id,
     ) -> impl Iterator<Item = (window::Id, pane_grid::Pane, &pane::State)> {
@@ -589,7 +590,7 @@ impl Dashboard {
             }))
     }
 
-    fn iter_all_panes_mut(
+    pub fn iter_all_panes_mut(
         &mut self,
         main_window: window::Id,
     ) -> impl Iterator<Item = (window::Id, pane_grid::Pane, &mut pane::State)> {
@@ -1121,14 +1122,49 @@ impl Dashboard {
             .max()
     }
 
-    /// 全ペインの kline ストリームが D1 のみかを判定する。
-    /// kline ストリームが存在しない場合は false を返す。
-    pub fn is_all_d1_klines(&self, main_window: window::Id) -> bool {
-        let streams = self
-            .iter_all_panes(main_window)
-            .filter_map(|(_, _, state)| state.streams.ready_iter())
-            .flatten();
-        all_kline_streams_are_d1(streams)
+    /// 統一 Tick ハンドラ用の `FireStatus` を計算する（§2.1 / §2.2）。
+    ///
+    /// 全ペインの kline chart を走査し:
+    /// - ready chart の `replay_next_kline_time(current_time)` の min を `Ready(t)` として返す
+    /// - ready chart が 1 つも min を返さず、unready (backfill 中) chart があれば `Pending`
+    /// - それ以外（全 ready が終端、unready 無し）は `Terminal`
+    ///
+    /// 戻り値 `None`: このダッシュボードに kline chart が 1 つも存在しない
+    /// （fire_status では判定できないので、呼び出し側で linear fallback などを使う）。
+    pub fn fire_status(
+        &self,
+        current_time: u64,
+        main_window: window::Id,
+    ) -> Option<replay::FireStatus> {
+        let mut min_time: Option<u64> = None;
+        let mut has_pending = false;
+        let mut has_any_kline = false;
+
+        for (_, _, state) in self.iter_all_panes(main_window) {
+            match state.replay_kline_chart_ready() {
+                None => continue,
+                Some(false) => {
+                    has_any_kline = true;
+                    has_pending = true;
+                }
+                Some(true) => {
+                    has_any_kline = true;
+                    if let Some(t) = state.replay_next_kline_time(current_time) {
+                        min_time = Some(min_time.map_or(t, |m| m.min(t)));
+                    }
+                }
+            }
+        }
+
+        if !has_any_kline {
+            return None;
+        }
+
+        Some(match (min_time, has_pending) {
+            (Some(t), _) => replay::FireStatus::Ready(t),
+            (None, true) => replay::FireStatus::Pending,
+            (None, false) => replay::FireStatus::Terminal,
+        })
     }
 
     pub fn invalidate_all_panes(&mut self, main_window: window::Id) {
@@ -1320,6 +1356,41 @@ impl Dashboard {
             });
     }
 
+    /// mid-replay で新規追加されたペインの kline chart を replay モードに切り替え、
+    /// そのペインの kline stream (pane_id, stream) を返す（バックフィル対象）。
+    ///
+    /// 「新規追加」の判定: `chart.replay_buffer_ready() == false && replay_kline_buffer == None`
+    /// すなわち kline chart があるが replay モードに入っていないペイン。
+    /// 既に replay モードのペインはスキップ（冪等）。
+    pub fn collect_new_replay_klines(
+        &mut self,
+        main_window: window::Id,
+    ) -> Vec<(uuid::Uuid, StreamKind)> {
+        let mut targets = Vec::new();
+        for (_, _, state) in self.iter_all_panes_mut(main_window) {
+            let pane_id = state.unique_id();
+            let kline_streams: Vec<StreamKind> = state
+                .streams
+                .ready_iter()
+                .map(|iter| {
+                    iter.filter(|s| matches!(s, StreamKind::Kline { .. }))
+                        .copied()
+                        .collect()
+                })
+                .unwrap_or_default();
+            if kline_streams.is_empty() {
+                continue;
+            }
+            if !state.enable_replay_mode_if_needed() {
+                continue;
+            }
+            for stream in kline_streams {
+                targets.push((pane_id, stream));
+            }
+        }
+        targets
+    }
+
     /// リプレイ用にペインの content をクリアし、各ペインの kline StreamKind + pane_id を返す。
     /// settings / streams はそのまま保持する。
     pub fn prepare_replay(&mut self, main_window: window::Id) -> Vec<(uuid::Uuid, StreamKind)> {
@@ -1405,85 +1476,3 @@ impl From<fetcher::FetchUpdate> for Message {
     }
 }
 
-/// 与えられたストリーム群の kline ストリームが全て D1 かを判定する。
-/// kline ストリームが 1 件も存在しない場合は false を返す。
-fn all_kline_streams_are_d1<'a, I>(streams: I) -> bool
-where
-    I: IntoIterator<Item = &'a StreamKind>,
-{
-    let mut has_kline = false;
-    for stream in streams {
-        if let StreamKind::Kline { timeframe, .. } = stream {
-            has_kline = true;
-            if *timeframe != exchange::Timeframe::D1 {
-                return false;
-            }
-        }
-    }
-    has_kline
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use exchange::{Ticker, Timeframe, adapter::Exchange};
-
-    fn mock_ticker_info() -> TickerInfo {
-        TickerInfo::new(
-            Ticker::new("BTCUSDT", Exchange::BinanceSpot),
-            1.0,
-            1.0,
-            None,
-        )
-    }
-
-    fn kline_stream(tf: Timeframe) -> StreamKind {
-        StreamKind::Kline {
-            ticker_info: mock_ticker_info(),
-            timeframe: tf,
-        }
-    }
-
-    fn trade_stream() -> StreamKind {
-        StreamKind::Trades {
-            ticker_info: mock_ticker_info(),
-        }
-    }
-
-    #[test]
-    fn all_d1_returns_true_when_only_d1_klines() {
-        let streams = [kline_stream(Timeframe::D1)];
-        assert!(all_kline_streams_are_d1(&streams));
-    }
-
-    #[test]
-    fn all_d1_returns_true_with_multiple_d1_streams() {
-        let streams = [kline_stream(Timeframe::D1), kline_stream(Timeframe::D1)];
-        assert!(all_kline_streams_are_d1(&streams));
-    }
-
-    #[test]
-    fn all_d1_returns_false_when_any_non_d1_kline_present() {
-        let streams = [kline_stream(Timeframe::D1), kline_stream(Timeframe::M1)];
-        assert!(!all_kline_streams_are_d1(&streams));
-    }
-
-    #[test]
-    fn all_d1_returns_false_when_no_kline_streams() {
-        let streams = [trade_stream()];
-        assert!(!all_kline_streams_are_d1(&streams));
-    }
-
-    #[test]
-    fn all_d1_returns_false_for_empty_input() {
-        let streams: [StreamKind; 0] = [];
-        assert!(!all_kline_streams_are_d1(&streams));
-    }
-
-    #[test]
-    fn all_d1_ignores_trade_streams() {
-        // D1 kline + trade は「全 D1」と判定される（trade は kline 判定対象外）
-        let streams = [kline_stream(Timeframe::D1), trade_stream()];
-        assert!(all_kline_streams_are_d1(&streams));
-    }
-}

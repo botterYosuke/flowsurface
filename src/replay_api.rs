@@ -1,4 +1,4 @@
-use crate::replay::{ReplayCommand, ReplayStatus};
+use crate::replay::ReplayCommand;
 use futures::SinkExt;
 use futures::channel::mpsc;
 use std::sync::{Arc, Mutex};
@@ -6,27 +6,70 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 
-/// oneshot::Sender を Clone 可能にするラッパー（iced の Message は Clone が必要）
+/// API ハンドラーが実行するコマンド。既存 ReplayCommand と新規 PaneCommand の union。
 #[derive(Debug, Clone)]
-pub struct ReplySender(Arc<Mutex<Option<oneshot::Sender<ReplayStatus>>>>);
+pub enum ApiCommand {
+    Replay(ReplayCommand),
+    Pane(PaneCommand),
+}
+
+/// ペイン CRUD 系コマンド（§6.2 #2/#5/#6/#7/#8 テスト用）。
+#[derive(Debug, Clone)]
+pub enum PaneCommand {
+    /// 全ペインのメタ情報 + リプレイバッファ状態を返す
+    ListPanes,
+    /// ペインを分割する。axis: "Vertical" | "Horizontal"
+    /// new_content は無視（既存 pane::Message::SplitPane は Starter しか生成しない）
+    Split {
+        pane_id: uuid::Uuid,
+        axis: String,
+    },
+    /// ペインを閉じる
+    Close { pane_id: uuid::Uuid },
+    /// ペインのストリームを別 ticker に差し替える（SerTicker 形式 "BinanceLinear:BTCUSDT"）
+    SetTicker {
+        pane_id: uuid::Uuid,
+        ticker: String,
+    },
+    /// ペインのタイムフレームを変更する（"M1" 〜 "D1"）
+    SetTimeframe {
+        pane_id: uuid::Uuid,
+        timeframe: String,
+    },
+    /// Sidebar::TickerSelected 経路（Phase 8 Fix 4 検証用）。
+    /// `kind` が None → `switch_tickers_in_group` 経路、Some → `init_focused_pane` 経路。
+    /// どちらの経路でも `SyncReplayBuffers` chain が発火する（main.rs 内の `Message::Sidebar` ハンドラと同じコード）。
+    SidebarSelectTicker {
+        pane_id: uuid::Uuid,
+        ticker: String,
+        kind: Option<String>,
+    },
+    /// 現在の通知（Toast）一覧を取得する。§6.2 #10 backfill 失敗検証用。
+    ListNotifications,
+}
+
+/// oneshot::Sender を Clone 可能にするラッパー（iced の Message は Clone が必要）
+/// レスポンスは main.rs 側でシリアライズ済み JSON を送る。
+#[derive(Debug, Clone)]
+pub struct ReplySender(Arc<Mutex<Option<oneshot::Sender<String>>>>);
 
 impl ReplySender {
-    fn new(tx: oneshot::Sender<ReplayStatus>) -> Self {
+    fn new(tx: oneshot::Sender<String>) -> Self {
         Self(Arc::new(Mutex::new(Some(tx))))
     }
 
     /// 応答を送信する。2回目以降の呼び出しは何もしない。
-    pub fn send(self, status: ReplayStatus) {
+    pub fn send(self, body: String) {
         if let Ok(mut guard) = self.0.lock()
             && let Some(tx) = guard.take()
         {
-            let _ = tx.send(status);
+            let _ = tx.send(body);
         }
     }
 }
 
 /// API サーバーから iced に送るメッセージ（コマンド + 応答用チャネル）
-pub type ApiMessage = (ReplayCommand, ReplySender);
+pub type ApiMessage = (ApiCommand, ReplySender);
 
 /// channel() パターンで API サーバーを起動し、Message ストリームを返す。
 /// exchange/src/connect.rs:111-122 の再利用パターン。
@@ -114,8 +157,7 @@ async fn run_server(mut sender: mpsc::Sender<ApiMessage>) {
         }
 
         match reply_rx.await {
-            Ok(status) => {
-                let json = serde_json::to_string(&status).unwrap_or_default();
+            Ok(json) => {
                 let _ = write_response(&mut stream, 200, &json).await;
             }
             Err(_) => {
@@ -151,11 +193,29 @@ enum RouteError {
     BadRequest,
 }
 
-/// パスとメソッドから ReplayCommand にルーティング
-fn route(method: &str, path: &str, body: &str) -> Result<ReplayCommand, RouteError> {
+/// body から文字列フィールドを取り出す
+fn body_str_field(body: &str, key: &str) -> Result<String, RouteError> {
+    let parsed: serde_json::Value =
+        serde_json::from_str(body).map_err(|_| RouteError::BadRequest)?;
+    parsed
+        .get(key)
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .ok_or(RouteError::BadRequest)
+}
+
+/// body から uuid フィールドを取り出す
+fn body_uuid_field(body: &str, key: &str) -> Result<uuid::Uuid, RouteError> {
+    let s = body_str_field(body, key)?;
+    uuid::Uuid::parse_str(&s).map_err(|_| RouteError::BadRequest)
+}
+
+/// パスとメソッドから ApiCommand にルーティング
+fn route(method: &str, path: &str, body: &str) -> Result<ApiCommand, RouteError> {
+    // replay / app 系は ReplayCommand にラップ
     match (method, path) {
-        ("GET", "/api/replay/status") => Ok(ReplayCommand::GetStatus),
-        ("POST", "/api/replay/toggle") => Ok(ReplayCommand::Toggle),
+        ("GET", "/api/replay/status") => return Ok(ApiCommand::Replay(ReplayCommand::GetStatus)),
+        ("POST", "/api/replay/toggle") => return Ok(ApiCommand::Replay(ReplayCommand::Toggle)),
         ("POST", "/api/replay/play") => {
             let parsed: serde_json::Value =
                 serde_json::from_str(body).map_err(|_| RouteError::BadRequest)?;
@@ -169,14 +229,67 @@ fn route(method: &str, path: &str, body: &str) -> Result<ReplayCommand, RouteErr
                 .and_then(|v| v.as_str())
                 .ok_or(RouteError::BadRequest)?
                 .to_string();
-            Ok(ReplayCommand::Play { start, end })
+            return Ok(ApiCommand::Replay(ReplayCommand::Play { start, end }));
         }
-        ("POST", "/api/replay/pause") => Ok(ReplayCommand::Pause),
-        ("POST", "/api/replay/resume") => Ok(ReplayCommand::Resume),
-        ("POST", "/api/replay/step-forward") => Ok(ReplayCommand::StepForward),
-        ("POST", "/api/replay/step-backward") => Ok(ReplayCommand::StepBackward),
-        ("POST", "/api/replay/speed") => Ok(ReplayCommand::CycleSpeed),
-        ("POST", "/api/app/save") => Ok(ReplayCommand::SaveState),
+        ("POST", "/api/replay/pause") => return Ok(ApiCommand::Replay(ReplayCommand::Pause)),
+        ("POST", "/api/replay/resume") => return Ok(ApiCommand::Replay(ReplayCommand::Resume)),
+        ("POST", "/api/replay/step-forward") => {
+            return Ok(ApiCommand::Replay(ReplayCommand::StepForward));
+        }
+        ("POST", "/api/replay/step-backward") => {
+            return Ok(ApiCommand::Replay(ReplayCommand::StepBackward));
+        }
+        ("POST", "/api/replay/speed") => {
+            return Ok(ApiCommand::Replay(ReplayCommand::CycleSpeed));
+        }
+        ("POST", "/api/app/save") => return Ok(ApiCommand::Replay(ReplayCommand::SaveState)),
+        _ => {}
+    }
+
+    // pane 系
+    match (method, path) {
+        ("GET", "/api/pane/list") => Ok(ApiCommand::Pane(PaneCommand::ListPanes)),
+        ("POST", "/api/pane/split") => {
+            let pane_id = body_uuid_field(body, "pane_id")?;
+            let axis = body_str_field(body, "axis")?;
+            Ok(ApiCommand::Pane(PaneCommand::Split { pane_id, axis }))
+        }
+        ("POST", "/api/pane/close") => {
+            let pane_id = body_uuid_field(body, "pane_id")?;
+            Ok(ApiCommand::Pane(PaneCommand::Close { pane_id }))
+        }
+        ("POST", "/api/pane/set-ticker") => {
+            let pane_id = body_uuid_field(body, "pane_id")?;
+            let ticker = body_str_field(body, "ticker")?;
+            Ok(ApiCommand::Pane(PaneCommand::SetTicker { pane_id, ticker }))
+        }
+        ("POST", "/api/pane/set-timeframe") => {
+            let pane_id = body_uuid_field(body, "pane_id")?;
+            let timeframe = body_str_field(body, "timeframe")?;
+            Ok(ApiCommand::Pane(PaneCommand::SetTimeframe {
+                pane_id,
+                timeframe,
+            }))
+        }
+        ("GET", "/api/notification/list") => {
+            Ok(ApiCommand::Pane(PaneCommand::ListNotifications))
+        }
+        ("POST", "/api/sidebar/select-ticker") => {
+            let pane_id = body_uuid_field(body, "pane_id")?;
+            let ticker = body_str_field(body, "ticker")?;
+            // kind は optional
+            let parsed: serde_json::Value =
+                serde_json::from_str(body).map_err(|_| RouteError::BadRequest)?;
+            let kind = parsed
+                .get("kind")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            Ok(ApiCommand::Pane(PaneCommand::SidebarSelectTicker {
+                pane_id,
+                ticker,
+                kind,
+            }))
+        }
         _ => Err(RouteError::NotFound),
     }
 }
@@ -266,55 +379,69 @@ mod tests {
         assert!(body.is_empty());
     }
 
-    // ── route tests ──
+    // ── route tests: replay ──
+
+    fn unwrap_replay(cmd: ApiCommand) -> ReplayCommand {
+        match cmd {
+            ApiCommand::Replay(c) => c,
+            _ => panic!("Expected ApiCommand::Replay, got {cmd:?}"),
+        }
+    }
+
+    fn unwrap_pane(cmd: ApiCommand) -> PaneCommand {
+        match cmd {
+            ApiCommand::Pane(c) => c,
+            _ => panic!("Expected ApiCommand::Pane, got {cmd:?}"),
+        }
+    }
 
     #[test]
     fn route_get_status() {
         let cmd = route("GET", "/api/replay/status", "").unwrap();
-        assert!(matches!(cmd, ReplayCommand::GetStatus));
+        assert!(matches!(unwrap_replay(cmd), ReplayCommand::GetStatus));
     }
 
     #[test]
     fn route_post_toggle() {
         let cmd = route("POST", "/api/replay/toggle", "").unwrap();
-        assert!(matches!(cmd, ReplayCommand::Toggle));
+        assert!(matches!(unwrap_replay(cmd), ReplayCommand::Toggle));
     }
 
     #[test]
     fn route_post_pause() {
         let cmd = route("POST", "/api/replay/pause", "").unwrap();
-        assert!(matches!(cmd, ReplayCommand::Pause));
+        assert!(matches!(unwrap_replay(cmd), ReplayCommand::Pause));
     }
 
     #[test]
     fn route_post_resume() {
         let cmd = route("POST", "/api/replay/resume", "").unwrap();
-        assert!(matches!(cmd, ReplayCommand::Resume));
+        assert!(matches!(unwrap_replay(cmd), ReplayCommand::Resume));
     }
 
     #[test]
     fn route_post_step_forward() {
         let cmd = route("POST", "/api/replay/step-forward", "").unwrap();
-        assert!(matches!(cmd, ReplayCommand::StepForward));
+        assert!(matches!(unwrap_replay(cmd), ReplayCommand::StepForward));
     }
 
     #[test]
     fn route_post_step_backward() {
         let cmd = route("POST", "/api/replay/step-backward", "").unwrap();
-        assert!(matches!(cmd, ReplayCommand::StepBackward));
+        assert!(matches!(unwrap_replay(cmd), ReplayCommand::StepBackward));
     }
 
     #[test]
     fn route_post_speed() {
         let cmd = route("POST", "/api/replay/speed", "").unwrap();
-        assert!(matches!(cmd, ReplayCommand::CycleSpeed));
+        assert!(matches!(unwrap_replay(cmd), ReplayCommand::CycleSpeed));
     }
 
     #[test]
     fn route_post_play_valid_json() {
         let body = r#"{"start":"2026-04-01 09:00","end":"2026-04-01 15:00"}"#;
         let cmd = route("POST", "/api/replay/play", body).unwrap();
-        match cmd {
+        match unwrap_replay(cmd) {
             ReplayCommand::Play { start, end } => {
                 assert_eq!(start, "2026-04-01 09:00");
                 assert_eq!(end, "2026-04-01 15:00");
@@ -384,6 +511,145 @@ mod tests {
     #[test]
     fn route_post_app_save() {
         let cmd = route("POST", "/api/app/save", "").unwrap();
-        assert!(matches!(cmd, ReplayCommand::SaveState));
+        assert!(matches!(unwrap_replay(cmd), ReplayCommand::SaveState));
+    }
+
+    // ── route tests: pane ──
+
+    #[test]
+    fn route_get_pane_list() {
+        let cmd = route("GET", "/api/pane/list", "").unwrap();
+        assert!(matches!(unwrap_pane(cmd), PaneCommand::ListPanes));
+    }
+
+    #[test]
+    fn route_post_pane_split_valid() {
+        let body = r#"{"pane_id":"00000000-0000-0000-0000-000000000001","axis":"Vertical"}"#;
+        let cmd = route("POST", "/api/pane/split", body).unwrap();
+        match unwrap_pane(cmd) {
+            PaneCommand::Split { pane_id, axis } => {
+                assert_eq!(
+                    pane_id,
+                    uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap()
+                );
+                assert_eq!(axis, "Vertical");
+            }
+            _ => panic!("Expected Split command"),
+        }
+    }
+
+    #[test]
+    fn route_post_pane_split_missing_axis() {
+        let body = r#"{"pane_id":"00000000-0000-0000-0000-000000000001"}"#;
+        let result = route("POST", "/api/pane/split", body);
+        assert!(matches!(result, Err(RouteError::BadRequest)));
+    }
+
+    #[test]
+    fn route_post_pane_split_invalid_uuid() {
+        let body = r#"{"pane_id":"not-a-uuid","axis":"Vertical"}"#;
+        let result = route("POST", "/api/pane/split", body);
+        assert!(matches!(result, Err(RouteError::BadRequest)));
+    }
+
+    #[test]
+    fn route_post_pane_close_valid() {
+        let body = r#"{"pane_id":"00000000-0000-0000-0000-000000000002"}"#;
+        let cmd = route("POST", "/api/pane/close", body).unwrap();
+        match unwrap_pane(cmd) {
+            PaneCommand::Close { pane_id } => {
+                assert_eq!(
+                    pane_id,
+                    uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap()
+                );
+            }
+            _ => panic!("Expected Close command"),
+        }
+    }
+
+    #[test]
+    fn route_post_pane_set_ticker_valid() {
+        let body = r#"{"pane_id":"00000000-0000-0000-0000-000000000003","ticker":"BinanceLinear:ETHUSDT"}"#;
+        let cmd = route("POST", "/api/pane/set-ticker", body).unwrap();
+        match unwrap_pane(cmd) {
+            PaneCommand::SetTicker { pane_id, ticker } => {
+                assert_eq!(
+                    pane_id,
+                    uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000003").unwrap()
+                );
+                assert_eq!(ticker, "BinanceLinear:ETHUSDT");
+            }
+            _ => panic!("Expected SetTicker command"),
+        }
+    }
+
+    #[test]
+    fn route_post_pane_set_timeframe_valid() {
+        let body =
+            r#"{"pane_id":"00000000-0000-0000-0000-000000000004","timeframe":"M5"}"#;
+        let cmd = route("POST", "/api/pane/set-timeframe", body).unwrap();
+        match unwrap_pane(cmd) {
+            PaneCommand::SetTimeframe { pane_id, timeframe } => {
+                assert_eq!(
+                    pane_id,
+                    uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000004").unwrap()
+                );
+                assert_eq!(timeframe, "M5");
+            }
+            _ => panic!("Expected SetTimeframe command"),
+        }
+    }
+
+    #[test]
+    fn route_post_pane_set_timeframe_missing_field() {
+        let body = r#"{"pane_id":"00000000-0000-0000-0000-000000000004"}"#;
+        let result = route("POST", "/api/pane/set-timeframe", body);
+        assert!(matches!(result, Err(RouteError::BadRequest)));
+    }
+
+    #[test]
+    fn route_post_sidebar_select_ticker_without_kind() {
+        let body = r#"{"pane_id":"00000000-0000-0000-0000-000000000005","ticker":"BinanceLinear:BTCUSDT"}"#;
+        let cmd = route("POST", "/api/sidebar/select-ticker", body).unwrap();
+        match unwrap_pane(cmd) {
+            PaneCommand::SidebarSelectTicker {
+                pane_id,
+                ticker,
+                kind,
+            } => {
+                assert_eq!(
+                    pane_id,
+                    uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000005").unwrap()
+                );
+                assert_eq!(ticker, "BinanceLinear:BTCUSDT");
+                assert_eq!(kind, None);
+            }
+            _ => panic!("Expected SidebarSelectTicker command"),
+        }
+    }
+
+    #[test]
+    fn route_post_sidebar_select_ticker_with_kind() {
+        let body = r#"{"pane_id":"00000000-0000-0000-0000-000000000006","ticker":"BinanceLinear:ETHUSDT","kind":"HeatmapChart"}"#;
+        let cmd = route("POST", "/api/sidebar/select-ticker", body).unwrap();
+        match unwrap_pane(cmd) {
+            PaneCommand::SidebarSelectTicker { kind, .. } => {
+                assert_eq!(kind, Some("HeatmapChart".to_string()));
+            }
+            _ => panic!("Expected SidebarSelectTicker command"),
+        }
+    }
+
+    #[test]
+    fn route_get_notification_list() {
+        let cmd = route("GET", "/api/notification/list", "").unwrap();
+        assert!(matches!(unwrap_pane(cmd), PaneCommand::ListNotifications));
+    }
+
+    #[test]
+    fn route_post_sidebar_select_ticker_missing_ticker() {
+        let body = r#"{"pane_id":"00000000-0000-0000-0000-000000000007"}"#;
+        let result = route("POST", "/api/sidebar/select-ticker", body);
+        assert!(matches!(result, Err(RouteError::BadRequest)));
     }
 }

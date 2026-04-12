@@ -43,6 +43,121 @@ use iced::{
 };
 use std::{borrow::Cow, collections::HashMap, vec};
 
+/// ResolvedStream から (ticker 表示文字列, timeframe 表示文字列) を抽出する。
+/// Ready → 実行中ストリーム、Waiting → 永続化された構成から復元する。
+fn extract_pane_ticker_timeframe(
+    streams: &connector::ResolvedStream,
+) -> (Option<String>, Option<String>) {
+    use connector::ResolvedStream;
+    use data::stream::PersistStreamKind;
+
+    let format_ticker = |ticker: &exchange::Ticker| -> String {
+        let ex_str = format!("{:?}", ticker.exchange).replace(' ', "");
+        format!("{ex_str}:{ticker}")
+    };
+
+    match streams {
+        ResolvedStream::Ready(list) => {
+            let mut ticker_str: Option<String> = None;
+            let mut tf_str: Option<String> = None;
+            for s in list {
+                if ticker_str.is_none() {
+                    ticker_str = Some(format_ticker(&s.ticker_info().ticker));
+                }
+                if let Some((_, tf)) = s.as_kline_stream() {
+                    tf_str = Some(format!("{tf:?}"));
+                    break;
+                }
+            }
+            (ticker_str, tf_str)
+        }
+        ResolvedStream::Waiting { streams: persist, .. } => {
+            let mut ticker_str: Option<String> = None;
+            let mut tf_str: Option<String> = None;
+            for ps in persist {
+                match ps {
+                    PersistStreamKind::Kline { ticker, timeframe } => {
+                        if ticker_str.is_none() {
+                            ticker_str = Some(format_ticker(ticker));
+                        }
+                        tf_str = Some(format!("{timeframe:?}"));
+                        break;
+                    }
+                    PersistStreamKind::Depth(d) => {
+                        if ticker_str.is_none() {
+                            ticker_str = Some(format_ticker(&d.ticker));
+                        }
+                    }
+                    PersistStreamKind::Trades { ticker } => {
+                        if ticker_str.is_none() {
+                            ticker_str = Some(format_ticker(ticker));
+                        }
+                    }
+                    PersistStreamKind::DepthAndTrades(d) => {
+                        if ticker_str.is_none() {
+                            ticker_str = Some(format_ticker(&d.ticker));
+                        }
+                    }
+                }
+            }
+            (ticker_str, tf_str)
+        }
+    }
+}
+
+/// kline stream 1 本分のバックフィル Task を構築する（§Phase 3-0-a）。
+/// `start_ms` より 450 本分前から `end_ms` までのフェッチタスクを生成する（リプレイ開始前の
+/// ヒストリカルも確保）。Play ハンドラと mid-replay backfill の両方で再利用される。
+fn build_kline_backfill_task(
+    pane_id: uuid::Uuid,
+    stream: exchange::adapter::StreamKind,
+    start_ms: u64,
+    end_ms: u64,
+    layout_id: uuid::Uuid,
+) -> Task<Message> {
+    let req_id = uuid::Uuid::new_v4();
+    let fetch_start = if let Some((_, tf)) = stream.as_kline_stream() {
+        start_ms.saturating_sub(450 * tf.to_milliseconds())
+    } else {
+        start_ms
+    };
+    connector::fetcher::kline_fetch_task(
+        layout_id,
+        pane_id,
+        stream,
+        Some(req_id),
+        Some((fetch_start, end_ms)),
+    )
+    .map(move |update| Message::Dashboard {
+        layout_id: Some(layout_id),
+        event: update.into(),
+    })
+}
+
+/// Binance trades stream 1 本分のバックフィル Task を構築する（§Phase 3-0-b）。
+/// `fetch_trades_batched` の sip ストリームを `TradesBatchReceived` / `TradesFetchCompleted`
+/// に変換して返す。非 Binance stream は呼び出し側で弾くこと。
+fn build_trades_backfill_task(
+    stream: exchange::adapter::StreamKind,
+    start_ms: u64,
+    end_ms: u64,
+) -> Task<Message> {
+    let ticker_info = stream.ticker_info();
+    let stream_kind = stream;
+    let data_path = data::data_path(Some("market_data/binance/"));
+
+    let (task, _handle) = Task::sip(
+        connector::fetcher::fetch_trades_batched(ticker_info, start_ms, end_ms, data_path),
+        move |batch| Message::Replay(ReplayMessage::TradesBatchReceived(stream_kind, batch)),
+        move |result| match result {
+            Ok(()) => Message::Replay(ReplayMessage::TradesFetchCompleted(stream_kind)),
+            Err(err) => Message::Replay(ReplayMessage::DataLoadFailed(err.ui_message())),
+        },
+    )
+    .abortable();
+    task
+}
+
 fn main() {
     logger::setup(cfg!(debug_assertions)).expect("Failed to initialize logger");
 
@@ -159,7 +274,7 @@ impl Flowsurface {
                     },
                     playback: None,
                     last_tick: None,
-                    d1_virtual_elapsed_ms: 0.0,
+                    virtual_elapsed_ms: 0.0,
                 }
             },
         };
@@ -293,40 +408,36 @@ impl Flowsurface {
                     .unwrap_or(16.0);
                 self.replay.last_tick = Some(now);
 
-                // is_all_d1_klines() / replay_next_kline_time() は &self を取るため、
-                // &mut self.replay.playback を取る前に呼んで結果をローカル変数へ保存
-                let is_d1 = self.active_dashboard().is_all_d1_klines(main_window_id);
-                let next_kline_time = if is_d1 {
-                    let current = self
-                        .replay
-                        .playback
-                        .as_ref()
-                        .map(|p| p.current_time)
-                        .unwrap_or(0);
-                    self.active_dashboard()
-                        .replay_next_kline_time(current, main_window_id)
-                } else {
-                    None
-                };
+                // fire_status() は &self を取るため、&mut self.replay.playback を取る前に
+                // 計算してローカル変数へ保存する。
+                let current = self
+                    .replay
+                    .playback
+                    .as_ref()
+                    .map(|p| p.current_time)
+                    .unwrap_or(0);
+                let fire_status_opt =
+                    self.active_dashboard().fire_status(current, main_window_id);
 
                 let (replay_trades, replay_current_time) = if let Some(pb) =
                     &mut self.replay.playback
                 {
                     if pb.status != replay::PlaybackStatus::Playing {
                         (None, None)
-                    } else if is_d1 {
-                        // D1 リプレイ: スロットリング付きで次の kline へ離散ジャンプ (Phase 3)
-                        let result = replay::process_d1_tick(
+                    } else if let Some(fire_status) = fire_status_opt {
+                        // 統一 Tick 経路（§2.1 案 C）: kline chart が存在する通常経路
+                        let result = replay::process_tick(
                             pb,
-                            &mut self.replay.d1_virtual_elapsed_ms,
+                            &mut self.replay.virtual_elapsed_ms,
                             elapsed_ms,
-                            next_kline_time,
+                            fire_status,
                         );
                         (result.trades_collected, result.current_time)
                     } else {
+                        // フォールバック: kline chart が 1 つも無い heatmap-only 等のリプレイ。
+                        // 既存の linear advance 経路を使用。
                         let current_time = pb.advance_time(elapsed_ms);
 
-                        // 各ストリームの TradeBuffer から current_time 以前を収集
                         let streams: Vec<_> = pb.trade_buffers.keys().copied().collect();
                         let mut collected = Vec::new();
 
@@ -341,7 +452,6 @@ impl Flowsurface {
                             }
                         }
 
-                        // current_time >= end_time なら自動停止
                         if pb.current_time >= pb.end_time {
                             pb.status = replay::PlaybackStatus::Paused;
                         }
@@ -539,12 +649,18 @@ impl Flowsurface {
                         None => Task::none(),
                     };
 
+                    // mid-replay で stream 構成変更の可能性があれば SyncReplayBuffers を chain する。
+                    // §2.6.5 集約点: refresh_streams() を呼ぶ全入口を dashboard::update 経由で
+                    // カバーする。Replay モードでなければハンドラ側で no-op になる。
                     return main_task
                         .map(move |msg| Message::Dashboard {
                             layout_id: Some(layout_id),
                             event: msg,
                         })
-                        .chain(additional_task);
+                        .chain(additional_task)
+                        .chain(Task::done(Message::Replay(
+                            ReplayMessage::SyncReplayBuffers,
+                        )));
                 }
             }
             Message::RemoveNotification(index) => {
@@ -738,10 +854,18 @@ impl Flowsurface {
                             }
                         };
 
-                        return task.map(move |msg| Message::Dashboard {
-                            layout_id: None,
-                            event: msg,
-                        });
+                        // review 🟡 #4: mid-replay で heatmap-only pane を選択した場合、
+                        // init_focused_pane は Task::none() を返すため Message::Dashboard 末尾の
+                        // SyncReplayBuffers chain が発火しない。ここで明示的に chain する。
+                        // Replay モードでない場合は SyncReplayBuffers ハンドラ側で no-op。
+                        return task
+                            .map(move |msg| Message::Dashboard {
+                                layout_id: None,
+                                event: msg,
+                            })
+                            .chain(Task::done(Message::Replay(
+                                ReplayMessage::SyncReplayBuffers,
+                            )));
                     }
                     Some(dashboard::sidebar::Action::ErrorOccurred(err)) => {
                         self.notifications.push(Toast::error(err.to_string()));
@@ -806,6 +930,7 @@ impl Flowsurface {
                             speed: 1.0,
                             trade_buffers: std::collections::HashMap::new(),
                             resume_status: replay::PlaybackStatus::Playing,
+                            pending_trade_streams: std::collections::HashSet::new(),
                         });
 
                         let main_window_id = self.main_window.id;
@@ -837,59 +962,14 @@ impl Flowsurface {
                         let kline_tasks: Vec<Task<Message>> = kline_targets
                             .into_iter()
                             .map(|(pane_id, stream)| {
-                                let req_id = uuid::Uuid::new_v4();
-                                let fetch_start = if let Some((_, tf)) = stream.as_kline_stream() {
-                                    start_ms.saturating_sub(450 * tf.to_milliseconds())
-                                } else {
-                                    start_ms
-                                };
-                                connector::fetcher::kline_fetch_task(
-                                    layout_id,
-                                    pane_id,
-                                    stream,
-                                    Some(req_id),
-                                    Some((fetch_start, end_ms)),
-                                )
-                                .map(move |update| {
-                                    Message::Dashboard {
-                                        layout_id: Some(layout_id),
-                                        event: update.into(),
-                                    }
-                                })
+                                build_kline_backfill_task(pane_id, stream, start_ms, end_ms, layout_id)
                             })
                             .collect();
 
                         // Binance trades のフェッチ（バックグラウンドで独立実行）
                         let mut trade_tasks: Vec<Task<Message>> = Vec::new();
                         for stream in &trade_targets {
-                            let ticker_info = stream.ticker_info();
-                            let stream_kind = *stream;
-                            let data_path = data::data_path(Some("market_data/binance/"));
-
-                            let (task, _handle) = Task::sip(
-                                connector::fetcher::fetch_trades_batched(
-                                    ticker_info,
-                                    start_ms,
-                                    end_ms,
-                                    data_path,
-                                ),
-                                move |batch| {
-                                    Message::Replay(ReplayMessage::TradesBatchReceived(
-                                        stream_kind,
-                                        batch,
-                                    ))
-                                },
-                                move |result| match result {
-                                    Ok(()) => Message::Replay(ReplayMessage::TradesFetchCompleted(
-                                        stream_kind,
-                                    )),
-                                    Err(err) => Message::Replay(ReplayMessage::DataLoadFailed(
-                                        err.ui_message(),
-                                    )),
-                                },
-                            )
-                            .abortable();
-                            trade_tasks.push(task);
+                            trade_tasks.push(build_trades_backfill_task(*stream, start_ms, end_ms));
                         }
 
                         // kline タスク完了後に DataLoaded → Playing へ遷移
@@ -934,30 +1014,19 @@ impl Flowsurface {
                         }
                     }
                     ReplayMessage::StepForward => {
-                        // D1 の場合は kline バッファから次の足に離散ステップ（休場日スキップ）
-                        // D1 以外は従来通り 1分（60秒）固定ステップ
+                        // 全 timeframe で kline バッファから次の足に離散ステップ（§Phase 1b）
+                        // バッファ末尾なら current_time 維持（fallback）
                         let main_window_id = self.main_window.id;
-                        let is_d1 = self.active_dashboard().is_all_d1_klines(main_window_id);
 
                         // borrow checker 回避: immutable borrow で next_time を先に取得
-                        let next_kline_time = if is_d1 {
-                            let ct = self.replay.playback.as_ref().map(|pb| pb.current_time);
-                            ct.and_then(|ct| {
-                                self.active_dashboard()
-                                    .replay_next_kline_time(ct, main_window_id)
-                            })
-                        } else {
-                            None
-                        };
+                        let ct = self.replay.playback.as_ref().map(|pb| pb.current_time);
+                        let next_kline_time = ct.and_then(|ct| {
+                            self.active_dashboard()
+                                .replay_next_kline_time(ct, main_window_id)
+                        });
 
                         let collected = if let Some(pb) = &mut self.replay.playback {
-                            let new_time = if is_d1 {
-                                // next_kline_time は replay_kline_buffer 由来で [start, end] 内に収まる。
-                                // バッファ末尾であれば None（unwrap_or で current_time 維持）。
-                                next_kline_time.unwrap_or(pb.current_time)
-                            } else {
-                                (pb.current_time + 60_000).min(pb.end_time)
-                            };
+                            let new_time = next_kline_time.unwrap_or(pb.current_time);
                             pb.current_time = new_time;
 
                             let streams: Vec<_> = pb.trade_buffers.keys().copied().collect();
@@ -1011,29 +1080,18 @@ impl Flowsurface {
                     }
                     ReplayMessage::StepBackward => {
                         // 巻き戻し: バッファ保持版リビルド → kline 再挿入（フェッチ不要）
-                        // D1 の場合は kline バッファから前の足に離散ステップ（休場日スキップ）
+                        // 全 timeframe で kline バッファから前の足に離散ステップ（§Phase 1b）
                         let main_window_id = self.main_window.id;
-                        let is_d1 = self.active_dashboard().is_all_d1_klines(main_window_id);
 
                         // borrow checker 回避: immutable borrow で prev_time を先に取得
-                        let prev_kline_time = if is_d1 {
-                            let ct = self.replay.playback.as_ref().map(|pb| pb.current_time);
-                            ct.and_then(|ct| {
-                                self.active_dashboard()
-                                    .replay_prev_kline_time(ct, main_window_id)
-                            })
-                        } else {
-                            None
-                        };
+                        let ct = self.replay.playback.as_ref().map(|pb| pb.current_time);
+                        let prev_kline_time = ct.and_then(|ct| {
+                            self.active_dashboard()
+                                .replay_prev_kline_time(ct, main_window_id)
+                        });
 
                         if let Some(pb) = &mut self.replay.playback {
-                            let new_time = if is_d1 {
-                                // prev_kline_time は replay_kline_buffer 由来で [start, end] 内。
-                                // バッファ先頭より前であれば None（unwrap_or で current_time 維持）。
-                                prev_kline_time.unwrap_or(pb.current_time)
-                            } else {
-                                pb.current_time.saturating_sub(60_000).max(pb.start_time)
-                            };
+                            let new_time = prev_kline_time.unwrap_or(pb.current_time);
                             pb.current_time = new_time;
 
                             // TradeBuffer のカーソルをリセットし、new_time まで早送り
@@ -1058,18 +1116,24 @@ impl Flowsurface {
                         }
                     }
                     ReplayMessage::TradesBatchReceived(stream, batch) => {
+                        // orphan 防止（review 🔴 #2）: 登録済み stream のみ受け入れ、
+                        // SyncReplayBuffers で削除された後に届くバッチは黙って捨てる。
+                        // or_insert_with 経由で buffer が復活すると、次の SyncReplayBuffers で
+                        // 再度 orphan 判定 → 削除 → 復活 のループになるため。
                         if let Some(pb) = &mut self.replay.playback {
-                            let buffer = pb.trade_buffers.entry(stream).or_insert_with(|| {
-                                replay::TradeBuffer {
-                                    trades: Vec::new(),
-                                    cursor: 0,
-                                }
-                            });
-                            buffer.trades.extend(batch);
+                            let _accepted = pb.ingest_trades_batch(stream, batch);
                         }
                     }
-                    ReplayMessage::TradesFetchCompleted(_stream) => {
+                    ReplayMessage::TradesFetchCompleted(stream) => {
                         // trades フェッチ完了（個別ストリーム）。
+                        // §2.3.1 + §2.3.1.1: `advance_cursor_to(current_time)` で過去 trades を
+                        // 読み捨て、`pending_trade_streams` から削除して drain 対象に復帰させる
+                        if let Some(pb) = &mut self.replay.playback {
+                            if let Some(buffer) = pb.trade_buffers.get_mut(&stream) {
+                                let _skipped = buffer.advance_cursor_to(pb.current_time);
+                            }
+                            pb.pending_trade_streams.remove(&stream);
+                        }
                     }
                     ReplayMessage::DataLoaded => {
                         if let Some(pb) = &mut self.replay.playback {
@@ -1092,56 +1156,147 @@ impl Flowsurface {
                         // リプレイモードをリセット
                         self.replay.playback = None;
                     }
+                    ReplayMessage::SyncReplayBuffers => {
+                        // mid-replay で stream 構成が変わった時のバックフィル発火（§2.6.5）
+                        if !self.replay.is_replay() || self.replay.playback.is_none() {
+                            return Task::none();
+                        }
+                        let main_window_id = self.main_window.id;
+                        let layout_id = match self.layout_manager.active_layout_id() {
+                            Some(id) => id.unique,
+                            None => return Task::none(),
+                        };
+
+                        // 1. 新規 kline ターゲットを収集（replay モード未切替のペイン）
+                        let kline_targets = self
+                            .active_dashboard_mut()
+                            .collect_new_replay_klines(main_window_id);
+
+                        // 2. 現在の dashboard の Binance trade stream 集合を収集
+                        let current_trade_streams: Vec<_> = self
+                            .active_dashboard()
+                            .collect_trade_streams(main_window_id)
+                            .into_iter()
+                            .filter(|stream| {
+                                let exchange = stream.ticker_info().exchange();
+                                matches!(
+                                    exchange.venue(),
+                                    exchange::adapter::Venue::Binance
+                                )
+                            })
+                            .collect();
+
+                        let (start_ms, end_ms) = {
+                            let pb = self.replay.playback.as_ref().unwrap();
+                            (pb.start_time, pb.end_time)
+                        };
+
+                        // 3. 差分計算（review 🟡 #4: PlaybackState::diff_trade_streams に抽出）
+                        let diff = self
+                            .replay
+                            .playback
+                            .as_ref()
+                            .map(|pb| pb.diff_trade_streams(&current_trade_streams))
+                            .unwrap_or_default();
+
+                        // 4. pb の状態を更新: 新規 trade stream 用バッファ作成 + pending 登録、orphan 削除
+                        if let Some(pb) = &mut self.replay.playback {
+                            for stream in &diff.new_streams {
+                                pb.trade_buffers.insert(
+                                    *stream,
+                                    replay::TradeBuffer {
+                                        trades: Vec::new(),
+                                        cursor: 0,
+                                    },
+                                );
+                                pb.pending_trade_streams.insert(*stream);
+                            }
+                            for stream in &diff.orphan_streams {
+                                pb.trade_buffers.remove(stream);
+                                pb.pending_trade_streams.remove(stream);
+                            }
+                        }
+
+                        // 5. バックフィル Task 構築
+                        let mut tasks: Vec<Task<Message>> = Vec::new();
+                        for (pane_id, stream) in kline_targets {
+                            tasks.push(build_kline_backfill_task(
+                                pane_id, stream, start_ms, end_ms, layout_id,
+                            ));
+                        }
+                        for stream in diff.new_streams {
+                            tasks.push(build_trades_backfill_task(stream, start_ms, end_ms));
+                        }
+
+                        if !tasks.is_empty() {
+                            return Task::batch(tasks);
+                        }
+                    }
                 }
             }
             Message::ReplayApi((command, reply_tx)) => {
                 use replay::ReplayCommand;
+                use replay_api::ApiCommand;
+
+                // ヘルパー: self.replay.to_status() を JSON 文字列化
+                let reply_replay_status = |this: &Self| {
+                    serde_json::to_string(&this.replay.to_status()).unwrap_or_else(|_| {
+                        r#"{"error":"failed to serialize replay status"}"#.to_string()
+                    })
+                };
 
                 match command {
-                    ReplayCommand::GetStatus => {
-                        reply_tx.send(self.replay.to_status());
-                    }
-                    ReplayCommand::Toggle => {
-                        let task = self.update(Message::Replay(ReplayMessage::ToggleMode));
-                        reply_tx.send(self.replay.to_status());
+                    ApiCommand::Replay(cmd) => match cmd {
+                        ReplayCommand::GetStatus => {
+                            reply_tx.send(reply_replay_status(self));
+                        }
+                        ReplayCommand::Toggle => {
+                            let task = self.update(Message::Replay(ReplayMessage::ToggleMode));
+                            reply_tx.send(reply_replay_status(self));
+                            return task;
+                        }
+                        ReplayCommand::Play { start, end } => {
+                            self.replay.range_input.start = start;
+                            self.replay.range_input.end = end;
+                            let task = self.update(Message::Replay(ReplayMessage::Play));
+                            reply_tx.send(reply_replay_status(self));
+                            return task;
+                        }
+                        ReplayCommand::Pause => {
+                            let task = self.update(Message::Replay(ReplayMessage::Pause));
+                            reply_tx.send(reply_replay_status(self));
+                            return task;
+                        }
+                        ReplayCommand::Resume => {
+                            let task = self.update(Message::Replay(ReplayMessage::Resume));
+                            reply_tx.send(reply_replay_status(self));
+                            return task;
+                        }
+                        ReplayCommand::StepForward => {
+                            let task = self.update(Message::Replay(ReplayMessage::StepForward));
+                            reply_tx.send(reply_replay_status(self));
+                            return task;
+                        }
+                        ReplayCommand::StepBackward => {
+                            let task = self.update(Message::Replay(ReplayMessage::StepBackward));
+                            reply_tx.send(reply_replay_status(self));
+                            return task;
+                        }
+                        ReplayCommand::CycleSpeed => {
+                            let task = self.update(Message::Replay(ReplayMessage::CycleSpeed));
+                            reply_tx.send(reply_replay_status(self));
+                            return task;
+                        }
+                        ReplayCommand::SaveState => {
+                            let empty_windows = HashMap::new();
+                            self.save_state_to_disk(&empty_windows);
+                            reply_tx.send(reply_replay_status(self));
+                        }
+                    },
+                    ApiCommand::Pane(cmd) => {
+                        let (body, task) = self.handle_pane_api(cmd);
+                        reply_tx.send(body);
                         return task;
-                    }
-                    ReplayCommand::Play { start, end } => {
-                        self.replay.range_input.start = start;
-                        self.replay.range_input.end = end;
-                        let task = self.update(Message::Replay(ReplayMessage::Play));
-                        reply_tx.send(self.replay.to_status());
-                        return task;
-                    }
-                    ReplayCommand::Pause => {
-                        let task = self.update(Message::Replay(ReplayMessage::Pause));
-                        reply_tx.send(self.replay.to_status());
-                        return task;
-                    }
-                    ReplayCommand::Resume => {
-                        let task = self.update(Message::Replay(ReplayMessage::Resume));
-                        reply_tx.send(self.replay.to_status());
-                        return task;
-                    }
-                    ReplayCommand::StepForward => {
-                        let task = self.update(Message::Replay(ReplayMessage::StepForward));
-                        reply_tx.send(self.replay.to_status());
-                        return task;
-                    }
-                    ReplayCommand::StepBackward => {
-                        let task = self.update(Message::Replay(ReplayMessage::StepBackward));
-                        reply_tx.send(self.replay.to_status());
-                        return task;
-                    }
-                    ReplayCommand::CycleSpeed => {
-                        let task = self.update(Message::Replay(ReplayMessage::CycleSpeed));
-                        reply_tx.send(self.replay.to_status());
-                        return task;
-                    }
-                    ReplayCommand::SaveState => {
-                        let empty_windows = HashMap::new();
-                        self.save_state_to_disk(&empty_windows);
-                        reply_tx.send(self.replay.to_status());
                     }
                 }
             }
@@ -1319,8 +1474,23 @@ impl Flowsurface {
         if is_replay && self.replay.playback.is_some() && !is_loading {
             speed_btn = speed_btn.on_press(Message::Replay(ReplayMessage::CycleSpeed));
         }
+        // §2.1.1 案 C: 速度セマンティクスを tooltip で明示。
+        // 境界は `replay::COARSE_CUTOFF_MS = 3_600_000ms`（1h）:
+        //   delta_to_next <  1h (M1〜M30): 実時間連動（threshold = delta × speed）
+        //   delta_to_next >= 1h (H1〜D1): 1 バー/sec × speed（threshold = 1000ms × speed）
+        // H1 は境界の上側（粗補正モード）。
+        let speed_tooltip: Element<'_, Message> = iced::widget::tooltip(
+            speed_btn,
+            container(
+                text("M30 以下: 実時間連動 × speed / H1 以上: 1 バー/秒 × speed").size(11),
+            )
+            .style(style::tooltip)
+            .padding(6),
+            TooltipPosition::Top,
+        )
+        .into();
 
-        let controls = row![step_back_btn, play_pause_btn, step_fwd_btn, speed_btn].spacing(4);
+        let controls = row![step_back_btn, play_pause_btn, step_fwd_btn, speed_tooltip].spacing(4);
 
         let mut header = row![
             time_display,
@@ -1426,6 +1596,504 @@ impl Flowsurface {
             .get_mut(active_layout.unique)
             .map(|layout| &mut layout.dashboard)
             .expect("No active dashboard")
+    }
+
+    /// Pane CRUD API コマンドを処理する。
+    /// 返り値: (JSON レスポンス, 続行する Task)。
+    fn handle_pane_api(
+        &mut self,
+        cmd: replay_api::PaneCommand,
+    ) -> (String, Task<Message>) {
+        use replay_api::PaneCommand;
+
+        match cmd {
+            PaneCommand::ListPanes => {
+                let json = self.build_pane_list_json();
+                (json, Task::none())
+            }
+            PaneCommand::Split { pane_id, axis } => self.pane_api_split(pane_id, &axis),
+            PaneCommand::Close { pane_id } => self.pane_api_close(pane_id),
+            PaneCommand::SetTicker { pane_id, ticker } => {
+                self.pane_api_set_ticker(pane_id, &ticker)
+            }
+            PaneCommand::SetTimeframe { pane_id, timeframe } => {
+                self.pane_api_set_timeframe(pane_id, &timeframe)
+            }
+            PaneCommand::SidebarSelectTicker {
+                pane_id,
+                ticker,
+                kind,
+            } => self.pane_api_sidebar_select_ticker(pane_id, &ticker, kind.as_deref()),
+            PaneCommand::ListNotifications => {
+                let json = self.build_notification_list_json();
+                (json, Task::none())
+            }
+        }
+    }
+
+    /// 現在の通知一覧を JSON シリアライズする。
+    fn build_notification_list_json(&self) -> String {
+        use widget::toast::Status;
+        let items: Vec<serde_json::Value> = self
+            .notifications
+            .toasts()
+            .iter()
+            .map(|t| {
+                let level = match t.status() {
+                    Status::Danger => "error",
+                    Status::Warning => "warning",
+                    Status::Success => "success",
+                    Status::Primary => "info",
+                    Status::Secondary => "info",
+                };
+                serde_json::json!({
+                    "title": t.title(),
+                    "body": t.body(),
+                    "level": level,
+                })
+            })
+            .collect();
+        let body = serde_json::json!({ "notifications": items });
+        serde_json::to_string(&body).unwrap_or_else(|_| {
+            r#"{"error":"failed to serialize notifications"}"#.to_string()
+        })
+    }
+
+    /// 現在のアクティブレイアウトの全ペインを JSON シリアライズする。
+    fn build_pane_list_json(&self) -> String {
+        let main_window_id = self.main_window.id;
+        let dashboard = self.active_dashboard();
+        let pending_streams: Vec<String> = self
+            .replay
+            .playback
+            .as_ref()
+            .map(|pb| {
+                pb.pending_trade_streams
+                    .iter()
+                    .map(|s| format!("{s:?}"))
+                    .collect()
+            })
+            .unwrap_or_default();
+        // trade_buffers は orphan 除去の可視化用（E4 で close 後に該当 stream が消えること）。
+        let trade_buffer_streams: Vec<String> = self
+            .replay
+            .playback
+            .as_ref()
+            .map(|pb| pb.trade_buffers.keys().map(|s| format!("{s:?}")).collect())
+            .unwrap_or_default();
+
+        let panes: Vec<serde_json::Value> = dashboard
+            .iter_all_panes(main_window_id)
+            .map(|(window_id, _pg_pane, state)| {
+                let kind = state.content.kind().to_string();
+
+                // ticker / timeframe の抽出（Ready → Waiting の順にフォールバック）
+                let (ticker, timeframe) = extract_pane_ticker_timeframe(&state.streams);
+
+                let buffer_ready = state.replay_kline_chart_ready();
+                let buffer_cursor = state.replay_buffer_cursor();
+                let buffer_len = state.replay_buffer_len();
+
+                serde_json::json!({
+                    "id": state.unique_id().to_string(),
+                    "window_id": format!("{window_id:?}"),
+                    "type": kind,
+                    "ticker": ticker,
+                    "timeframe": timeframe,
+                    "link_group": state.link_group.map(|g| format!("{g:?}")),
+                    "replay_buffer_ready": buffer_ready,
+                    "replay_buffer_cursor": buffer_cursor,
+                    "replay_buffer_len": buffer_len,
+                })
+            })
+            .collect();
+
+        let body = serde_json::json!({
+            "panes": panes,
+            "pending_trade_streams": pending_streams,
+            "trade_buffer_streams": trade_buffer_streams,
+        });
+        serde_json::to_string(&body).unwrap_or_else(|_| {
+            r#"{"error":"failed to serialize pane list"}"#.to_string()
+        })
+    }
+
+    /// uuid から (window_id, pane_grid::Pane) を検索する。
+    fn find_pane_handle(
+        &self,
+        pane_id: uuid::Uuid,
+    ) -> Option<(window::Id, pane_grid::Pane)> {
+        let main_window_id = self.main_window.id;
+        self.active_dashboard()
+            .iter_all_panes(main_window_id)
+            .find(|(_, _, state)| state.unique_id() == pane_id)
+            .map(|(win, pg, _)| (win, pg))
+    }
+
+    fn pane_api_split(&mut self, pane_id: uuid::Uuid, axis_str: &str) -> (String, Task<Message>) {
+        let axis = match axis_str {
+            "Vertical" | "vertical" => pane_grid::Axis::Vertical,
+            "Horizontal" | "horizontal" => pane_grid::Axis::Horizontal,
+            _ => {
+                return (
+                    format!(
+                        r#"{{"error":"invalid axis: {axis_str} (expected Vertical or Horizontal)"}}"#
+                    ),
+                    Task::none(),
+                );
+            }
+        };
+
+        let Some((window_id, pg_pane)) = self.find_pane_handle(pane_id) else {
+            return (
+                format!(r#"{{"error":"pane not found: {pane_id}"}}"#),
+                Task::none(),
+            );
+        };
+
+        let task = self.update(Message::Dashboard {
+            layout_id: None,
+            event: dashboard::Message::Pane(
+                window_id,
+                dashboard::pane::Message::SplitPane(axis, pg_pane),
+            ),
+        });
+        let ok = serde_json::json!({"ok": true, "action": "split", "pane_id": pane_id.to_string()});
+        (ok.to_string(), task)
+    }
+
+    fn pane_api_close(&mut self, pane_id: uuid::Uuid) -> (String, Task<Message>) {
+        let Some((window_id, pg_pane)) = self.find_pane_handle(pane_id) else {
+            return (
+                format!(r#"{{"error":"pane not found: {pane_id}"}}"#),
+                Task::none(),
+            );
+        };
+
+        let task = self.update(Message::Dashboard {
+            layout_id: None,
+            event: dashboard::Message::Pane(
+                window_id,
+                dashboard::pane::Message::ClosePane(pg_pane),
+            ),
+        });
+        let ok = serde_json::json!({"ok": true, "action": "close", "pane_id": pane_id.to_string()});
+        (ok.to_string(), task)
+    }
+
+    /// "BinanceLinear:BTCUSDT" を (Exchange, Ticker) にパースする。
+    fn parse_ser_ticker(s: &str) -> Result<exchange::Ticker, String> {
+        let parts: Vec<&str> = s.splitn(2, ':').collect();
+        if parts.len() != 2 {
+            return Err(format!(
+                "invalid ticker format: expected 'Exchange:Ticker', got '{s}'"
+            ));
+        }
+        let exchange_str = parts[0];
+        let normalized = ["Linear", "Inverse", "Spot"]
+            .into_iter()
+            .find_map(|suffix| {
+                exchange_str
+                    .strip_suffix(suffix)
+                    .map(|prefix| format!("{prefix} {suffix}"))
+            })
+            .unwrap_or_else(|| exchange_str.to_owned());
+        let exchange: exchange::adapter::Exchange = normalized
+            .parse()
+            .map_err(|_| format!("unknown exchange: {exchange_str}"))?;
+        let ticker = exchange::Ticker::new(parts[1], exchange);
+        Ok(ticker)
+    }
+
+    fn pane_api_set_ticker(
+        &mut self,
+        pane_id: uuid::Uuid,
+        ticker_str: &str,
+    ) -> (String, Task<Message>) {
+        let ticker = match Self::parse_ser_ticker(ticker_str) {
+            Ok(t) => t,
+            Err(err) => {
+                return (
+                    format!(r#"{{"error":"{}"}}"#, err.replace('"', "'")),
+                    Task::none(),
+                );
+            }
+        };
+
+        let ticker_info = self
+            .sidebar
+            .tickers_info()
+            .get(&ticker)
+            .and_then(|opt| *opt);
+        let Some(ticker_info) = ticker_info else {
+            return (
+                format!(
+                    r#"{{"error":"ticker info not loaded yet: {ticker_str} (wait for metadata fetch)"}}"#
+                ),
+                Task::none(),
+            );
+        };
+
+        let Some((window_id, pg_pane)) = self.find_pane_handle(pane_id) else {
+            return (
+                format!(r#"{{"error":"pane not found: {pane_id}"}}"#),
+                Task::none(),
+            );
+        };
+
+        let main_window_id = self.main_window.id;
+        let dashboard = self.active_dashboard_mut();
+
+        // 既存コンテンツの kind を保ったまま ticker を差し替える。
+        // init_focused_pane と同じ副作用を得るため、一時的に focus を対象ペインに移す。
+        let prev_focus = dashboard.focus;
+        dashboard.focus = Some((window_id, pg_pane));
+
+        // Starter pane (split 直後など) は set_content_and_streams で unreachable!() に当たるため
+        // CandlestickChart にフォールバックする（UI で ticker_table 経由で選んだ時の既定と同じ挙動）。
+        let kind = dashboard
+            .iter_all_panes(main_window_id)
+            .find(|(_, p, _)| *p == pg_pane)
+            .map(|(_, _, state)| state.content.kind())
+            .map(|k| match k {
+                data::layout::pane::ContentKind::Starter => {
+                    data::layout::pane::ContentKind::CandlestickChart
+                }
+                other => other,
+            })
+            .unwrap_or(data::layout::pane::ContentKind::CandlestickChart);
+
+        let task = dashboard
+            .init_focused_pane(main_window_id, ticker_info, kind)
+            .map(move |msg| Message::Dashboard {
+                layout_id: None,
+                event: msg,
+            })
+            .chain(Task::done(Message::Replay(
+                ReplayMessage::SyncReplayBuffers,
+            )));
+
+        // focus を元に戻す
+        let dashboard = self.active_dashboard_mut();
+        dashboard.focus = prev_focus;
+
+        let ok = serde_json::json!({
+            "ok": true,
+            "action": "set-ticker",
+            "pane_id": pane_id.to_string(),
+            "ticker": ticker_str,
+        });
+        (ok.to_string(), task)
+    }
+
+    fn parse_timeframe(s: &str) -> Option<exchange::Timeframe> {
+        match s {
+            "MS100" => Some(exchange::Timeframe::MS100),
+            "MS200" => Some(exchange::Timeframe::MS200),
+            "MS300" => Some(exchange::Timeframe::MS300),
+            "MS500" => Some(exchange::Timeframe::MS500),
+            "MS1000" | "S1" => Some(exchange::Timeframe::MS1000),
+            "M1" => Some(exchange::Timeframe::M1),
+            "M3" => Some(exchange::Timeframe::M3),
+            "M5" => Some(exchange::Timeframe::M5),
+            "M15" => Some(exchange::Timeframe::M15),
+            "M30" => Some(exchange::Timeframe::M30),
+            "H1" => Some(exchange::Timeframe::H1),
+            "H2" => Some(exchange::Timeframe::H2),
+            "H4" => Some(exchange::Timeframe::H4),
+            "H12" => Some(exchange::Timeframe::H12),
+            "D1" => Some(exchange::Timeframe::D1),
+            _ => None,
+        }
+    }
+
+    fn pane_api_set_timeframe(
+        &mut self,
+        pane_id: uuid::Uuid,
+        tf_str: &str,
+    ) -> (String, Task<Message>) {
+        let tf = match Self::parse_timeframe(tf_str) {
+            Some(tf) => tf,
+            None => {
+                return (
+                    format!(r#"{{"error":"invalid timeframe: {tf_str}"}}"#),
+                    Task::none(),
+                );
+            }
+        };
+
+        let Some((window_id, pg_pane)) = self.find_pane_handle(pane_id) else {
+            return (
+                format!(r#"{{"error":"pane not found: {pane_id}"}}"#),
+                Task::none(),
+            );
+        };
+
+        // 対象ペインの現在の ticker_info と kind を取得
+        let main_window_id = self.main_window.id;
+        let (ticker_info, kind) = {
+            let dashboard = self.active_dashboard();
+            let Some((_, _, state)) = dashboard
+                .iter_all_panes(main_window_id)
+                .find(|(_, p, _)| *p == pg_pane)
+            else {
+                return (
+                    format!(r#"{{"error":"pane not found in dashboard: {pane_id}"}}"#),
+                    Task::none(),
+                );
+            };
+            let Some(ti) = state.stream_pair() else {
+                return (
+                    format!(
+                        r#"{{"error":"pane has no active ticker to rebase timeframe: {pane_id}"}}"#
+                    ),
+                    Task::none(),
+                );
+            };
+            (ti, state.content.kind())
+        };
+
+        // settings.selected_basis を書き換えてから init_focused_pane を呼ぶ。
+        // これは BasisSelected 経路と同等の effect (stream 再構築 + refresh_streams) を得るための近道。
+        let dashboard = self.active_dashboard_mut();
+        let prev_focus = dashboard.focus;
+        dashboard.focus = Some((window_id, pg_pane));
+
+        if let Some(state) = dashboard
+            .iter_all_panes_mut(main_window_id)
+            .find(|(_, p, _)| *p == pg_pane)
+            .map(|(_, _, s)| s)
+        {
+            state.settings.selected_basis =
+                Some(data::chart::Basis::Time(tf));
+        }
+
+        let task = dashboard
+            .init_focused_pane(main_window_id, ticker_info, kind)
+            .map(move |msg| Message::Dashboard {
+                layout_id: None,
+                event: msg,
+            })
+            .chain(Task::done(Message::Replay(
+                ReplayMessage::SyncReplayBuffers,
+            )));
+
+        let dashboard = self.active_dashboard_mut();
+        dashboard.focus = prev_focus;
+
+        let ok = serde_json::json!({
+            "ok": true,
+            "action": "set-timeframe",
+            "pane_id": pane_id.to_string(),
+            "timeframe": tf_str,
+        });
+        (ok.to_string(), task)
+    }
+
+    /// "CandlestickChart" / "HeatmapChart" / "ShaderHeatmap" ... を ContentKind にパースする。
+    fn parse_content_kind(s: &str) -> Option<data::layout::pane::ContentKind> {
+        use data::layout::pane::ContentKind;
+        match s {
+            "CandlestickChart" | "Candlestick Chart" => Some(ContentKind::CandlestickChart),
+            "HeatmapChart" | "Heatmap Chart" => Some(ContentKind::HeatmapChart),
+            "ShaderHeatmap" | "Shader Heatmap" => Some(ContentKind::ShaderHeatmap),
+            "FootprintChart" | "Footprint Chart" => Some(ContentKind::FootprintChart),
+            "ComparisonChart" | "Comparison Chart" => Some(ContentKind::ComparisonChart),
+            "TimeAndSales" | "Time&Sales" => Some(ContentKind::TimeAndSales),
+            "Ladder" => Some(ContentKind::Ladder),
+            "Starter" | "Starter Pane" => Some(ContentKind::Starter),
+            _ => None,
+        }
+    }
+
+    /// Sidebar::TickerSelected 経路のハンドラ（Phase 8 Fix 4 検証用）。
+    /// `main.rs::Message::Sidebar` ハンドラと同じタスク構成を踏む:
+    /// - `kind == None` → `switch_tickers_in_group`
+    /// - `kind == Some(kind)` → `init_focused_pane`
+    /// - 最後に `SyncReplayBuffers` を chain（heatmap-only で init_focused_pane が Task::none() を
+    ///   返す経路でも sync が発火することを保証）
+    fn pane_api_sidebar_select_ticker(
+        &mut self,
+        pane_id: uuid::Uuid,
+        ticker_str: &str,
+        kind_str: Option<&str>,
+    ) -> (String, Task<Message>) {
+        let ticker = match Self::parse_ser_ticker(ticker_str) {
+            Ok(t) => t,
+            Err(err) => {
+                return (
+                    format!(r#"{{"error":"{}"}}"#, err.replace('"', "'")),
+                    Task::none(),
+                );
+            }
+        };
+
+        let ticker_info = self
+            .sidebar
+            .tickers_info()
+            .get(&ticker)
+            .and_then(|opt| *opt);
+        let Some(ticker_info) = ticker_info else {
+            return (
+                format!(
+                    r#"{{"error":"ticker info not loaded yet: {ticker_str} (wait for metadata fetch)"}}"#
+                ),
+                Task::none(),
+            );
+        };
+
+        let kind = match kind_str {
+            Some(s) => match Self::parse_content_kind(s) {
+                Some(k) => Some(k),
+                None => {
+                    return (
+                        format!(r#"{{"error":"invalid kind: {s}"}}"#),
+                        Task::none(),
+                    );
+                }
+            },
+            None => None,
+        };
+
+        let Some((window_id, pg_pane)) = self.find_pane_handle(pane_id) else {
+            return (
+                format!(r#"{{"error":"pane not found: {pane_id}"}}"#),
+                Task::none(),
+            );
+        };
+
+        let main_window_id = self.main_window.id;
+        let dashboard = self.active_dashboard_mut();
+        let prev_focus = dashboard.focus;
+        dashboard.focus = Some((window_id, pg_pane));
+
+        // main.rs::Message::Sidebar と同じ分岐
+        let task = if let Some(kind) = kind {
+            dashboard.init_focused_pane(main_window_id, ticker_info, kind)
+        } else {
+            dashboard.switch_tickers_in_group(main_window_id, ticker_info)
+        };
+
+        let task = task
+            .map(move |msg| Message::Dashboard {
+                layout_id: None,
+                event: msg,
+            })
+            .chain(Task::done(Message::Replay(
+                ReplayMessage::SyncReplayBuffers,
+            )));
+
+        let dashboard = self.active_dashboard_mut();
+        dashboard.focus = prev_focus;
+
+        let ok = serde_json::json!({
+            "ok": true,
+            "action": "sidebar-select-ticker",
+            "pane_id": pane_id.to_string(),
+            "ticker": ticker_str,
+            "kind": kind_str,
+        });
+        (ok.to_string(), task)
     }
 
     /// ログインウィンドウを閉じてメインウィンドウ（ダッシュボード）を開く。

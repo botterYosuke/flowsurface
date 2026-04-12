@@ -172,6 +172,13 @@ pub(crate) struct ReplayKlineBuffer {
 }
 
 impl ReplayKlineBuffer {
+    /// リプレイ用 buffer にデータが入っているか。
+    /// `klines` が 1 件以上あれば ready、空ならバックフィル中（または未初期化）。
+    /// ready == true はデータが存在する状態を指し、cursor が末尾に到達した終端とは独立。
+    pub(crate) fn is_ready(&self) -> bool {
+        !self.klines.is_empty()
+    }
+
     /// current_time より後の最初の kline 時刻を返す（休場日を自動スキップ）。
     pub(crate) fn next_time_after(&self, current_time: u64) -> Option<u64> {
         self.klines.iter().find(|k| k.time > current_time).map(|k| k.time)
@@ -345,6 +352,29 @@ impl KlineChart {
     /// リプレイモードを無効にする。
     pub fn disable_replay_mode(&mut self) {
         self.replay_kline_buffer = None;
+    }
+
+    /// リプレイ buffer が存在し、かつ klines が 1 件以上あるか。
+    /// `false` の場合は以下のいずれか:
+    /// - リプレイモードではない (`replay_kline_buffer == None`)
+    /// - バックフィル中 (`Some(buf)` だが `buf.klines.is_empty()`)
+    ///
+    /// 統一 Tick (§2.1 `fire_status`) は `false` の chart を `next_time_after` の
+    /// min 計算から除外することで、バックフィル待ちと終端を区別する。
+    pub fn replay_buffer_ready(&self) -> bool {
+        self.replay_kline_buffer
+            .as_ref()
+            .is_some_and(|b| b.is_ready())
+    }
+
+    /// リプレイバッファ内の現在のカーソル位置（挿入済み件数）。
+    pub fn replay_buffer_cursor(&self) -> Option<usize> {
+        self.replay_kline_buffer.as_ref().map(|b| b.cursor)
+    }
+
+    /// リプレイバッファ内の kline 総数。
+    pub fn replay_buffer_len(&self) -> Option<usize> {
+        self.replay_kline_buffer.as_ref().map(|b| b.klines.len())
     }
 
     /// リプレイバッファから current_time より後の最初の kline 時刻を返す。
@@ -647,6 +677,14 @@ impl KlineChart {
                 let tick_aggr = TickAggr::new(tick_count, step, &self.raw_trades);
                 self.data_source = PlotData::TickBased(tick_aggr);
             }
+        }
+
+        // リプレイ中の timeframe 変更: 旧 timeframe のバッファは新 timeseries に
+        // 注入できないため空に再初期化する。以降は SyncReplayBuffers が発火して
+        // 新 timeframe のフェッチが走り、完了後に ready=true に戻る。
+        if let Some(buf) = &mut self.replay_kline_buffer {
+            buf.klines.clear();
+            buf.cursor = 0;
         }
 
         self.indicators
@@ -2132,5 +2170,119 @@ mod tests {
         let buf = make_buffer(klines, 3); // cursor 末尾
         assert_eq!(buf.next_time_after(150), Some(200));
         assert_eq!(buf.prev_time_before(250), Some(200));
+    }
+
+    // ── replay_buffer_ready: backfill pending vs. terminal 区別のための述語 ──
+
+    #[test]
+    fn replay_buffer_is_ready_false_when_klines_empty() {
+        // klines が空 = バックフィル中 or 未初期化 → not ready
+        let buf = ReplayKlineBuffer { klines: Vec::new(), cursor: 0 };
+        assert!(!buf.is_ready());
+    }
+
+    #[test]
+    fn replay_buffer_is_ready_true_after_insert() {
+        // 1 本でも入っていれば ready（cursor 位置に依らず）
+        let buf = ReplayKlineBuffer {
+            klines: vec![make_kline(100)],
+            cursor: 0,
+        };
+        assert!(buf.is_ready());
+    }
+
+    #[test]
+    fn replay_buffer_is_ready_true_even_when_cursor_at_end() {
+        // 終端に到達した buffer も「ready（=データはある）」と扱う。
+        // Pending は「klines が空」だけを指す。
+        let buf = ReplayKlineBuffer {
+            klines: vec![make_kline(100), make_kline(200)],
+            cursor: 2,
+        };
+        assert!(buf.is_ready());
+    }
+
+    // ── set_basis: リプレイ中 timeframe 変更で buffer を再初期化する（review 🔴 #1） ──
+
+    fn build_test_kline_chart(basis: Basis) -> KlineChart {
+        use data::chart::{Autoscale, KlineChartKind, ViewConfig};
+        use exchange::{Ticker, adapter::Exchange};
+
+        let ticker_info = TickerInfo::new(
+            Ticker::new("BTCUSDT", Exchange::BinanceSpot),
+            1.0,
+            1.0,
+            None,
+        );
+        let layout = ViewConfig {
+            splits: Vec::new(),
+            autoscale: Some(Autoscale::FitToVisible),
+        };
+        let step = PriceStep { units: 1 };
+        KlineChart::new(
+            layout,
+            basis,
+            step,
+            &[],
+            Vec::new(),
+            &[],
+            ticker_info,
+            &KlineChartKind::Candles,
+        )
+    }
+
+    #[test]
+    fn set_basis_resets_replay_kline_buffer_when_in_replay_mode() {
+        use exchange::Timeframe;
+
+        let mut chart = build_test_kline_chart(Basis::Time(Timeframe::M1));
+        chart.enable_replay_mode();
+
+        // バックフィル経由でバッファへ投入された状態を模擬する
+        {
+            let buf = chart.replay_kline_buffer.as_mut().expect("replay mode enabled");
+            buf.klines.push(make_kline(60_000));
+            buf.klines.push(make_kline(120_000));
+            buf.cursor = 1;
+        }
+        assert!(
+            chart.replay_buffer_ready(),
+            "precondition: buffer populated"
+        );
+
+        // timeframe 変更 (M1 → M5)
+        let _ = chart.set_basis(Basis::Time(Timeframe::M5));
+
+        // リプレイモードは維持されたまま、buffer だけが空に再初期化される
+        let buf = chart
+            .replay_kline_buffer
+            .as_ref()
+            .expect("replay mode should be preserved across set_basis");
+        assert!(
+            buf.klines.is_empty(),
+            "set_basis should clear stale klines from old timeframe"
+        );
+        assert_eq!(buf.cursor, 0, "cursor should be reset to 0");
+        assert!(
+            !chart.replay_buffer_ready(),
+            "after reset, ready==false so fire_status treats it as Pending"
+        );
+    }
+
+    #[test]
+    fn set_basis_does_not_enable_replay_mode_when_disabled() {
+        use exchange::Timeframe;
+
+        let mut chart = build_test_kline_chart(Basis::Time(Timeframe::M1));
+        // リプレイモード無効のまま（replay_kline_buffer == None）
+        assert!(chart.replay_kline_buffer.is_none());
+
+        let _ = chart.set_basis(Basis::Time(Timeframe::M5));
+
+        // 非リプレイ chart に副作用を出してはならない
+        assert!(
+            chart.replay_kline_buffer.is_none(),
+            "set_basis must not activate replay mode on a live chart"
+        );
     }
 }

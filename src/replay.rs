@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use exchange::Trade;
 use exchange::adapter::StreamKind;
@@ -47,9 +47,10 @@ pub struct ReplayState {
     pub playback: Option<PlaybackState>,
     /// 前回の Tick 時刻（フレーム間経過時間を計算するため）
     pub last_tick: Option<std::time::Instant>,
-    /// D1 リプレイ自動再生の仮想時間累積カウンタ（ms）。
-    /// `advance_d1` が 1000ms 到達時にリセットして次の kline へジャンプする。
-    pub d1_virtual_elapsed_ms: f64,
+    /// 次バー発火までの仮想時間累積（ms）。
+    /// `process_tick` が毎 Tick `elapsed_ms * pb.speed` を加算し、`comparison_threshold`
+    /// に到達したら `pb.current_time` を進めて、しきい値ぶん減算する（§2.1.1 案 C）。
+    pub virtual_elapsed_ms: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,6 +79,10 @@ pub struct PlaybackState {
     pub trade_buffers: HashMap<StreamKind, TradeBuffer>,
     /// DataLoaded 後に復帰するステータス（StepBackward 時は Paused にする）
     pub resume_status: PlaybackStatus,
+    /// バックフィル中の trade stream 集合（§2.3.1.1 穴 B）。
+    /// 毎 Tick の `drain_until` 対象から除外され、`TradesFetchCompleted` 受信時に
+    /// `advance_cursor_to(current_time)` の直後に削除される。
+    pub pending_trade_streams: HashSet<StreamKind>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,6 +126,10 @@ pub enum ReplayMessage {
     DataLoaded,
     /// データプリフェッチ失敗
     DataLoadFailed(String),
+    /// mid-replay で stream 構成が変わった際に発火（§2.6.5）。
+    /// `pending_trade_streams` + `replay_kline_buffer` の差分を計算し、不足 stream に対して
+    /// バックフィルを発火する。`refresh_streams()` / `Effect::RequestFetch` 末尾で chain される。
+    SyncReplayBuffers,
 }
 
 impl Default for ReplayState {
@@ -130,7 +139,7 @@ impl Default for ReplayState {
             range_input: ReplayRangeInput::default(),
             playback: None,
             last_tick: None,
-            d1_virtual_elapsed_ms: 0.0,
+            virtual_elapsed_ms: 0.0,
         }
     }
 }
@@ -245,6 +254,27 @@ impl TradeBuffer {
     pub fn is_exhausted(&self) -> bool {
         self.cursor >= self.trades.len()
     }
+
+    /// cursor を `target_time` 以前の位置まで早送りする。
+    /// 既に cursor が先にあれば no-op（単調増加を保証）。
+    ///
+    /// 戻り値: 早送りによってスキップした trades 件数（捨てて良い数）。
+    ///
+    /// 用途（§2.3.1 mid-replay バックフィル）:
+    /// - 新規ペインに対して `fetch_trades_batched()` を発火し `start → end` 全量の trades が
+    ///   届いた後、`TradesFetchCompleted` を受けて `advance_cursor_to(pb.current_time)` を呼ぶ
+    /// - これにより過去分の trades を UI に流さず、以降は通常の `drain_until` 経路に合流する
+    pub fn advance_cursor_to(&mut self, target_time: u64) -> usize {
+        let found = self
+            .trades
+            .iter()
+            .position(|t| t.time > target_time)
+            .unwrap_or(self.trades.len());
+        let new_cursor = found.max(self.cursor);
+        let skipped = new_cursor - self.cursor;
+        self.cursor = new_cursor;
+        skipped
+    }
 }
 
 /// 利用可能な再生速度
@@ -276,87 +306,186 @@ impl PlaybackState {
         self.current_time = (self.current_time + delta).min(self.end_time);
         self.current_time
     }
-}
 
-/// D1 リプレイ自動再生のスロットリング（Phase 3）。
-///
-/// `speed` を「bars/sec」として再解釈し、仮想時間カウンタが 1000ms に達したら
-/// `current_time` を次の kline timestamp にジャンプさせる。
-///
-/// # 戻り値
-/// `(jumped, reached_end)`:
-/// - `jumped == true`: ジャンプが発生した。`current_time` は更新済み
-/// - `reached_end == true`: 閾値に達したが次の kline が存在しない（再生終端）
-pub fn advance_d1(
-    virtual_elapsed_ms: &mut f64,
-    speed: f64,
-    current_time: &mut u64,
-    elapsed_ms: f64,
-    next_kline_time: Option<u64>,
-) -> (bool, bool) {
-    *virtual_elapsed_ms += elapsed_ms * speed;
-    if *virtual_elapsed_ms + 1e-6 < 1000.0 {
-        return (false, false);
-    }
-    *virtual_elapsed_ms = 0.0;
-    match next_kline_time {
-        Some(t) => {
-            *current_time = t;
-            (true, false)
+    /// `TradesBatchReceived` ハンドラ用の受け入れ判定付き追記（review 🔴 #2）。
+    ///
+    /// 登録済み stream のみバッチを受け入れる。**未登録 stream は黙って捨てる**（`or_insert_with`
+    /// で復活させない）。これにより mid-replay でペインを削除した直後に到着する残存 fetch タスクの
+    /// バッチが orphan buffer を自己復活させるループを防ぐ。
+    ///
+    /// 戻り値: 受け入れた場合 `true`、orphan として捨てた場合 `false`。
+    pub fn ingest_trades_batch(&mut self, stream: StreamKind, batch: Vec<Trade>) -> bool {
+        match self.trade_buffers.get_mut(&stream) {
+            Some(buffer) => {
+                buffer.trades.extend(batch);
+                true
+            }
+            None => false,
         }
-        None => (false, true),
+    }
+
+    /// 現在の dashboard の trade stream 集合と `trade_buffers` を突き合わせ、
+    /// 追加すべき stream と削除すべき stream を計算する（review 🟡 #4）。
+    ///
+    /// 呼び出し側（`SyncReplayBuffers` ハンドラ）はこの結果を使って `trade_buffers` /
+    /// `pending_trade_streams` の更新とバックフィルタスク発火を行う。順序保持のため `Vec`。
+    pub fn diff_trade_streams(&self, current: &[StreamKind]) -> TradeStreamDiff {
+        let mut new_streams = Vec::new();
+        for stream in current {
+            if !self.trade_buffers.contains_key(stream) && !new_streams.contains(stream) {
+                new_streams.push(*stream);
+            }
+        }
+        let mut orphan_streams = Vec::new();
+        for stream in self.trade_buffers.keys() {
+            if !current.contains(stream) {
+                orphan_streams.push(*stream);
+            }
+        }
+        TradeStreamDiff {
+            new_streams,
+            orphan_streams,
+        }
     }
 }
 
-/// `process_d1_tick` の戻り値。
-pub struct D1TickResult {
+/// `PlaybackState::diff_trade_streams` の戻り値。
+#[derive(Debug, Clone, Default)]
+pub struct TradeStreamDiff {
+    /// `trade_buffers` に存在しないが `current` に含まれる stream（バックフィル対象）
+    pub new_streams: Vec<StreamKind>,
+    /// `trade_buffers` に存在するが `current` に含まれない stream（削除対象）
+    pub orphan_streams: Vec<StreamKind>,
+}
+
+/// 統一 Tick ハンドラで使う「粗 timeframe」判定の境界（§2.1.1 案 C）。
+/// `delta_to_next >= COARSE_CUTOFF_MS` の場合は粗補正モード（= 1 バー/sec × speed）。
+pub const COARSE_CUTOFF_MS: u64 = 3_600_000;
+
+/// 粗補正モードでの比較しきい値（1 バー = 1 秒 × speed）。
+pub const COARSE_BAR_MS: u64 = 1_000;
+
+/// 次バー発火の状態（§2.1 / §2.2）。
+///
+/// - `Ready(t)`: ready chart の `next_time_after` の min が確定している。通常再生。
+/// - `Pending`: ready chart が存在しないが、バックフィル中 chart が 1 つ以上ある。待機。
+/// - `Terminal`: ready chart が全て終端、かつバックフィル中 chart も無い。Paused へ遷移。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FireStatus {
+    Ready(u64),
+    Pending,
+    Terminal,
+}
+
+/// `process_tick` の戻り値。
+pub struct TickResult {
     /// ジャンプ発火時の current_time（None ならチャート更新不要）
     pub current_time: Option<u64>,
     /// drain した trades（None なら trade_buffers が空でドレイン不要）
     pub trades_collected: Option<Vec<(StreamKind, Vec<Trade>, u64)>>,
 }
 
-/// D1 リプレイ自動再生 1 Tick 分の処理（Phase 3）。
+/// `pb.trade_buffers` の全 stream を `drain_until(pb.current_time)` する。
+/// `pending_trade_streams` に含まれる stream はバックフィル中のためスキップする（§2.3.1.1 穴 B）。
 ///
-/// `advance_d1` を呼び、ジャンプ発生時に trade_buffers が非空なら `drain_until` も実行する。
-/// `is_all_d1_klines()` は取引所非依存のため、Binance D1 + heatmap 等で trades が存在する
-/// ケースでは drain を実行する必要がある。
-pub fn process_d1_tick(
+/// 戻り値:
+/// - `None`: drain 対象 stream の全 buffer が空（Tachibana ケース）で drain する必要が無い
+/// - `Some(collected)`: `(stream, trades, update_t)` のリスト
+fn drain_all_trade_buffers(
+    pb: &mut PlaybackState,
+) -> Option<Vec<(StreamKind, Vec<Trade>, u64)>> {
+    let all_empty = pb
+        .trade_buffers
+        .iter()
+        .filter(|(stream, _)| !pb.pending_trade_streams.contains(stream))
+        .all(|(_, b)| b.trades.is_empty());
+    if all_empty {
+        return None;
+    }
+    let streams: Vec<_> = pb
+        .trade_buffers
+        .keys()
+        .copied()
+        .filter(|s| !pb.pending_trade_streams.contains(s))
+        .collect();
+    let mut collected = Vec::new();
+    for stream in streams {
+        if let Some(buffer) = pb.trade_buffers.get_mut(&stream) {
+            let drained = buffer.drain_until(pb.current_time);
+            if !drained.is_empty() {
+                let update_t = drained.last().map_or(pb.current_time, |t| t.time);
+                collected.push((stream, drained.to_vec(), update_t));
+            }
+        }
+    }
+    Some(collected)
+}
+
+/// 統一 Tick ハンドラ（§2.1 案 C）。
+///
+/// D1 / 非 D1 を問わず、`fire_status` をもとに 1 経路で再生を進める。
+/// - `Terminal` → `pb.status = Paused`、`virtual_elapsed_ms` をクリア
+/// - `Pending`  → 何もしない（`virtual_elapsed_ms` 据え置き、drain も行わない）
+/// - `Ready(t)` → `delta = t - current_time` に応じて threshold を切り替え、
+///   `virtual_elapsed_ms * speed` が threshold に達したら `current_time = t` にジャンプ
+///
+/// Trade drain は「`Ready` 経路で常に毎 Tick」実行する。ジャンプ発生時は
+/// 「drain → advance → drain」の 2 段階（drain_until は cursor ベースで冪等）。
+pub fn process_tick(
     pb: &mut PlaybackState,
     virtual_elapsed_ms: &mut f64,
     elapsed_ms: f64,
-    next_kline_time: Option<u64>,
-) -> D1TickResult {
-    let (jumped, reached_end) = advance_d1(
-        virtual_elapsed_ms,
-        pb.speed,
-        &mut pb.current_time,
-        elapsed_ms,
-        next_kline_time,
-    );
-    if reached_end {
-        pb.status = PlaybackStatus::Paused;
-    }
-    let trades_all_empty = pb.trade_buffers.values().all(|b| b.trades.is_empty());
-    let trades_collected = if jumped && !trades_all_empty {
-        let streams: Vec<_> = pb.trade_buffers.keys().copied().collect();
-        let mut collected = Vec::new();
-        for stream in streams {
-            if let Some(buffer) = pb.trade_buffers.get_mut(&stream) {
-                let drained = buffer.drain_until(pb.current_time);
-                if !drained.is_empty() {
-                    let update_t = drained.last().map_or(pb.current_time, |t| t.time);
-                    collected.push((stream, drained.to_vec(), update_t));
-                }
+    fire_status: FireStatus,
+) -> TickResult {
+    match fire_status {
+        FireStatus::Terminal => {
+            pb.status = PlaybackStatus::Paused;
+            *virtual_elapsed_ms = 0.0;
+            TickResult {
+                current_time: None,
+                trades_collected: None,
             }
         }
-        Some(collected)
-    } else {
-        None
-    };
-    D1TickResult {
-        current_time: jumped.then_some(pb.current_time),
-        trades_collected,
+        FireStatus::Pending => TickResult {
+            current_time: None,
+            trades_collected: None,
+        },
+        FireStatus::Ready(next_fire) => {
+            // 1. まず現在の current_time 時点で drain（穴 A: 未達 Tick でも流す）
+            let mut collected = drain_all_trade_buffers(pb).unwrap_or_default();
+
+            let delta_to_next = next_fire.saturating_sub(pb.current_time);
+            let threshold_ms = if delta_to_next >= COARSE_CUTOFF_MS {
+                COARSE_BAR_MS
+            } else {
+                delta_to_next
+            };
+
+            *virtual_elapsed_ms += elapsed_ms * pb.speed;
+
+            let threshold_f = threshold_ms as f64;
+            if *virtual_elapsed_ms + 1e-6 < threshold_f {
+                let trades_collected = if collected.is_empty() { None } else { Some(collected) };
+                return TickResult {
+                    current_time: None,
+                    trades_collected,
+                };
+            }
+
+            // 2. ジャンプ: current_time を進めて、新しい時刻で再度 drain
+            *virtual_elapsed_ms -= threshold_f;
+            pb.current_time = next_fire;
+
+            if let Some(after_jump) = drain_all_trade_buffers(pb) {
+                collected.extend(after_jump);
+            }
+
+            let trades_collected = if collected.is_empty() { None } else { Some(collected) };
+            TickResult {
+                current_time: Some(next_fire),
+                trades_collected,
+            }
+        }
     }
 }
 
@@ -436,9 +565,10 @@ mod tests {
                 speed: 1.0,
                 trade_buffers: HashMap::new(),
                 resume_status: PlaybackStatus::Playing,
+                pending_trade_streams: HashSet::new(),
             }),
             last_tick: None,
-            d1_virtual_elapsed_ms: 0.0,
+            virtual_elapsed_ms: 0.0,
         };
 
         let result = format_current_time(&state, data::UserTimezone::Utc);
@@ -544,6 +674,7 @@ mod tests {
             speed: 2.0,
             trade_buffers: HashMap::new(),
             resume_status: PlaybackStatus::Playing,
+            pending_trade_streams: HashSet::new(),
         };
 
         // 16ms elapsed at 2x speed = 32ms advance
@@ -567,6 +698,7 @@ mod tests {
             speed: 1.0,
             trade_buffers: HashMap::new(),
             resume_status: PlaybackStatus::Playing,
+            pending_trade_streams: HashSet::new(),
         };
 
         pb.cycle_speed();
@@ -618,9 +750,10 @@ mod tests {
                 speed: 2.0,
                 trade_buffers: HashMap::new(),
                 resume_status: PlaybackStatus::Playing,
+                pending_trade_streams: HashSet::new(),
             }),
             last_tick: None,
-            d1_virtual_elapsed_ms: 0.0,
+            virtual_elapsed_ms: 0.0,
         };
         let status = state.to_status();
         assert_eq!(status.mode, "Replay");
@@ -644,9 +777,10 @@ mod tests {
                 speed: 1.0,
                 trade_buffers: HashMap::new(),
                 resume_status: PlaybackStatus::Playing,
+                pending_trade_streams: HashSet::new(),
             }),
             last_tick: None,
-            d1_virtual_elapsed_ms: 0.0,
+            virtual_elapsed_ms: 0.0,
         };
         let status = state.to_status();
         assert_eq!(status.status.as_deref(), Some("Loading"));
@@ -665,9 +799,10 @@ mod tests {
                 speed: 5.0,
                 trade_buffers: HashMap::new(),
                 resume_status: PlaybackStatus::Playing,
+                pending_trade_streams: HashSet::new(),
             }),
             last_tick: None,
-            d1_virtual_elapsed_ms: 0.0,
+            virtual_elapsed_ms: 0.0,
         };
         let status = state.to_status();
         assert_eq!(status.status.as_deref(), Some("Paused"));
@@ -684,7 +819,7 @@ mod tests {
             },
             playback: None,
             last_tick: None,
-            d1_virtual_elapsed_ms: 0.0,
+            virtual_elapsed_ms: 0.0,
         };
         let status = state.to_status();
         assert_eq!(status.mode, "Replay");
@@ -720,9 +855,10 @@ mod tests {
                 speed: 1.0,
                 trade_buffers: HashMap::new(),
                 resume_status: PlaybackStatus::Playing,
+                pending_trade_streams: HashSet::new(),
             }),
             last_tick: None,
-            d1_virtual_elapsed_ms: 0.0,
+            virtual_elapsed_ms: 0.0,
         };
         let json = serde_json::to_string(&state.to_status()).unwrap();
         assert!(json.contains(r#""mode":"Replay""#));
@@ -800,6 +936,7 @@ mod tests {
             speed: 1.0,
             trade_buffers: HashMap::new(),
             resume_status: PlaybackStatus::Playing,
+            pending_trade_streams: HashSet::new(),
         };
         let t = pb.advance_time(0.0);
         assert_eq!(t, 1500);
@@ -815,6 +952,7 @@ mod tests {
             speed: 10.0,
             trade_buffers: HashMap::new(),
             resume_status: PlaybackStatus::Playing,
+            pending_trade_streams: HashSet::new(),
         };
         let t = pb.advance_time(1000.0);
         assert_eq!(t, 2000); // stays at end_time
@@ -830,6 +968,7 @@ mod tests {
             speed: 1.0,
             trade_buffers: HashMap::new(),
             resume_status: PlaybackStatus::Playing,
+            pending_trade_streams: HashSet::new(),
         };
         let t = pb.advance_time(999999.0);
         assert_eq!(t, 100); // clamped to end_time
@@ -847,6 +986,7 @@ mod tests {
             speed: 1.0,
             trade_buffers: HashMap::new(),
             resume_status: PlaybackStatus::Playing,
+            pending_trade_streams: HashSet::new(),
         };
         assert_eq!(pb.speed_label(), "1x");
         pb.speed = 2.0;
@@ -867,6 +1007,7 @@ mod tests {
             speed: 1.5,
             trade_buffers: HashMap::new(),
             resume_status: PlaybackStatus::Playing,
+            pending_trade_streams: HashSet::new(),
         };
         assert_eq!(pb.speed_label(), "1.5x");
     }
@@ -918,9 +1059,10 @@ mod tests {
                 speed: 5.0,
                 trade_buffers: HashMap::new(),
                 resume_status: PlaybackStatus::Playing,
+                pending_trade_streams: HashSet::new(),
             }),
             last_tick: None,
-            d1_virtual_elapsed_ms: 0.0,
+            virtual_elapsed_ms: 0.0,
         };
 
         state.toggle_mode(); // Replay → Live
@@ -954,6 +1096,7 @@ mod tests {
             speed: 99.0, // not in SPEEDS
             trade_buffers: HashMap::new(),
             resume_status: PlaybackStatus::Playing,
+            pending_trade_streams: HashSet::new(),
         };
         pb.cycle_speed();
         // unwrap_or(0) → (0+1) % 4 = 1 → 2.0
@@ -970,7 +1113,7 @@ mod tests {
             range_input: ReplayRangeInput::default(),
             playback: None,
             last_tick: None,
-            d1_virtual_elapsed_ms: 0.0,
+            virtual_elapsed_ms: 0.0,
         };
         let result = format_current_time(&state, data::UserTimezone::Utc);
         // Should fall through to realtime (the _ arm)
@@ -1008,7 +1151,7 @@ mod tests {
             },
             playback: None,
             last_tick: None,
-            d1_virtual_elapsed_ms: 0.0,
+            virtual_elapsed_ms: 0.0,
         }
     }
 
@@ -1033,7 +1176,7 @@ mod tests {
             },
             playback: None,
             last_tick: None,
-            d1_virtual_elapsed_ms: 0.0,
+            virtual_elapsed_ms: 0.0,
         };
         let cfg = to_replay_config(&state);
         assert_eq!(cfg.mode, "replay");
@@ -1058,9 +1201,10 @@ mod tests {
                 speed: 5.0,
                 trade_buffers: HashMap::new(),
                 resume_status: PlaybackStatus::Playing,
+                pending_trade_streams: HashSet::new(),
             }),
             last_tick: None,
-            d1_virtual_elapsed_ms: 0.0,
+            virtual_elapsed_ms: 0.0,
         };
         let cfg = to_replay_config(&state);
         // mode と range だけが保存される
@@ -1148,7 +1292,7 @@ mod tests {
             },
             playback: None,
             last_tick: None,
-            d1_virtual_elapsed_ms: 0.0,
+            virtual_elapsed_ms: 0.0,
         };
         let cfg = to_replay_config(&original);
         let json = serde_json::to_string(&cfg).unwrap();
@@ -1223,7 +1367,7 @@ mod tests {
         assert!(status.status.is_none());
     }
 
-    // ── advance_d1: D1 リプレイ自動再生のスロットリング (Phase 3) ──
+    // ── process_tick: 統一 Tick ハンドラ（§2.1 案 C） ──
 
     fn mock_trade_stream() -> StreamKind {
         use exchange::adapter::Exchange;
@@ -1237,174 +1381,617 @@ mod tests {
     }
 
     #[test]
-    fn process_d1_tick_drains_when_buffers_have_trades() {
-        // Binance D1 + heatmap ケース: trade_buffers に trades がある場合は drain される
+    fn replay_state_default_virtual_elapsed_is_zero() {
+        let state = ReplayState::default();
+        assert_eq!(state.virtual_elapsed_ms, 0.0);
+    }
+
+    // ── TradeBuffer::advance_cursor_to（§2.3.1 mid-replay バックフィル対応） ──
+
+    #[test]
+    fn advance_cursor_to_forwards_past_trades_and_returns_skipped_count() {
+        let mut buf = TradeBuffer {
+            trades: vec![test_trade(10), test_trade(20), test_trade(30), test_trade(40)],
+            cursor: 0,
+        };
+        let skipped = buf.advance_cursor_to(25);
+        assert_eq!(buf.cursor, 2, "cursor が time>25 の最初の index に進む");
+        assert_eq!(skipped, 2);
+    }
+
+    #[test]
+    fn advance_cursor_to_is_monotonic_does_not_rewind() {
+        // cursor が既に target_time を越えていれば no-op（単調増加ガード）
+        let mut buf = TradeBuffer {
+            trades: vec![test_trade(10), test_trade(20), test_trade(30)],
+            cursor: 3,
+        };
+        let skipped = buf.advance_cursor_to(15);
+        assert_eq!(buf.cursor, 3, "既に先にいるので巻き戻さない");
+        assert_eq!(skipped, 0);
+    }
+
+    #[test]
+    fn advance_cursor_to_target_after_all_trades_goes_to_end() {
+        let mut buf = TradeBuffer {
+            trades: vec![test_trade(10), test_trade(20)],
+            cursor: 0,
+        };
+        let skipped = buf.advance_cursor_to(100);
+        assert_eq!(buf.cursor, 2);
+        assert_eq!(skipped, 2);
+    }
+
+    #[test]
+    fn advance_cursor_to_from_partial_cursor_advances_delta() {
+        let mut buf = TradeBuffer {
+            trades: vec![test_trade(10), test_trade(20), test_trade(30), test_trade(40)],
+            cursor: 1,
+        };
+        let skipped = buf.advance_cursor_to(35);
+        assert_eq!(buf.cursor, 3);
+        assert_eq!(skipped, 2, "cursor=1 から cursor=3 まで 2 件スキップ");
+    }
+
+    #[test]
+    fn advance_cursor_to_empty_buffer_is_noop() {
+        let mut buf = TradeBuffer {
+            trades: Vec::new(),
+            cursor: 0,
+        };
+        let skipped = buf.advance_cursor_to(100);
+        assert_eq!(buf.cursor, 0);
+        assert_eq!(skipped, 0);
+    }
+
+    // ── pending_trade_streams（§2.3.1.1 穴 B）: バックフィル中 stream の drain 除外 ──
+
+    #[test]
+    fn process_tick_skips_drain_for_pending_trade_streams() {
+        // pending_trade_streams に含まれる stream は drain されない（過去 trades が既存 pane に流入しない）
+        // 含まれない stream は通常通り drain される
+        let pending_stream = mock_trade_stream();
+
+        // 2 つ目の stream（別 ticker）を用意
+        use exchange::adapter::Exchange;
+        let normal_ticker = exchange::TickerInfo::new(
+            exchange::Ticker::new("ETHUSDT", Exchange::BinanceSpot),
+            1.0,
+            1.0,
+            None,
+        );
+        let normal_stream = StreamKind::Trades {
+            ticker_info: normal_ticker,
+        };
+
+        let mut buffers = HashMap::new();
+        buffers.insert(
+            pending_stream,
+            TradeBuffer {
+                trades: vec![test_trade(10), test_trade(50)],
+                cursor: 0,
+            },
+        );
+        buffers.insert(
+            normal_stream,
+            TradeBuffer {
+                trades: vec![test_trade(10), test_trade(50)],
+                cursor: 0,
+            },
+        );
+
+        let mut pending = std::collections::HashSet::new();
+        pending.insert(pending_stream);
+
+        let mut pb = PlaybackState {
+            start_time: 0,
+            end_time: 1_000_000,
+            current_time: 100,
+            status: PlaybackStatus::Playing,
+            speed: 1.0,
+            trade_buffers: buffers,
+            resume_status: PlaybackStatus::Playing,
+            pending_trade_streams: pending,
+        };
+        let mut virtual_elapsed = 0.0_f64;
+
+        // Ready 経路で未達 Tick（drain のみ、ジャンプ無し）
+        let result = process_tick(
+            &mut pb,
+            &mut virtual_elapsed,
+            1000.0,
+            FireStatus::Ready(60_100),
+        );
+
+        assert!(result.current_time.is_none());
+        let collected = result.trades_collected.expect("normal stream の drain は実行される");
+        assert_eq!(collected.len(), 1, "pending 除外され、normal 1 件のみ");
+        let (stream, _, _) = &collected[0];
+        assert_eq!(
+            *stream, normal_stream,
+            "pending ではない normal_stream の drain のみ"
+        );
+
+        // pending_stream の cursor は動いていない
+        assert_eq!(
+            pb.trade_buffers[&pending_stream].cursor, 0,
+            "pending stream の cursor は触られない"
+        );
+    }
+
+    #[test]
+    fn pending_trade_stream_cleared_on_advance_cursor_to_simulation() {
+        // §2.3.1.1: TradesFetchCompleted 受信時の挙動を模擬する：
+        // 1. pending_trade_streams に stream が登録されている
+        // 2. バッファに過去 trades が流入（TradesBatchReceived 相当）
+        // 3. advance_cursor_to(pb.current_time) を呼ぶ
+        // 4. pending_trade_streams から削除 → 次 Tick から drain 対象に復帰
         let stream = mock_trade_stream();
         let mut buffers = HashMap::new();
         buffers.insert(
             stream,
             TradeBuffer {
-                trades: vec![test_trade(50_000_000), test_trade(80_000_000), test_trade(85_000_000)],
+                trades: vec![test_trade(10), test_trade(50), test_trade(90), test_trade(150)],
+                cursor: 0,
+            },
+        );
+        let mut pending = std::collections::HashSet::new();
+        pending.insert(stream);
+
+        let mut pb = PlaybackState {
+            start_time: 0,
+            end_time: 1_000_000,
+            current_time: 100,
+            status: PlaybackStatus::Playing,
+            speed: 1.0,
+            trade_buffers: buffers,
+            resume_status: PlaybackStatus::Playing,
+            pending_trade_streams: pending,
+        };
+
+        // バックフィル中なので drain されない
+        assert!(pb.pending_trade_streams.contains(&stream));
+
+        // TradesFetchCompleted ハンドラの挙動を模擬:
+        let buffer = pb.trade_buffers.get_mut(&stream).unwrap();
+        let skipped = buffer.advance_cursor_to(pb.current_time);
+        pb.pending_trade_streams.remove(&stream);
+
+        assert_eq!(skipped, 3, "time <= 100 の 3 件が skip される");
+        assert_eq!(pb.trade_buffers[&stream].cursor, 3);
+        assert!(!pb.pending_trade_streams.contains(&stream));
+
+        // 以降の Tick では drain 対象に復帰し、残りの 1 件（time=150）は
+        // current_time=150 になるまで流れない（通常の drain_until 経路）
+        let buffer = pb.trade_buffers.get_mut(&stream).unwrap();
+        let rem = buffer.drain_until(100);
+        assert!(rem.is_empty(), "100 以前はもう drain しない（既に skip 済み）");
+        let rem = buffer.drain_until(200);
+        assert_eq!(rem.len(), 1, "time=150 の 1 件が drain される");
+    }
+
+
+    fn empty_pb(current: u64) -> PlaybackState {
+        PlaybackState {
+            start_time: 0,
+            end_time: 1_000_000_000_000,
+            current_time: current,
+            status: PlaybackStatus::Playing,
+            speed: 1.0,
+            trade_buffers: HashMap::new(),
+            resume_status: PlaybackStatus::Playing,
+            pending_trade_streams: HashSet::new(),
+        }
+    }
+
+    #[test]
+    fn process_tick_m1_jumps_after_60s_virtual_elapsed() {
+        // delta_to_next = 60_000 (= 1 分) なので COARSE_CUTOFF_MS 未満 → threshold=delta
+        // speed=1.0 で elapsed 60_000ms 一発で閾値到達 → ジャンプ
+        let mut pb = empty_pb(1_000_000);
+        let mut virtual_elapsed = 0.0_f64;
+        let next_t = 1_000_000 + 60_000;
+
+        let result = process_tick(
+            &mut pb,
+            &mut virtual_elapsed,
+            60_000.0,
+            FireStatus::Ready(next_t),
+        );
+
+        assert_eq!(result.current_time, Some(next_t), "jump to next bar");
+        assert_eq!(pb.current_time, next_t);
+        assert!(virtual_elapsed.abs() < 1.0, "余剰 virtual_elapsed は 0 付近");
+    }
+
+    #[test]
+    fn process_tick_m1_throttles_until_accumulated_threshold() {
+        // speed=1.0, elapsed=10_000ms を 5 回: 累積 50_000 < 60_000 なのでジャンプ無し
+        // 6 回目で 60_000 到達 → ジャンプ
+        let mut pb = empty_pb(1_000_000);
+        let mut virtual_elapsed = 0.0_f64;
+        let next_t = 1_000_000 + 60_000;
+
+        for _ in 0..5 {
+            let result = process_tick(
+                &mut pb,
+                &mut virtual_elapsed,
+                10_000.0,
+                FireStatus::Ready(next_t),
+            );
+            assert!(result.current_time.is_none());
+            assert_eq!(pb.current_time, 1_000_000);
+        }
+
+        let result = process_tick(
+            &mut pb,
+            &mut virtual_elapsed,
+            10_000.0,
+            FireStatus::Ready(next_t),
+        );
+        assert_eq!(result.current_time, Some(next_t));
+        assert_eq!(pb.current_time, next_t);
+    }
+
+    #[test]
+    fn process_tick_d1_jumps_after_1s_virtual_elapsed() {
+        // delta_to_next = 86_400_000 (= 1 日) なので COARSE_CUTOFF_MS 以上 → threshold=COARSE_BAR_MS
+        // speed=1.0 で elapsed 1000ms 一発で 1000ms 到達 → ジャンプ
+        let mut pb = empty_pb(1_000_000);
+        let mut virtual_elapsed = 0.0_f64;
+        let next_t = 1_000_000 + 86_400_000;
+
+        let result = process_tick(
+            &mut pb,
+            &mut virtual_elapsed,
+            1000.0,
+            FireStatus::Ready(next_t),
+        );
+
+        assert_eq!(result.current_time, Some(next_t), "jump full delta to next bar");
+        assert_eq!(pb.current_time, next_t, "current_time jumps full D1 delta");
+    }
+
+    #[test]
+    fn process_tick_h1_boundary_uses_coarse_threshold() {
+        // delta_to_next = 3_600_000 (= 1h) は境界: `>= COARSE_CUTOFF_MS` なので粗補正側
+        // speed=1.0 で 1000ms 一発でジャンプ
+        let mut pb = empty_pb(1_000_000);
+        let mut virtual_elapsed = 0.0_f64;
+        let next_t = 1_000_000 + 3_600_000;
+
+        let result = process_tick(
+            &mut pb,
+            &mut virtual_elapsed,
+            1000.0,
+            FireStatus::Ready(next_t),
+        );
+
+        assert_eq!(result.current_time, Some(next_t));
+    }
+
+    #[test]
+    fn process_tick_m30_uses_fine_threshold() {
+        // delta_to_next = 1_800_000 (= 30 分、M30) は `< COARSE_CUTOFF_MS` なので fine 側。
+        // speed=1.0, elapsed=1000ms では threshold(1_800_000) に全く及ばずジャンプしない。
+        // これで tooltip 「M30 以下: 実時間連動」の契約が担保される（review 🟡 #3）。
+        let mut pb = empty_pb(1_000_000);
+        let mut virtual_elapsed = 0.0_f64;
+        let next_t = 1_000_000 + 1_800_000;
+
+        let result = process_tick(
+            &mut pb,
+            &mut virtual_elapsed,
+            1000.0,
+            FireStatus::Ready(next_t),
+        );
+
+        assert!(
+            result.current_time.is_none(),
+            "M30 では 1 秒では threshold(1_800_000) に達せずジャンプしない"
+        );
+    }
+
+    #[test]
+    fn coarse_cutoff_boundary_matches_h1_in_ms() {
+        // tooltip の「M30 以下 / H1 以上」の境界が H1 (3_600_000ms) と一致することを固定化。
+        // この値が動いたら tooltip 文言の見直しが必要（review 🟡 #3）。
+        assert_eq!(COARSE_CUTOFF_MS, 3_600_000);
+    }
+
+    #[test]
+    fn process_tick_h4_uses_coarse_threshold() {
+        // delta_to_next = 14_400_000 (= 4h), speed=1.0, elapsed=1000ms でジャンプ
+        let mut pb = empty_pb(1_000_000);
+        let mut virtual_elapsed = 0.0_f64;
+        let next_t = 1_000_000 + 14_400_000;
+
+        let result = process_tick(
+            &mut pb,
+            &mut virtual_elapsed,
+            1000.0,
+            FireStatus::Ready(next_t),
+        );
+        assert_eq!(result.current_time, Some(next_t));
+        assert_eq!(pb.current_time, next_t);
+    }
+
+    #[test]
+    fn process_tick_d1_speed_scales_jump_rate() {
+        // speed=10.0: elapsed 100ms で 100*10=1000ms 蓄積 → D1 でジャンプ
+        let mut pb = empty_pb(1_000_000);
+        pb.speed = 10.0;
+        let mut virtual_elapsed = 0.0_f64;
+        let next_t = 1_000_000 + 86_400_000;
+
+        let result = process_tick(
+            &mut pb,
+            &mut virtual_elapsed,
+            100.0,
+            FireStatus::Ready(next_t),
+        );
+        assert_eq!(result.current_time, Some(next_t));
+    }
+
+    #[test]
+    fn process_tick_terminal_pauses_and_clears_virtual_elapsed() {
+        let mut pb = empty_pb(100_000_000);
+        let mut virtual_elapsed = 12_345.0_f64;
+
+        let result = process_tick(&mut pb, &mut virtual_elapsed, 1000.0, FireStatus::Terminal);
+
+        assert!(result.current_time.is_none());
+        assert_eq!(pb.status, PlaybackStatus::Paused);
+        assert_eq!(pb.current_time, 100_000_000, "current_time は変化しない");
+        assert_eq!(virtual_elapsed, 0.0, "terminal で virtual_elapsed はクリア");
+    }
+
+    #[test]
+    fn process_tick_pending_holds_virtual_elapsed_and_status() {
+        // Pending 時は virtual_elapsed を据え置き、status を変更しない
+        let mut pb = empty_pb(50_000);
+        let mut virtual_elapsed = 30_000.0_f64;
+
+        let result = process_tick(&mut pb, &mut virtual_elapsed, 1000.0, FireStatus::Pending);
+
+        assert!(result.current_time.is_none());
+        assert_eq!(pb.status, PlaybackStatus::Playing);
+        assert_eq!(pb.current_time, 50_000);
+        assert_eq!(
+            virtual_elapsed, 30_000.0,
+            "Pending では virtual_elapsed を加算しない（据え置き）"
+        );
+    }
+
+    #[test]
+    fn process_tick_drains_trades_when_jumped() {
+        // Ready(t) でジャンプが発生した Tick では、current_time 以下の trades を drain する
+        let stream = mock_trade_stream();
+        let mut buffers = HashMap::new();
+        buffers.insert(
+            stream,
+            TradeBuffer {
+                trades: vec![test_trade(10), test_trade(50), test_trade(80)],
                 cursor: 0,
             },
         );
         let mut pb = PlaybackState {
             start_time: 0,
-            end_time: 200_000_000,
-            current_time: 1_000_000,
+            end_time: 1_000_000,
+            current_time: 0,
             status: PlaybackStatus::Playing,
             speed: 1.0,
             trade_buffers: buffers,
             resume_status: PlaybackStatus::Playing,
+            pending_trade_streams: HashSet::new(),
         };
         let mut virtual_elapsed = 0.0_f64;
 
-        let result = process_d1_tick(
-            &mut pb,
-            &mut virtual_elapsed,
-            1000.0,
-            Some(86_400_000),
-        );
+        let result = process_tick(&mut pb, &mut virtual_elapsed, 100.0, FireStatus::Ready(100));
 
-        assert_eq!(result.current_time, Some(86_400_000));
-        let collected = result.trades_collected.expect("trade_buffers が非空なら drain される");
-        assert_eq!(collected.len(), 1, "1 ストリーム分の trades");
-        let (_, drained, _) = &collected[0];
-        assert_eq!(drained.len(), 3, "current_time(86_400_000) 以下の 3 件全て");
+        assert_eq!(result.current_time, Some(100), "jump to 100");
+        let collected = result.trades_collected.expect("drain が実行される");
+        assert_eq!(collected.len(), 1);
+        let (_, trades, _) = &collected[0];
+        assert_eq!(trades.len(), 3, "100 以下の全 trades が drain される");
     }
 
     #[test]
-    fn process_d1_tick_skips_drain_when_all_buffers_empty() {
-        // Tachibana ケース: trade_buffers が空なら drain せず trades_collected = None
+    fn process_tick_drains_every_tick_even_without_jump() {
+        // 穴 A: M1 シナリオで virtual_elapsed < threshold でも drain_until が呼ばれる
+        // current_time は変わらないが、蓄積 trades は drain される
+        let stream = mock_trade_stream();
+        let mut buffers = HashMap::new();
+        buffers.insert(
+            stream,
+            TradeBuffer {
+                trades: vec![test_trade(10), test_trade(20), test_trade(200)],
+                cursor: 0,
+            },
+        );
         let mut pb = PlaybackState {
             start_time: 0,
-            end_time: 200_000_000,
-            current_time: 1_000_000,
+            end_time: 1_000_000,
+            current_time: 100,
             status: PlaybackStatus::Playing,
             speed: 1.0,
-            trade_buffers: HashMap::new(),
+            trade_buffers: buffers,
             resume_status: PlaybackStatus::Playing,
+            pending_trade_streams: HashSet::new(),
         };
         let mut virtual_elapsed = 0.0_f64;
 
-        let result = process_d1_tick(
+        // delta_to_next = 60_000, elapsed=1000 → 未達だが drain は回る
+        let result = process_tick(
             &mut pb,
             &mut virtual_elapsed,
             1000.0,
-            Some(86_400_000),
+            FireStatus::Ready(60_100),
         );
-
-        assert_eq!(result.current_time, Some(86_400_000), "ジャンプ後の current_time を返す");
-        assert!(result.trades_collected.is_none(), "trade_buffers が空なので drain をスキップ");
-        assert_eq!(pb.status, PlaybackStatus::Playing);
-    }
-
-    #[test]
-    fn process_d1_tick_pauses_on_reached_end() {
-        // 次の kline が無い状態で閾値に到達 → status が Paused に遷移
-        let mut pb = PlaybackState {
-            start_time: 0,
-            end_time: 200_000_000,
-            current_time: 100_000_000,
-            status: PlaybackStatus::Playing,
-            speed: 1.0,
-            trade_buffers: HashMap::new(),
-            resume_status: PlaybackStatus::Playing,
-        };
-        let mut virtual_elapsed = 0.0_f64;
-
-        let result = process_d1_tick(&mut pb, &mut virtual_elapsed, 1000.0, None);
 
         assert!(result.current_time.is_none(), "ジャンプ無し");
-        assert_eq!(pb.status, PlaybackStatus::Paused);
-        assert_eq!(pb.current_time, 100_000_000, "current_time は変化しない");
+        let collected = result.trades_collected.expect("未達 Tick でも drain される");
+        assert_eq!(collected.len(), 1);
+        let (_, trades, _) = &collected[0];
+        assert_eq!(trades.len(), 2, "current_time(100) 以下の 2 件のみ drain");
     }
 
     #[test]
-    fn replay_state_default_d1_virtual_elapsed_is_zero() {
-        let state = ReplayState::default();
-        assert_eq!(state.d1_virtual_elapsed_ms, 0.0);
-    }
-
-    #[test]
-    fn advance_d1_jumps_when_threshold_reached() {
-        // speed=1.0, elapsed=1000ms 一発で閾値到達 → next_kline_time へジャンプ
+    fn process_tick_skips_drain_when_all_buffers_empty() {
+        // Tachibana ケース: trade_buffers 全空 → trades_collected=None
+        let mut pb = empty_pb(1_000_000);
         let mut virtual_elapsed = 0.0_f64;
-        let mut current_time: u64 = 1_000_000;
-        let next_kline = Some(1_086_400_000_u64);
 
-        let (jumped, reached_end) =
-            advance_d1(&mut virtual_elapsed, 1.0, &mut current_time, 1000.0, next_kline);
-
-        assert!(jumped, "閾値到達で jumped=true を返す");
-        assert!(!reached_end, "next_kline_time が Some なので終端ではない");
-        assert_eq!(current_time, 1_086_400_000, "current_time が next_kline_time へ更新される");
-        assert_eq!(virtual_elapsed, 0.0, "ジャンプ時に仮想カウンタはリセットされる");
-    }
-
-    #[test]
-    fn advance_d1_signals_end_when_no_next_kline() {
-        // 閾値到達したが next_kline=None → reached_end=true、current_time は変化しない
-        let mut virtual_elapsed = 0.0_f64;
-        let mut current_time: u64 = 9_999_999;
-
-        let (jumped, reached_end) =
-            advance_d1(&mut virtual_elapsed, 1.0, &mut current_time, 1000.0, None);
-
-        assert!(!jumped, "次の kline がないので jumped=false");
-        assert!(reached_end, "終端到達を通知する");
-        assert_eq!(current_time, 9_999_999, "終端では current_time は変化しない");
-    }
-
-    #[test]
-    fn advance_d1_speed_scales_jump_rate() {
-        // speed=10.0 なら elapsed=100ms 一発で 1000ms 相当の仮想時間 → ジャンプ
-        let mut virtual_elapsed = 0.0_f64;
-        let mut current_time: u64 = 1_000_000;
-        let next_kline = Some(1_086_400_000_u64);
-
-        let (jumped, reached_end) = advance_d1(
+        let result = process_tick(
+            &mut pb,
             &mut virtual_elapsed,
-            10.0,
-            &mut current_time,
-            100.0,
-            next_kline,
+            1000.0,
+            FireStatus::Ready(86_401_000_u64),
         );
-
-        assert!(jumped, "speed=10x なら 100ms*10=1000ms で即ジャンプ");
-        assert!(!reached_end);
-        assert_eq!(current_time, 1_086_400_000);
+        assert!(result.trades_collected.is_none());
     }
 
-    #[test]
-    fn advance_d1_throttles_until_accumulated_threshold() {
-        // speed=1.0, elapsed=100ms を 9 回呼んでも jumped=false、10 回目で jumped=true
-        let mut virtual_elapsed = 0.0_f64;
-        let mut current_time: u64 = 1_000_000;
-        let next_kline = Some(1_086_400_000_u64);
+    // ── diff_trade_streams: mid-replay での trade stream 差分計算（review 🟡 #4） ──
 
-        for i in 1..=9 {
-            let (jumped, reached_end) = advance_d1(
-                &mut virtual_elapsed,
-                1.0,
-                &mut current_time,
-                100.0,
-                next_kline,
-            );
-            assert!(!jumped, "{i} 回目: 累積 {}ms < 1000ms なので jump しない", i * 100);
-            assert!(!reached_end);
-        }
-
-        // 10 回目: 累積 1000ms に到達 → ジャンプ
-        let (jumped, reached_end) = advance_d1(
-            &mut virtual_elapsed,
+    fn make_ticker(symbol: &str) -> StreamKind {
+        use exchange::adapter::Exchange;
+        let ti = exchange::TickerInfo::new(
+            exchange::Ticker::new(symbol, Exchange::BinanceSpot),
             1.0,
-            &mut current_time,
-            100.0,
-            next_kline,
+            1.0,
+            None,
         );
-        assert!(jumped, "10 回目で累積 1000ms 到達 → ジャンプ");
-        assert!(!reached_end);
-        assert_eq!(current_time, 1_086_400_000);
+        StreamKind::Trades { ticker_info: ti }
+    }
+
+    #[test]
+    fn diff_trade_streams_detects_new_streams() {
+        let mut pb = empty_pb(0);
+        let existing = make_ticker("BTCUSDT");
+        pb.trade_buffers.insert(
+            existing,
+            TradeBuffer { trades: Vec::new(), cursor: 0 },
+        );
+
+        let new_stream = make_ticker("ETHUSDT");
+        let diff = pb.diff_trade_streams(&[existing, new_stream]);
+
+        assert_eq!(diff.new_streams, vec![new_stream], "ETHUSDT は new");
+        assert!(diff.orphan_streams.is_empty(), "orphan なし");
+    }
+
+    #[test]
+    fn diff_trade_streams_detects_orphan_streams() {
+        let mut pb = empty_pb(0);
+        let removed = make_ticker("BTCUSDT");
+        let kept = make_ticker("ETHUSDT");
+        pb.trade_buffers.insert(
+            removed,
+            TradeBuffer { trades: Vec::new(), cursor: 0 },
+        );
+        pb.trade_buffers.insert(
+            kept,
+            TradeBuffer { trades: Vec::new(), cursor: 0 },
+        );
+
+        // current に BTCUSDT を含めない → orphan
+        let diff = pb.diff_trade_streams(&[kept]);
+
+        assert!(diff.new_streams.is_empty(), "new なし");
+        assert_eq!(diff.orphan_streams, vec![removed], "BTCUSDT は orphan");
+    }
+
+    #[test]
+    fn diff_trade_streams_empty_when_no_change() {
+        let mut pb = empty_pb(0);
+        let a = make_ticker("BTCUSDT");
+        let b = make_ticker("ETHUSDT");
+        pb.trade_buffers.insert(
+            a,
+            TradeBuffer { trades: Vec::new(), cursor: 0 },
+        );
+        pb.trade_buffers.insert(
+            b,
+            TradeBuffer { trades: Vec::new(), cursor: 0 },
+        );
+
+        let diff = pb.diff_trade_streams(&[a, b]);
+
+        assert!(diff.new_streams.is_empty());
+        assert!(diff.orphan_streams.is_empty());
+    }
+
+    #[test]
+    fn diff_trade_streams_both_new_and_orphan() {
+        let mut pb = empty_pb(0);
+        let removed = make_ticker("BTCUSDT");
+        pb.trade_buffers.insert(
+            removed,
+            TradeBuffer { trades: Vec::new(), cursor: 0 },
+        );
+
+        let added = make_ticker("ETHUSDT");
+        let diff = pb.diff_trade_streams(&[added]);
+
+        assert_eq!(diff.new_streams, vec![added]);
+        assert_eq!(diff.orphan_streams, vec![removed]);
+    }
+
+    // ── ingest_trades_batch: orphan 自己復活ループ防止（review 🔴 #2） ──
+
+    #[test]
+    fn ingest_trades_batch_accepts_for_registered_stream() {
+        // 通常経路: 事前に trade_buffers に登録された stream のバッチは追記される
+        let stream = mock_trade_stream();
+        let mut pb = empty_pb(0);
+        pb.trade_buffers.insert(
+            stream,
+            TradeBuffer {
+                trades: Vec::new(),
+                cursor: 0,
+            },
+        );
+
+        let accepted = pb.ingest_trades_batch(stream, vec![test_trade(10), test_trade(20)]);
+
+        assert!(accepted, "登録済み stream は受け入れる");
+        assert_eq!(pb.trade_buffers[&stream].trades.len(), 2);
+    }
+
+    #[test]
+    fn ingest_trades_batch_drops_batch_for_orphan_stream() {
+        // orphan 経路: trade_buffers に存在しない stream のバッチは捨てる
+        // （SyncReplayBuffers で削除した後に残存 fetch タスクから届くケース）
+        let stream = mock_trade_stream();
+        let mut pb = empty_pb(0);
+        assert!(!pb.trade_buffers.contains_key(&stream));
+
+        let accepted = pb.ingest_trades_batch(stream, vec![test_trade(10), test_trade(20)]);
+
+        assert!(!accepted, "未登録 stream はバッチを拒否する");
+        assert!(
+            !pb.trade_buffers.contains_key(&stream),
+            "拒否された stream は trade_buffers に再出現しない（or_insert_with 経路を通さない）"
+        );
+    }
+
+    #[test]
+    fn ingest_trades_batch_preserves_cursor_on_accepted_append() {
+        // cursor が途中にあっても、append は既存 cursor に影響しない
+        let stream = mock_trade_stream();
+        let mut pb = empty_pb(0);
+        pb.trade_buffers.insert(
+            stream,
+            TradeBuffer {
+                trades: vec![test_trade(1), test_trade(2)],
+                cursor: 1,
+            },
+        );
+
+        let accepted = pb.ingest_trades_batch(stream, vec![test_trade(3), test_trade(4)]);
+
+        assert!(accepted);
+        assert_eq!(pb.trade_buffers[&stream].trades.len(), 4);
+        assert_eq!(pb.trade_buffers[&stream].cursor, 1, "cursor は変化しない");
     }
 }
