@@ -159,6 +159,7 @@ impl Flowsurface {
                     },
                     playback: None,
                     last_tick: None,
+                    d1_virtual_elapsed_ms: 0.0,
                 }
             },
         };
@@ -292,38 +293,64 @@ impl Flowsurface {
                     .unwrap_or(16.0);
                 self.replay.last_tick = Some(now);
 
-                let (replay_trades, replay_current_time) =
-                    if let Some(pb) = &mut self.replay.playback {
-                        if pb.status == replay::PlaybackStatus::Playing {
-                            let current_time = pb.advance_time(elapsed_ms);
+                // is_all_d1_klines() / replay_next_kline_time() は &self を取るため、
+                // &mut self.replay.playback を取る前に呼んで結果をローカル変数へ保存
+                let is_d1 = self.active_dashboard().is_all_d1_klines(main_window_id);
+                let next_kline_time = if is_d1 {
+                    let current = self
+                        .replay
+                        .playback
+                        .as_ref()
+                        .map(|p| p.current_time)
+                        .unwrap_or(0);
+                    self.active_dashboard()
+                        .replay_next_kline_time(current, main_window_id)
+                } else {
+                    None
+                };
 
-                            // 各ストリームの TradeBuffer から current_time 以前を収集
-                            let streams: Vec<_> = pb.trade_buffers.keys().copied().collect();
-                            let mut collected = Vec::new();
+                let (replay_trades, replay_current_time) = if let Some(pb) =
+                    &mut self.replay.playback
+                {
+                    if pb.status != replay::PlaybackStatus::Playing {
+                        (None, None)
+                    } else if is_d1 {
+                        // D1 リプレイ: スロットリング付きで次の kline へ離散ジャンプ (Phase 3)
+                        let result = replay::process_d1_tick(
+                            pb,
+                            &mut self.replay.d1_virtual_elapsed_ms,
+                            elapsed_ms,
+                            next_kline_time,
+                        );
+                        (result.trades_collected, result.current_time)
+                    } else {
+                        let current_time = pb.advance_time(elapsed_ms);
 
-                            for stream in streams {
-                                if let Some(buffer) = pb.trade_buffers.get_mut(&stream) {
-                                    let drained = buffer.drain_until(current_time);
-                                    if !drained.is_empty() {
-                                        let update_t =
-                                            drained.last().map_or(current_time, |t| t.time);
-                                        collected.push((stream, drained.to_vec(), update_t));
-                                    }
+                        // 各ストリームの TradeBuffer から current_time 以前を収集
+                        let streams: Vec<_> = pb.trade_buffers.keys().copied().collect();
+                        let mut collected = Vec::new();
+
+                        for stream in streams {
+                            if let Some(buffer) = pb.trade_buffers.get_mut(&stream) {
+                                let drained = buffer.drain_until(current_time);
+                                if !drained.is_empty() {
+                                    let update_t =
+                                        drained.last().map_or(current_time, |t| t.time);
+                                    collected.push((stream, drained.to_vec(), update_t));
                                 }
                             }
-
-                            // current_time >= end_time なら自動停止
-                            if pb.current_time >= pb.end_time {
-                                pb.status = replay::PlaybackStatus::Paused;
-                            }
-
-                            (Some(collected), Some(current_time))
-                        } else {
-                            (None, None)
                         }
-                    } else {
-                        (None, None)
-                    };
+
+                        // current_time >= end_time なら自動停止
+                        if pb.current_time >= pb.end_time {
+                            pb.status = replay::PlaybackStatus::Paused;
+                        }
+
+                        (Some(collected), Some(current_time))
+                    }
+                } else {
+                    (None, None)
+                };
 
                 let mut all_tasks: Vec<Task<Message>> = Vec::new();
 
@@ -802,15 +829,6 @@ impl Flowsurface {
                                     matches!(exchange.venue(), exchange::adapter::Venue::Binance)
                                 })
                                 .collect();
-                        }
-
-                        // D1 のみの場合は Paused で開始（日足の自動再生は UX として不自然）
-                        let all_d1 =
-                            self.active_dashboard().is_all_d1_klines(main_window_id);
-                        if all_d1
-                            && let Some(pb) = &mut self.replay.playback
-                        {
-                            pb.resume_status = replay::PlaybackStatus::Paused;
                         }
 
                         // 各 kline ストリームに対して fetch_klines を発行

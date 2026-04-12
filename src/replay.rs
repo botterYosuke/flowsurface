@@ -47,6 +47,9 @@ pub struct ReplayState {
     pub playback: Option<PlaybackState>,
     /// 前回の Tick 時刻（フレーム間経過時間を計算するため）
     pub last_tick: Option<std::time::Instant>,
+    /// D1 リプレイ自動再生の仮想時間累積カウンタ（ms）。
+    /// `advance_d1` が 1000ms 到達時にリセットして次の kline へジャンプする。
+    pub d1_virtual_elapsed_ms: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,6 +130,7 @@ impl Default for ReplayState {
             range_input: ReplayRangeInput::default(),
             playback: None,
             last_tick: None,
+            d1_virtual_elapsed_ms: 0.0,
         }
     }
 }
@@ -274,6 +278,88 @@ impl PlaybackState {
     }
 }
 
+/// D1 リプレイ自動再生のスロットリング（Phase 3）。
+///
+/// `speed` を「bars/sec」として再解釈し、仮想時間カウンタが 1000ms に達したら
+/// `current_time` を次の kline timestamp にジャンプさせる。
+///
+/// # 戻り値
+/// `(jumped, reached_end)`:
+/// - `jumped == true`: ジャンプが発生した。`current_time` は更新済み
+/// - `reached_end == true`: 閾値に達したが次の kline が存在しない（再生終端）
+pub fn advance_d1(
+    virtual_elapsed_ms: &mut f64,
+    speed: f64,
+    current_time: &mut u64,
+    elapsed_ms: f64,
+    next_kline_time: Option<u64>,
+) -> (bool, bool) {
+    *virtual_elapsed_ms += elapsed_ms * speed;
+    if *virtual_elapsed_ms + 1e-6 < 1000.0 {
+        return (false, false);
+    }
+    *virtual_elapsed_ms = 0.0;
+    match next_kline_time {
+        Some(t) => {
+            *current_time = t;
+            (true, false)
+        }
+        None => (false, true),
+    }
+}
+
+/// `process_d1_tick` の戻り値。
+pub struct D1TickResult {
+    /// ジャンプ発火時の current_time（None ならチャート更新不要）
+    pub current_time: Option<u64>,
+    /// drain した trades（None なら trade_buffers が空でドレイン不要）
+    pub trades_collected: Option<Vec<(StreamKind, Vec<Trade>, u64)>>,
+}
+
+/// D1 リプレイ自動再生 1 Tick 分の処理（Phase 3）。
+///
+/// `advance_d1` を呼び、ジャンプ発生時に trade_buffers が非空なら `drain_until` も実行する。
+/// `is_all_d1_klines()` は取引所非依存のため、Binance D1 + heatmap 等で trades が存在する
+/// ケースでは drain を実行する必要がある。
+pub fn process_d1_tick(
+    pb: &mut PlaybackState,
+    virtual_elapsed_ms: &mut f64,
+    elapsed_ms: f64,
+    next_kline_time: Option<u64>,
+) -> D1TickResult {
+    let (jumped, reached_end) = advance_d1(
+        virtual_elapsed_ms,
+        pb.speed,
+        &mut pb.current_time,
+        elapsed_ms,
+        next_kline_time,
+    );
+    if reached_end {
+        pb.status = PlaybackStatus::Paused;
+    }
+    let trades_all_empty = pb.trade_buffers.values().all(|b| b.trades.is_empty());
+    let trades_collected = if jumped && !trades_all_empty {
+        let streams: Vec<_> = pb.trade_buffers.keys().copied().collect();
+        let mut collected = Vec::new();
+        for stream in streams {
+            if let Some(buffer) = pb.trade_buffers.get_mut(&stream) {
+                let drained = buffer.drain_until(pb.current_time);
+                if !drained.is_empty() {
+                    let update_t = drained.last().map_or(pb.current_time, |t| t.time);
+                    collected.push((stream, drained.to_vec(), update_t));
+                }
+            }
+        }
+        Some(collected)
+    } else {
+        None
+    };
+    D1TickResult {
+        current_time: jumped.then_some(pb.current_time),
+        trades_collected,
+    }
+}
+
 /// 現在時刻の表示文字列を生成する。
 /// ライブモード: 現在時刻、リプレイモード: 仮想時刻（playback の current_time）
 pub fn format_current_time(replay: &ReplayState, timezone: data::UserTimezone) -> String {
@@ -352,6 +438,7 @@ mod tests {
                 resume_status: PlaybackStatus::Playing,
             }),
             last_tick: None,
+            d1_virtual_elapsed_ms: 0.0,
         };
 
         let result = format_current_time(&state, data::UserTimezone::Utc);
@@ -533,6 +620,7 @@ mod tests {
                 resume_status: PlaybackStatus::Playing,
             }),
             last_tick: None,
+            d1_virtual_elapsed_ms: 0.0,
         };
         let status = state.to_status();
         assert_eq!(status.mode, "Replay");
@@ -558,6 +646,7 @@ mod tests {
                 resume_status: PlaybackStatus::Playing,
             }),
             last_tick: None,
+            d1_virtual_elapsed_ms: 0.0,
         };
         let status = state.to_status();
         assert_eq!(status.status.as_deref(), Some("Loading"));
@@ -578,6 +667,7 @@ mod tests {
                 resume_status: PlaybackStatus::Playing,
             }),
             last_tick: None,
+            d1_virtual_elapsed_ms: 0.0,
         };
         let status = state.to_status();
         assert_eq!(status.status.as_deref(), Some("Paused"));
@@ -594,6 +684,7 @@ mod tests {
             },
             playback: None,
             last_tick: None,
+            d1_virtual_elapsed_ms: 0.0,
         };
         let status = state.to_status();
         assert_eq!(status.mode, "Replay");
@@ -631,6 +722,7 @@ mod tests {
                 resume_status: PlaybackStatus::Playing,
             }),
             last_tick: None,
+            d1_virtual_elapsed_ms: 0.0,
         };
         let json = serde_json::to_string(&state.to_status()).unwrap();
         assert!(json.contains(r#""mode":"Replay""#));
@@ -828,6 +920,7 @@ mod tests {
                 resume_status: PlaybackStatus::Playing,
             }),
             last_tick: None,
+            d1_virtual_elapsed_ms: 0.0,
         };
 
         state.toggle_mode(); // Replay → Live
@@ -877,6 +970,7 @@ mod tests {
             range_input: ReplayRangeInput::default(),
             playback: None,
             last_tick: None,
+            d1_virtual_elapsed_ms: 0.0,
         };
         let result = format_current_time(&state, data::UserTimezone::Utc);
         // Should fall through to realtime (the _ arm)
@@ -914,6 +1008,7 @@ mod tests {
             },
             playback: None,
             last_tick: None,
+            d1_virtual_elapsed_ms: 0.0,
         }
     }
 
@@ -938,6 +1033,7 @@ mod tests {
             },
             playback: None,
             last_tick: None,
+            d1_virtual_elapsed_ms: 0.0,
         };
         let cfg = to_replay_config(&state);
         assert_eq!(cfg.mode, "replay");
@@ -964,6 +1060,7 @@ mod tests {
                 resume_status: PlaybackStatus::Playing,
             }),
             last_tick: None,
+            d1_virtual_elapsed_ms: 0.0,
         };
         let cfg = to_replay_config(&state);
         // mode と range だけが保存される
@@ -1051,6 +1148,7 @@ mod tests {
             },
             playback: None,
             last_tick: None,
+            d1_virtual_elapsed_ms: 0.0,
         };
         let cfg = to_replay_config(&original);
         let json = serde_json::to_string(&cfg).unwrap();
@@ -1123,5 +1221,190 @@ mod tests {
         let status = state.to_status();
         assert_eq!(status.mode, "Live");
         assert!(status.status.is_none());
+    }
+
+    // ── advance_d1: D1 リプレイ自動再生のスロットリング (Phase 3) ──
+
+    fn mock_trade_stream() -> StreamKind {
+        use exchange::adapter::Exchange;
+        let ticker_info = exchange::TickerInfo::new(
+            exchange::Ticker::new("BTCUSDT", Exchange::BinanceSpot),
+            1.0,
+            1.0,
+            None,
+        );
+        StreamKind::Trades { ticker_info }
+    }
+
+    #[test]
+    fn process_d1_tick_drains_when_buffers_have_trades() {
+        // Binance D1 + heatmap ケース: trade_buffers に trades がある場合は drain される
+        let stream = mock_trade_stream();
+        let mut buffers = HashMap::new();
+        buffers.insert(
+            stream,
+            TradeBuffer {
+                trades: vec![test_trade(50_000_000), test_trade(80_000_000), test_trade(85_000_000)],
+                cursor: 0,
+            },
+        );
+        let mut pb = PlaybackState {
+            start_time: 0,
+            end_time: 200_000_000,
+            current_time: 1_000_000,
+            status: PlaybackStatus::Playing,
+            speed: 1.0,
+            trade_buffers: buffers,
+            resume_status: PlaybackStatus::Playing,
+        };
+        let mut virtual_elapsed = 0.0_f64;
+
+        let result = process_d1_tick(
+            &mut pb,
+            &mut virtual_elapsed,
+            1000.0,
+            Some(86_400_000),
+        );
+
+        assert_eq!(result.current_time, Some(86_400_000));
+        let collected = result.trades_collected.expect("trade_buffers が非空なら drain される");
+        assert_eq!(collected.len(), 1, "1 ストリーム分の trades");
+        let (_, drained, _) = &collected[0];
+        assert_eq!(drained.len(), 3, "current_time(86_400_000) 以下の 3 件全て");
+    }
+
+    #[test]
+    fn process_d1_tick_skips_drain_when_all_buffers_empty() {
+        // Tachibana ケース: trade_buffers が空なら drain せず trades_collected = None
+        let mut pb = PlaybackState {
+            start_time: 0,
+            end_time: 200_000_000,
+            current_time: 1_000_000,
+            status: PlaybackStatus::Playing,
+            speed: 1.0,
+            trade_buffers: HashMap::new(),
+            resume_status: PlaybackStatus::Playing,
+        };
+        let mut virtual_elapsed = 0.0_f64;
+
+        let result = process_d1_tick(
+            &mut pb,
+            &mut virtual_elapsed,
+            1000.0,
+            Some(86_400_000),
+        );
+
+        assert_eq!(result.current_time, Some(86_400_000), "ジャンプ後の current_time を返す");
+        assert!(result.trades_collected.is_none(), "trade_buffers が空なので drain をスキップ");
+        assert_eq!(pb.status, PlaybackStatus::Playing);
+    }
+
+    #[test]
+    fn process_d1_tick_pauses_on_reached_end() {
+        // 次の kline が無い状態で閾値に到達 → status が Paused に遷移
+        let mut pb = PlaybackState {
+            start_time: 0,
+            end_time: 200_000_000,
+            current_time: 100_000_000,
+            status: PlaybackStatus::Playing,
+            speed: 1.0,
+            trade_buffers: HashMap::new(),
+            resume_status: PlaybackStatus::Playing,
+        };
+        let mut virtual_elapsed = 0.0_f64;
+
+        let result = process_d1_tick(&mut pb, &mut virtual_elapsed, 1000.0, None);
+
+        assert!(result.current_time.is_none(), "ジャンプ無し");
+        assert_eq!(pb.status, PlaybackStatus::Paused);
+        assert_eq!(pb.current_time, 100_000_000, "current_time は変化しない");
+    }
+
+    #[test]
+    fn replay_state_default_d1_virtual_elapsed_is_zero() {
+        let state = ReplayState::default();
+        assert_eq!(state.d1_virtual_elapsed_ms, 0.0);
+    }
+
+    #[test]
+    fn advance_d1_jumps_when_threshold_reached() {
+        // speed=1.0, elapsed=1000ms 一発で閾値到達 → next_kline_time へジャンプ
+        let mut virtual_elapsed = 0.0_f64;
+        let mut current_time: u64 = 1_000_000;
+        let next_kline = Some(1_086_400_000_u64);
+
+        let (jumped, reached_end) =
+            advance_d1(&mut virtual_elapsed, 1.0, &mut current_time, 1000.0, next_kline);
+
+        assert!(jumped, "閾値到達で jumped=true を返す");
+        assert!(!reached_end, "next_kline_time が Some なので終端ではない");
+        assert_eq!(current_time, 1_086_400_000, "current_time が next_kline_time へ更新される");
+        assert_eq!(virtual_elapsed, 0.0, "ジャンプ時に仮想カウンタはリセットされる");
+    }
+
+    #[test]
+    fn advance_d1_signals_end_when_no_next_kline() {
+        // 閾値到達したが next_kline=None → reached_end=true、current_time は変化しない
+        let mut virtual_elapsed = 0.0_f64;
+        let mut current_time: u64 = 9_999_999;
+
+        let (jumped, reached_end) =
+            advance_d1(&mut virtual_elapsed, 1.0, &mut current_time, 1000.0, None);
+
+        assert!(!jumped, "次の kline がないので jumped=false");
+        assert!(reached_end, "終端到達を通知する");
+        assert_eq!(current_time, 9_999_999, "終端では current_time は変化しない");
+    }
+
+    #[test]
+    fn advance_d1_speed_scales_jump_rate() {
+        // speed=10.0 なら elapsed=100ms 一発で 1000ms 相当の仮想時間 → ジャンプ
+        let mut virtual_elapsed = 0.0_f64;
+        let mut current_time: u64 = 1_000_000;
+        let next_kline = Some(1_086_400_000_u64);
+
+        let (jumped, reached_end) = advance_d1(
+            &mut virtual_elapsed,
+            10.0,
+            &mut current_time,
+            100.0,
+            next_kline,
+        );
+
+        assert!(jumped, "speed=10x なら 100ms*10=1000ms で即ジャンプ");
+        assert!(!reached_end);
+        assert_eq!(current_time, 1_086_400_000);
+    }
+
+    #[test]
+    fn advance_d1_throttles_until_accumulated_threshold() {
+        // speed=1.0, elapsed=100ms を 9 回呼んでも jumped=false、10 回目で jumped=true
+        let mut virtual_elapsed = 0.0_f64;
+        let mut current_time: u64 = 1_000_000;
+        let next_kline = Some(1_086_400_000_u64);
+
+        for i in 1..=9 {
+            let (jumped, reached_end) = advance_d1(
+                &mut virtual_elapsed,
+                1.0,
+                &mut current_time,
+                100.0,
+                next_kline,
+            );
+            assert!(!jumped, "{i} 回目: 累積 {}ms < 1000ms なので jump しない", i * 100);
+            assert!(!reached_end);
+        }
+
+        // 10 回目: 累積 1000ms に到達 → ジャンプ
+        let (jumped, reached_end) = advance_d1(
+            &mut virtual_elapsed,
+            1.0,
+            &mut current_time,
+            100.0,
+            next_kline,
+        );
+        assert!(jumped, "10 回目で累積 1000ms 到達 → ジャンプ");
+        assert!(!reached_end);
+        assert_eq!(current_time, 1_086_400_000);
     }
 }
