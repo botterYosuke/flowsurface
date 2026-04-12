@@ -1298,6 +1298,10 @@ impl Flowsurface {
                         reply_tx.send(body);
                         return task;
                     }
+                    ApiCommand::Auth(cmd) => {
+                        let body = self.handle_auth_api(cmd);
+                        reply_tx.send(body);
+                    }
                     #[cfg(feature = "e2e-mock")]
                     ApiCommand::Test(cmd) => {
                         let (body, task) = self.handle_test_api(cmd);
@@ -1604,6 +1608,20 @@ impl Flowsurface {
             .expect("No active dashboard")
     }
 
+    /// 認証状態確認 API コマンドを処理する（本番ビルドにも含まれる）。
+    fn handle_auth_api(&self, cmd: replay_api::AuthCommand) -> String {
+        use replay_api::AuthCommand;
+        match cmd {
+            AuthCommand::TachibanaSessionStatus => {
+                let present = connector::auth::get_session().is_some();
+                serde_json::json!({
+                    "session": if present { "present" } else { "none" }
+                })
+                .to_string()
+            }
+        }
+    }
+
     /// Pane CRUD API コマンドを処理する。
     /// 返り値: (JSON レスポンス, 続行する Task)。
     /// E2E テスト用 fixture 注入コマンドを処理する。
@@ -1751,6 +1769,54 @@ impl Flowsurface {
                 })
                 .to_string();
                 (body, Task::none())
+            }
+
+            // ── Phase T2: inject-market-price ──────────────────────────────
+            TestCommand::TachibanaInjectMarketPrice { raw_body } => {
+                // body 形式: {"records": [{"sIssueCode":"7203","pDPP":"3000.0",...}, ...]}
+                let err_body = |msg: String| -> (String, Task<Message>) {
+                    (format!(r#"{{"error":"{}"}}"#, msg.replace('"', "'")), Task::none())
+                };
+                let parsed: serde_json::Value = match serde_json::from_str(&raw_body) {
+                    Ok(v) => v,
+                    Err(e) => return err_body(format!("invalid JSON body: {e}")),
+                };
+                let records_value = match parsed.get("records") {
+                    Some(v) => v.clone(),
+                    None => return err_body("missing 'records' field".to_string()),
+                };
+                let records: Vec<tachibana::MarketPriceRecord> =
+                    match serde_json::from_value(records_value) {
+                        Ok(r) => r,
+                        Err(e) => return err_body(format!("failed to parse records: {e}")),
+                    };
+                let count = records.len();
+                tachibana::e2e_mock::inject_market_prices(records);
+
+                let body = serde_json::json!({
+                    "ok": true,
+                    "action": "inject-market-price",
+                    "count": count,
+                })
+                .to_string();
+                (body, Task::none())
+            }
+
+            // ── Phase T3: keyring 永続化テスト ──────────────────────────────
+            TestCommand::TachibanaInjectPersistSession => {
+                connector::auth::persist_injected_session();
+                (
+                    serde_json::json!({"ok": true, "action": "persist-session"}).to_string(),
+                    Task::none(),
+                )
+            }
+            TestCommand::TachibanaDeletePersistedSession => {
+                connector::auth::delete_all_sessions();
+                (
+                    serde_json::json!({"ok": true, "action": "delete-persisted-session"})
+                        .to_string(),
+                    Task::none(),
+                )
             }
         }
     }

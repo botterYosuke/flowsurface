@@ -11,9 +11,18 @@ use tokio::sync::oneshot;
 pub enum ApiCommand {
     Replay(ReplayCommand),
     Pane(PaneCommand),
+    /// 認証状態確認コマンド（テスト・デバッグ用、本番ビルドにも含まれる）。
+    Auth(AuthCommand),
     /// E2E テスト用の fixture 注入コマンド（`e2e-mock` feature でのみ有効）。
     #[cfg(feature = "e2e-mock")]
     Test(TestCommand),
+}
+
+/// 認証状態確認コマンド。
+#[derive(Debug, Clone)]
+pub enum AuthCommand {
+    /// 現在の立花証券セッション有無を返す（`{"session":"present"|"none"}`）。
+    TachibanaSessionStatus,
 }
 
 /// E2E テスト fixture 注入コマンド。
@@ -29,6 +38,15 @@ pub enum TestCommand {
     TachibanaInjectMaster { raw_body: String },
     /// `MOCK_DAILY_HISTORY` に issue_code → Vec<Kline> を登録する。
     TachibanaInjectDailyHistory { raw_body: String },
+    // ── Phase T2 ──────────────────────────────────────────────────────────
+    /// `MOCK_MARKET_PRICES` に MarketPriceRecord を登録する（Phase T2）。
+    /// 以降の `fetch_market_prices` 呼び出しがネットワークを叩かず mock を返す。
+    TachibanaInjectMarketPrice { raw_body: String },
+    // ── Phase T3 ──────────────────────────────────────────────────────────
+    /// ダミーセッションをメモリ AND keyring 両方に保存する（Phase T3 keyring テスト用）。
+    TachibanaInjectPersistSession,
+    /// メモリセッション + keyring セッションを両方クリアする（Phase T3 keyring テスト用）。
+    TachibanaDeletePersistedSession,
 }
 
 /// ペイン CRUD 系コマンド（§6.2 #2/#5/#6/#7/#8 テスト用）。
@@ -261,6 +279,10 @@ fn route(method: &str, path: &str, body: &str) -> Result<ApiCommand, RouteError>
             return Ok(ApiCommand::Replay(ReplayCommand::CycleSpeed));
         }
         ("POST", "/api/app/save") => return Ok(ApiCommand::Replay(ReplayCommand::SaveState)),
+        // auth 系（本番ビルドにも含まれる）
+        ("GET", "/api/auth/tachibana/status") => {
+            return Ok(ApiCommand::Auth(AuthCommand::TachibanaSessionStatus));
+        }
         _ => {}
     }
 
@@ -328,6 +350,24 @@ fn route(method: &str, path: &str, body: &str) -> Result<ApiCommand, RouteError>
             Ok(ApiCommand::Test(TestCommand::TachibanaInjectDailyHistory {
                 raw_body: body.to_string(),
             }))
+        }
+        // ── Phase T2: inject-market-price ──────────────────────────────────
+        #[cfg(feature = "e2e-mock")]
+        ("POST", "/api/test/tachibana/inject-market-price") => {
+            let _: serde_json::Value =
+                serde_json::from_str(body).map_err(|_| RouteError::BadRequest)?;
+            Ok(ApiCommand::Test(TestCommand::TachibanaInjectMarketPrice {
+                raw_body: body.to_string(),
+            }))
+        }
+        // ── Phase T3: keyring 永続化テスト ─────────────────────────────────
+        #[cfg(feature = "e2e-mock")]
+        ("POST", "/api/test/tachibana/persist-session") => {
+            Ok(ApiCommand::Test(TestCommand::TachibanaInjectPersistSession))
+        }
+        #[cfg(feature = "e2e-mock")]
+        ("POST", "/api/test/tachibana/delete-persisted-session") => {
+            Ok(ApiCommand::Test(TestCommand::TachibanaDeletePersistedSession))
         }
         _ => Err(RouteError::NotFound),
     }
@@ -753,6 +793,70 @@ mod tests {
         assert!(matches!(result, Err(RouteError::BadRequest)));
     }
 
+    // ── route tests: auth ──
+
+    #[test]
+    fn route_get_auth_tachibana_status() {
+        let cmd = route("GET", "/api/auth/tachibana/status", "").unwrap();
+        assert!(matches!(
+            cmd,
+            ApiCommand::Auth(AuthCommand::TachibanaSessionStatus)
+        ));
+    }
+
+    #[test]
+    fn route_post_auth_tachibana_status_not_found() {
+        // POST はマッチしない（GET のみ）
+        let result = route("POST", "/api/auth/tachibana/status", "");
+        assert!(matches!(result, Err(RouteError::NotFound)));
+    }
+
+    // ── Phase T2: inject-market-price ──
+
+    #[cfg(feature = "e2e-mock")]
+    #[test]
+    fn route_post_tachibana_inject_market_price_valid() {
+        let body = r#"{"records":[{"sIssueCode":"7203","pDPP":"3000.0","pDOP":"2990.0","pDHP":"3010.0","pDLP":"2985.0","pDV":"500000.0","pPRP":"2950.0"}]}"#;
+        let cmd = route("POST", "/api/test/tachibana/inject-market-price", body).unwrap();
+        match unwrap_test(cmd) {
+            TestCommand::TachibanaInjectMarketPrice { raw_body } => {
+                assert!(raw_body.contains("7203"));
+                assert!(raw_body.contains("records"));
+            }
+            _ => panic!("Expected TachibanaInjectMarketPrice"),
+        }
+    }
+
+    #[cfg(feature = "e2e-mock")]
+    #[test]
+    fn route_post_tachibana_inject_market_price_invalid_json() {
+        let result = route("POST", "/api/test/tachibana/inject-market-price", "not json");
+        assert!(matches!(result, Err(RouteError::BadRequest)));
+    }
+
+    // ── Phase T3: keyring 永続化テスト ──
+
+    #[cfg(feature = "e2e-mock")]
+    #[test]
+    fn route_post_tachibana_persist_session() {
+        let cmd = route("POST", "/api/test/tachibana/persist-session", "").unwrap();
+        assert!(matches!(
+            unwrap_test(cmd),
+            TestCommand::TachibanaInjectPersistSession
+        ));
+    }
+
+    #[cfg(feature = "e2e-mock")]
+    #[test]
+    fn route_post_tachibana_delete_persisted_session() {
+        let cmd =
+            route("POST", "/api/test/tachibana/delete-persisted-session", "").unwrap();
+        assert!(matches!(
+            unwrap_test(cmd),
+            TestCommand::TachibanaDeletePersistedSession
+        ));
+    }
+
     // backdoor エンドポイントは feature OFF 時は 404 であるべき
     #[cfg(not(feature = "e2e-mock"))]
     #[test]
@@ -760,8 +864,14 @@ mod tests {
         let r1 = route("POST", "/api/test/tachibana/inject-session", "");
         let r2 = route("POST", "/api/test/tachibana/inject-master", "{}");
         let r3 = route("POST", "/api/test/tachibana/inject-daily-history", "{}");
+        let r4 = route("POST", "/api/test/tachibana/inject-market-price", "{}");
+        let r5 = route("POST", "/api/test/tachibana/persist-session", "");
+        let r6 = route("POST", "/api/test/tachibana/delete-persisted-session", "");
         assert!(matches!(r1, Err(RouteError::NotFound)));
         assert!(matches!(r2, Err(RouteError::NotFound)));
         assert!(matches!(r3, Err(RouteError::NotFound)));
+        assert!(matches!(r4, Err(RouteError::NotFound)));
+        assert!(matches!(r5, Err(RouteError::NotFound)));
+        assert!(matches!(r6, Err(RouteError::NotFound)));
     }
 }

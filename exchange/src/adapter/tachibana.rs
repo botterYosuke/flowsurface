@@ -448,6 +448,17 @@ pub async fn fetch_market_prices(
     session: &TachibanaSession,
     issue_codes: &[&str],
 ) -> Result<Vec<MarketPriceRecord>, TachibanaError> {
+    // E2E テスト: mock 経路。feature 有効かつ mock データが注入されている場合、
+    // ネットワークを叩かず mock データをそのまま返す。
+    #[cfg(feature = "e2e-mock")]
+    if let Some(mock) = e2e_mock::get_mock_market_prices() {
+        log::info!(
+            "Tachibana [e2e-mock]: returned {} market price records",
+            mock.len()
+        );
+        return Ok(mock);
+    }
+
     let req = MarketPriceRequest::new(issue_codes);
     let json_body = serialize_request(&req)?;
 
@@ -860,6 +871,34 @@ pub mod e2e_mock {
     pub fn get_mock_daily_klines(issue_code: &str) -> Option<Vec<Kline>> {
         let guard = MOCK_DAILY_HISTORY.read().ok()?;
         guard.as_ref()?.get(issue_code).cloned()
+    }
+
+    // ── fetch_market_prices mock (Phase T2) ─────────────────────────────────
+
+    /// `fetch_market_prices` を mock 経路へ分岐させるためのストア。
+    /// `inject_market_prices` で注入されたデータを `fetch_market_prices` が参照する。
+    pub(super) static MOCK_MARKET_PRICES: RwLock<Option<Vec<super::MarketPriceRecord>>> =
+        RwLock::new(None);
+
+    /// mock 時価情報レコードを登録する。
+    /// 以降の `fetch_market_prices` 呼び出しはネットワークを叩かず、ここで設定したレコードを返す。
+    pub fn inject_market_prices(records: Vec<super::MarketPriceRecord>) {
+        if let Ok(mut guard) = MOCK_MARKET_PRICES.write() {
+            *guard = Some(records);
+        }
+    }
+
+    /// mock 時価情報レコードを取り出す。`fetch_market_prices` から参照される。
+    pub fn get_mock_market_prices() -> Option<Vec<super::MarketPriceRecord>> {
+        let guard = MOCK_MARKET_PRICES.read().ok()?;
+        guard.clone()
+    }
+
+    /// mock 時価情報ストアをクリアする。テスト後のクリーンアップ用。
+    pub fn clear_market_prices() {
+        if let Ok(mut guard) = MOCK_MARKET_PRICES.write() {
+            *guard = None;
+        }
     }
 }
 

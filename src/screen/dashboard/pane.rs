@@ -539,6 +539,12 @@ impl State {
                     }
                     chart.insert_hist_klines(id, klines);
                 } else {
+                    // req_id = None はライブモードの全チャートリロード。
+                    // リプレイモード中にこれが来た場合（Play 押下後に旧フェッチが遅延完了した
+                    // ケースなど）は replay_kline_buffer を上書きしないようスキップする。
+                    if chart.is_replay_mode() {
+                        return;
+                    }
                     let (raw_trades, tick_size) = (chart.raw_trades(), chart.tick_size());
                     let layout = chart.chart_layout();
 

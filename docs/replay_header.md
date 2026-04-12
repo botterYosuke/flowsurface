@@ -215,6 +215,8 @@ Kline チャート側に持つバッファ。`enable_replay_mode()` で `Some(em
 
 `replay_buffer_ready()` は `Some` かつ `klines.len() > 0` のときに `true` を返す。§7.1 `FireStatus` の算出で使われる。
 
+`is_replay_mode()` は `replay_kline_buffer.is_some()` を返す。`insert_hist_klines` の `req_id = None` ブランチで上書きをスキップするガード条件として使われる（§12.3 不変条件 #5）。
+
 ### 4.5 FireStatus ([src/replay.rs:368-378](../src/replay.rs#L368-L378))
 
 ```rust
@@ -814,6 +816,7 @@ curl -X POST http://127.0.0.1:9876/api/app/save
 | 2 | `trade_buffers` への挿入は `PlaybackState::ingest_trades_batch` 経由のみ。`or_insert_with` を使わない | 削除済み stream が残存 fetch タスクで復活し、無限 flap ループ | §8.4 |
 | 3 | `SyncReplayBuffers` は `Message::Dashboard` 末尾 chain + `Message::Sidebar::TickerSelected` 個別 chain の両方が必要 | `Task::none()` を返す経路で mid-replay stream 構成変更が追従しない | §8.2 |
 | 4 | `COARSE_CUTOFF_MS` の変更時は speed ボタン tooltip 文言を必ず同期する | UI と実挙動が乖離 | §3.1 / §7.1 |
+| 5 | `insert_hist_klines` の `req_id = None` ブランチは `is_replay_mode()` が `true` の chart を無条件にスキップする | Play 押下後に遅延完了したライブフェッチが `KlineChart::new()` で `replay_kline_buffer` を `None` にリセットし、`has_pending=true, min_time=None` → 永久 `Pending` デッドロックが発生する | §6.1 |
 
 不変条件 #4 は `coarse_cutoff_boundary_matches_h1_in_ms` テストがトリップワイヤーとして機能する。
 
@@ -863,8 +866,8 @@ curl -X POST http://127.0.0.1:9876/api/app/save
 | [src/replay_api.rs](../src/replay_api.rs) | HTTP サーバー (`tokio::net::TcpListener` + 手動パース) / `ApiCommand` / `PaneCommand` / `ReplySender` / ルーティング |
 | [src/main.rs](../src/main.rs) | `Flowsurface` への `replay` フィールド、`Message::Replay` / `Message::ReplayApi` ハンドラ、`view_replay_header()`、`subscription()`、`build_kline_backfill_task()` / `build_trades_backfill_task()`、`handle_pane_api()` 各メソッド、`SyncReplayBuffers` chain |
 | [src/screen/dashboard.rs](../src/screen/dashboard.rs) | `prepare_replay()` / `rebuild_for_step_backward()` / `rebuild_for_live()` / `collect_trade_streams()` / `collect_new_replay_klines()` / `fire_status()` / `replay_advance_klines()` / `replay_next_kline_time()` / `replay_prev_kline_time()` / `ingest_trades()` の ticker_info マッチング |
-| [src/screen/dashboard/pane.rs](../src/screen/dashboard/pane.rs) | `rebuild_content_for_replay()` / `rebuild_content_for_step_backward()` / `rebuild_content_for_live()` / `enable_replay_mode_if_needed()` / `replay_kline_chart_ready()` / Heatmap の Depth unavailable オーバーレイ |
-| [src/chart/kline.rs](../src/chart/kline.rs) | `ReplayKlineBuffer` / `enable_replay_mode()` / `replay_advance()` / `replay_buffer_ready()` / `set_basis()` の buffer 再初期化 |
+| [src/screen/dashboard/pane.rs](../src/screen/dashboard/pane.rs) | `rebuild_content_for_replay()` / `rebuild_content_for_step_backward()` / `rebuild_content_for_live()` / `enable_replay_mode_if_needed()` / `replay_kline_chart_ready()` / `insert_hist_klines()` の replay ガード（`req_id=None` 時に `is_replay_mode()` が `true` なら上書きをスキップ）/ Heatmap の Depth unavailable オーバーレイ |
+| [src/chart/kline.rs](../src/chart/kline.rs) | `ReplayKlineBuffer` / `enable_replay_mode()` / `disable_replay_mode()` / `is_replay_mode()` / `replay_advance()` / `replay_buffer_ready()` / `set_basis()` の buffer 再初期化 |
 | [src/connector/fetcher.rs](../src/connector/fetcher.rs) | Tachibana D1 range フィルタ分岐 |
 
 ### 14.2 テスト
@@ -896,6 +899,7 @@ curl -X POST http://127.0.0.1:9876/api/app/save
 | Phase 7 | mid-replay ペイン操作許容 | 本書 §8 |
 | Phase 8 | レビュー駆動の設計不整合修正 | 本書 §12.3 |
 | Tachibana Phase 1〜3 | 立花証券 D1 対応 | [docs/tachibana_spec.md §8](tachibana_spec.md) / [docs/plan/archive/tachibana_replay.md](plan/archive/tachibana_replay.md) |
+| バグ修正: Replay Pending デッドロック | Play 直後に遅延完了したライブフェッチが `replay_kline_buffer` を上書きし、永久 `Pending` になる不具合を修正。`KlineChart::is_replay_mode()` を追加し、`insert_hist_klines` の `req_id=None` ブランチにガードを設置 | [docs/plan/fix_replay_pending_deadlock.md](fix_replay_pending_deadlock.md) / §12.3 不変条件 #5 |
 
 未着手のリファクタ計画は [docs/plan/archive/refactor_tachibana_replay.md](plan/archive/refactor_tachibana_replay.md) を参照（main.rs スリム化、Tachibana static 撤去、命名統一 など）。
 

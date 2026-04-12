@@ -354,6 +354,11 @@ impl KlineChart {
         self.replay_kline_buffer = None;
     }
 
+    /// リプレイモード中か否か（`replay_kline_buffer` が `Some` かどうか）。
+    pub fn is_replay_mode(&self) -> bool {
+        self.replay_kline_buffer.is_some()
+    }
+
     /// リプレイ buffer が存在し、かつ klines が 1 件以上あるか。
     /// `false` の場合は以下のいずれか:
     /// - リプレイモードではない (`replay_kline_buffer == None`)
@@ -2229,6 +2234,29 @@ mod tests {
             ticker_info,
             &KlineChartKind::Candles,
         )
+    }
+
+    // ── is_replay_mode: replay_kline_buffer の有無を返す ──
+
+    #[test]
+    fn is_replay_mode_returns_false_when_replay_disabled() {
+        let chart = build_test_kline_chart(Basis::Time(exchange::Timeframe::M1));
+        assert!(!chart.is_replay_mode(), "新規チャートはリプレイモード無効");
+    }
+
+    #[test]
+    fn is_replay_mode_returns_true_when_replay_enabled() {
+        let mut chart = build_test_kline_chart(Basis::Time(exchange::Timeframe::M1));
+        chart.enable_replay_mode();
+        assert!(chart.is_replay_mode(), "enable_replay_mode 後は true");
+    }
+
+    #[test]
+    fn is_replay_mode_returns_false_after_disable() {
+        let mut chart = build_test_kline_chart(Basis::Time(exchange::Timeframe::M1));
+        chart.enable_replay_mode();
+        chart.disable_replay_mode();
+        assert!(!chart.is_replay_mode(), "disable_replay_mode 後は false");
     }
 
     #[test]

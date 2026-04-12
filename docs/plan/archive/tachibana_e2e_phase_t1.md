@@ -334,7 +334,7 @@ cargo test -p flowsurface-exchange --features e2e-mock      → 115 + 1 PASS / 0
   - `Self::handle_test_api(&mut self, TestCommand) -> (String, Task<Message>)` を追加
   - inject-master 成功時に `Task::perform` で `Sidebar::UpdateMetadata(Tachibana, ..)` を発火
 
-## テスト結果（最終）
+## テスト結果（Phase T1 最終）
 
 | 種別 | スクリプト | PASS | FAIL |
 |---|---|:-:|:-:|
@@ -348,11 +348,95 @@ cargo test -p flowsurface-exchange --features e2e-mock      → 115 + 1 PASS / 0
 | E2E 回帰 | `C:/tmp/e2e-pane-crud.sh` | 19 | 0 |
 | E2E 回帰 | `C:/tmp/e2e-mid-replay-crud.sh` | 28 | 0 |
 
-## 次フェーズ (依頼者確認待ち)
+---
 
-- **Phase T2**: EVENT I/F (FD/ST バイナリフレーム) のモックと `fetch_market_prices` mock。
-  ライブ ticker の stream_type を E2E で検証可能にする。
-- **Phase T3**: ログイン UI の自動化 or `/api/auth/*` テスト専用エンドポイント。
-  keyring 永続化パスの E2E 検証、および Phase T1 の backdoor を非有効化するモード切替。
+## Phase T2: fetch_market_prices mock + /api/auth/tachibana/status（2026-04-12 完了）
 
-**Phase T1 完了後の T2/T3 着手判断は依頼者に確認すること**（作業依頼書のスコープ外に明記）。
+### 実装内容
+
+#### 新規 API エンドポイント
+
+| メソッド | パス | feature | 用途 |
+|---------|------|---------|------|
+| `GET` | `/api/auth/tachibana/status` | 本番ビルドにも含む | セッション有無確認 (`{"session":"present"\|"none"}`) |
+| `POST` | `/api/test/tachibana/inject-market-price` | e2e-mock のみ | `fetch_market_prices` mock データ登録 |
+
+#### コード変更
+
+- `exchange/src/adapter/tachibana.rs` — `e2e_mock` モジュールに `MOCK_MARKET_PRICES` + inject/get/clear 関数追加。`fetch_market_prices` 先頭に mock 分岐追加。
+- `src/replay_api.rs` — `AuthCommand::TachibanaSessionStatus` enum 追加。`ApiCommand::Auth` バリアント追加。`TestCommand::TachibanaInjectMarketPrice` 追加。ルート・ユニットテスト追加。
+- `src/main.rs` — `handle_auth_api()` メソッド追加。`handle_test_api` に `TachibanaInjectMarketPrice` ハンドラ追加。
+
+#### スコープ外（判断記録）
+
+- **EVENT I/F (FD/ST フレーム) mock**: E2E テストはリプレイモードで実行され、EVENT I/F WebSocket はリプレイ中に稼働しない。フレームパーサー (`parse_event_frame`, `fields_to_depth`) はユニットテストで充分カバー済みのため、E2E mock は追加しない。
+
+### テスト結果（2026-04-12）
+
+**実セッションあり**（立花証券に実ログイン後）で実施。
+
+| 種別 | スクリプト | PASS | FAIL |
+|---|---|:-:|:-:|
+| Unit (no feature) | `cargo test --bin flowsurface` | **155** | 0 |
+| Unit (feature ON) | `cargo test --bin flowsurface --features e2e-mock` | **163** | 0 |
+| E2E T2 inline | T2-1〜T2-7h（auth/status + inject-market-price + D1 再生） | **14** | 0 |
+| E2E T1 回帰 | `C:/tmp/e2e-tachibana-d1.sh` | **18** | 0 |
+
+---
+
+## Phase T3: keyring 永続化 E2E（2026-04-12 完了）
+
+### 実装内容
+
+#### 新規 API エンドポイント
+
+| メソッド | パス | feature | 用途 |
+|---------|------|---------|------|
+| `POST` | `/api/test/tachibana/persist-session` | e2e-mock のみ | ダミーセッションをメモリ + keyring 両方に保存 |
+| `POST` | `/api/test/tachibana/delete-persisted-session` | e2e-mock のみ | メモリ + keyring 両方のセッションを削除 |
+
+#### コード変更
+
+- `src/connector/auth.rs` — `persist_injected_session()` / `delete_all_sessions()` 追加（e2e-mock gate）。`try_restore_session` に e2e-mock バイパス追加（URL が `e2e-mock.invalid` の場合は `validate_session` をスキップ）。
+- `src/replay_api.rs` — `TestCommand::TachibanaInjectPersistSession` / `::TachibanaDeletePersistedSession` 追加。ルート・ユニットテスト追加。
+- `src/main.rs` — 両コマンドのハンドラ追加。
+
+#### 検証フロー
+
+| テスト | 内容 | 結果 |
+|--------|------|------|
+| T3-1 | 実ログイン後 `status=present` | ✅ |
+| T3-2a | `inject-session` → `status=present` | ✅ |
+| T3-2b | メモリのみ inject → 再起動 → `status=none` | ✅ |
+| T3-3a | `persist-session` → `ok=true` | ✅ |
+| T3-3b | 再起動 → keyring から `status=present` に自動復元 | ✅ |
+| T3-4a | `delete-persisted-session` → `ok=true` | ✅ |
+| T3-4b | 再起動 → `status=none` (keyring 削除済み) | ✅ |
+| T3-5 | T1 回帰（inject-session + play）| ✅ |
+
+### テスト結果（2026-04-12）
+
+| 種別 | スクリプト | PASS | FAIL |
+|---|---|:-:|:-:|
+| Unit (no feature) | `cargo test --bin flowsurface` | **155** | 0 |
+| Unit (feature ON) | `cargo test --bin flowsurface --features e2e-mock` | **163** | 0 |
+| E2E T3 inline | T3-1〜T3-5c（keyring 往復 + T1 回帰） | **10** | 0 |
+| E2E T1 回帰 | `C:/tmp/e2e-tachibana-d1.sh` | **18** | 0 |
+
+### 注意事項
+
+- T3 実行後は keyring がクリアされる。アプリ再起動時にログイン画面が表示されるため、再ログインが必要。
+- `try_restore_session` の e2e-mock バイパスは URL に `e2e-mock.invalid` が含まれる場合のみ発動。本番セッション（実 URL）には影響しない。
+
+---
+
+## Phase T1〜T3 完了後の全体テスト結果サマリー（2026-04-12）
+
+| 種別 | PASS | FAIL |
+|------|:----:|:----:|
+| Unit (feature なし) | 155 | 0 |
+| Unit (e2e-mock) | 163 | 0 |
+| E2E T1 (`e2e-tachibana-d1.sh`) | 18 | 0 |
+| E2E T2 (inline) | 14 | 0 |
+| E2E T3 (inline) | 10 | 0 |
+| **合計** | **360** | **0** |

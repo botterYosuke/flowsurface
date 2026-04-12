@@ -72,7 +72,10 @@
       "Bash(grep -n \"refactor_tachibana_replay\\\\|pane_crud_api\" /c/Users/sasai/Documents/flowsurface/docs/plan/*.md)",
       "Bash(find \"C:\\\\Users\\\\sasai\\\\Documents\\\\flowsurface\\\\src\" -name \"*.rs\" -exec grep -l \"ReplayConfig\" {} \\\\;)",
       "Bash(wc -l docs/tachibana_spec.md docs/plan/archive/*.md)",
-      "Bash(ls C:/tmp/e2e-*.sh)"
+      "Bash(ls C:/tmp/e2e-*.sh)",
+      "Bash(bash C:/tmp/e2e-tachibana-t2.sh)",
+      "Bash(\"C:/Users/sasai/Documents/flowsurface/target/release/flowsurface.exe\")",
+      "Bash(bash C:/tmp/e2e-tachibana-d1.sh)"
     ],
     "additionalDirectories": [
       "C:\\Users\\sasai\\Documents\\marimo\\.claude\\plans",

@@ -873,6 +873,113 @@ wait_set_ticker() {
 
 ---
 
+## Phase T2: fetch_market_prices mock + /api/auth/tachibana/status（2026-04-12 完了）
+
+### 背景
+
+Phase T1 スコープ外とされていた `fetch_market_prices` の mock 経路を追加。  
+合わせて、セッション有無を外部から確認する `/api/auth/tachibana/status` エンドポイントを本番ビルドにも追加した（Phase T3 の keyring テストでも使用）。
+
+### 新規 API エンドポイント
+
+| メソッド | パス | feature | 用途 |
+|---------|------|---------|------|
+| `GET` | `/api/auth/tachibana/status` | 本番ビルドにも含む | セッション有無確認 (`{"session":"present"\|"none"}`) |
+| `POST` | `/api/test/tachibana/inject-market-price` | e2e-mock のみ | `fetch_market_prices` mock データ登録 |
+
+### 実装概要
+
+| ファイル | 変更内容 |
+|---|---|
+| `exchange/src/adapter/tachibana.rs` | `e2e_mock` モジュールに `MOCK_MARKET_PRICES` + inject/get/clear 追加。`fetch_market_prices` 先頭に mock 分岐追加 |
+| `src/replay_api.rs` | `AuthCommand::TachibanaSessionStatus`・`ApiCommand::Auth`・`TestCommand::TachibanaInjectMarketPrice` 追加。ルート・ユニットテスト追加 |
+| `src/main.rs` | `handle_auth_api()` 追加。`handle_test_api` に `TachibanaInjectMarketPrice` ハンドラ追加 |
+
+### スコープ外判断
+
+- **EVENT I/F (FD/ST フレーム) mock**: E2E テストはリプレイモードで実行されるため EVENT I/F WebSocket は非稼働。フレームパーサーはユニットテストでカバー済み。mock 追加は不要と判断。
+
+### テスト結果（2026-04-12、実ログイン環境）
+
+| 種別 | 内容 | PASS | FAIL |
+|---|---|:-:|:-:|
+| Unit (no feature) | `cargo test --bin flowsurface` | 155 | 0 |
+| Unit (e2e-mock) | `cargo test --bin flowsurface --features e2e-mock` | 163 | 0 |
+| E2E T2 | auth/status + inject-market-price + D1 再生 (14 項目) | 14 | 0 |
+| E2E T1 回帰 | `C:/tmp/e2e-tachibana-d1.sh` | 18 | 0 |
+
+---
+
+## Phase T3: keyring 永続化 E2E（2026-04-12 完了）
+
+### 背景
+
+Phase T1 スコープ外とされていた keyring 永続化パス (`try_restore_session` → `validate_session` → `store_session`) の E2E 検証を追加。  
+e2e-mock ビルドでダミーセッション URL を keyring に書き込み、再起動後の自動復元を確認する。
+
+### 新規 API エンドポイント
+
+| メソッド | パス | feature | 用途 |
+|---------|------|---------|------|
+| `POST` | `/api/test/tachibana/persist-session` | e2e-mock のみ | ダミーセッションをメモリ + keyring 両方に保存 |
+| `POST` | `/api/test/tachibana/delete-persisted-session` | e2e-mock のみ | メモリ + keyring セッションを両方削除 |
+
+### 実装概要
+
+| ファイル | 変更内容 |
+|---|---|
+| `src/connector/auth.rs` | `persist_injected_session()` / `delete_all_sessions()` 追加（e2e-mock gate）。`try_restore_session` に e2e-mock バイパス追加（URL が `e2e-mock.invalid` の場合 `validate_session` をスキップ） |
+| `src/replay_api.rs` | `TestCommand::TachibanaInjectPersistSession` / `::TachibanaDeletePersistedSession` 追加。ルート・ユニットテスト追加 |
+| `src/main.rs` | 両コマンドのハンドラ追加 |
+
+### 検証フロー
+
+| テスト | 内容 | 結果 |
+|--------|------|------|
+| T3-1 | 実ログイン後 `status=present` | ✅ |
+| T3-2a | `inject-session` → `status=present` | ✅ |
+| T3-2b | メモリのみ inject → 再起動 → `status=none` | ✅ |
+| T3-3a | `persist-session ok=true` | ✅ |
+| T3-3b | 再起動 → keyring から `status=present` に自動復元 | ✅ |
+| T3-4a | `delete-persisted-session ok=true` | ✅ |
+| T3-4b | 再起動 → `status=none`（keyring 削除済み） | ✅ |
+| T3-5 | T1 回帰（inject-session + play） | ✅ |
+
+### テスト結果（2026-04-12）
+
+| 種別 | 内容 | PASS | FAIL |
+|---|---|:-:|:-:|
+| Unit (no feature) | `cargo test --bin flowsurface` | 155 | 0 |
+| Unit (e2e-mock) | `cargo test --bin flowsurface --features e2e-mock` | 163 | 0 |
+| E2E T3 | keyring 往復 + T1 回帰 (10 項目) | 10 | 0 |
+| E2E T1 回帰 | `C:/tmp/e2e-tachibana-d1.sh` | 18 | 0 |
+
+### 注意事項
+
+- T3 実行後は keyring がクリアされる。アプリ再起動時にログイン画面が表示されるため再ログインが必要。
+- `try_restore_session` の e2e-mock バイパスは URL に `e2e-mock.invalid` を含む場合のみ発動。本番セッション（実 URL）には影響しない。
+
+---
+
+## Phase T1〜T3 全体テスト結果サマリー（2026-04-12）
+
+| 種別 | スクリプト / 対象 | PASS | FAIL |
+|---|---|:-:|:-:|
+| Unit (feature OFF) | `cargo test --bin flowsurface` | **155** | **0** |
+| Unit (e2e-mock ON) | `cargo test --bin flowsurface --features e2e-mock` | **163** | **0** |
+| Unit (exchange) | `cargo test -p flowsurface-exchange --features e2e-mock` | 116 | 0 |
+| Build | `cargo build --release` (no feature) | ✅ | — |
+| Build | `cargo build --features e2e-mock --release` | ✅ | — |
+| E2E T1 | `C:/tmp/e2e-tachibana-d1.sh`（T-1〜T-6） | **18** | **0** |
+| E2E T (Phase T) | `C:/tmp/e2e-tachibana-mid-replay.sh`（T-A〜T-H） | **62** | **0** |
+| E2E T2 | auth/status + inject-market-price + D1 再生 | **14** | **0** |
+| E2E T3 | keyring 往復 + T1 回帰 | **10** | **0** |
+| E2E 回帰 | `C:/tmp/e2e-unified-step.sh` | 21 | 0 |
+| E2E 回帰 | `C:/tmp/e2e-pane-crud.sh` | 19 | 0 |
+| E2E 回帰 | `C:/tmp/e2e-mid-replay-crud.sh` | 28 | 0 |
+
+---
+
 ## 引継ぎプロンプト（次の AI へ）
 
 > **設計背景**: `docs/plan/replay_header.md` を先に読むこと。以下はその差分情報のみ記載する。
@@ -883,6 +990,8 @@ wait_set_ticker() {
   - スクリプト: `C:/tmp/e2e-tachibana-mid-replay.sh`
   - フィクスチャ: `C:/tmp/e2e-tachibana-mid-replay.json`、`C:/tmp/e2e-tachibana-mixed.json`
 - Phase T の実観測・既知制限を本ドキュメントに記録済み
+- **Phase T2**: `fetch_market_prices` mock + `GET /api/auth/tachibana/status` 実装・14 PASS
+- **Phase T3**: keyring 永続化 E2E（persist-session / delete-persisted-session / 再起動復元）実装・10 PASS
 
 ### 残課題
 
