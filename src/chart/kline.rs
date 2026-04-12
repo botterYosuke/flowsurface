@@ -171,6 +171,18 @@ pub(crate) struct ReplayKlineBuffer {
     pub(crate) cursor: usize,
 }
 
+impl ReplayKlineBuffer {
+    /// current_time より後の最初の kline 時刻を返す（休場日を自動スキップ）。
+    pub(crate) fn next_time_after(&self, current_time: u64) -> Option<u64> {
+        self.klines.iter().find(|k| k.time > current_time).map(|k| k.time)
+    }
+
+    /// current_time より前の最後の kline 時刻を返す（休場日を自動スキップ）。
+    pub(crate) fn prev_time_before(&self, current_time: u64) -> Option<u64> {
+        self.klines.iter().rev().find(|k| k.time < current_time).map(|k| k.time)
+    }
+}
+
 impl KlineChart {
     pub fn new(
         layout: ViewConfig,
@@ -333,6 +345,20 @@ impl KlineChart {
     /// リプレイモードを無効にする。
     pub fn disable_replay_mode(&mut self) {
         self.replay_kline_buffer = None;
+    }
+
+    /// リプレイバッファから current_time より後の最初の kline 時刻を返す。
+    pub fn replay_next_kline_time(&self, current_time: u64) -> Option<u64> {
+        self.replay_kline_buffer
+            .as_ref()
+            .and_then(|buf| buf.next_time_after(current_time))
+    }
+
+    /// リプレイバッファから current_time より前の最後の kline 時刻を返す。
+    pub fn replay_prev_kline_time(&self, current_time: u64) -> Option<u64> {
+        self.replay_kline_buffer
+            .as_ref()
+            .and_then(|buf| buf.prev_time_before(current_time))
     }
 
     /// リプレイ進行: current_time 以下の kline をバッファからチャートに挿入する。
@@ -2056,5 +2082,55 @@ mod tests {
         let b = buf.as_ref().unwrap();
         assert_eq!(b.klines.len(), 10, "all klines preserved");
         assert_eq!(b.cursor, 0, "cursor reset to 0");
+    }
+
+    // ── 離散ステップ: ReplayKlineBuffer の next/prev_time ───────────────
+
+    #[test]
+    fn next_time_after_skips_to_next_existing_kline() {
+        // 営業日: Mon=100, Tue=200, (Wed=休場), Thu=400, Fri=500
+        let klines = vec![
+            make_kline(100), make_kline(200), make_kline(400), make_kline(500),
+        ];
+        let buf = make_buffer(klines, 0);
+
+        assert_eq!(buf.next_time_after(100), Some(200));
+        assert_eq!(buf.next_time_after(200), Some(400), "休場日 300 をスキップ");
+        assert_eq!(buf.next_time_after(500), None, "終端は None");
+    }
+
+    #[test]
+    fn prev_time_before_skips_to_prev_existing_kline() {
+        let klines = vec![
+            make_kline(100), make_kline(200), make_kline(400), make_kline(500),
+        ];
+        let buf = make_buffer(klines, 0);
+
+        assert_eq!(buf.prev_time_before(500), Some(400));
+        assert_eq!(buf.prev_time_before(400), Some(200), "休場日 300 をスキップ");
+        assert_eq!(buf.prev_time_before(100), None, "始端は None");
+    }
+
+    #[test]
+    fn next_time_after_at_end_returns_none() {
+        let klines = vec![make_kline(100), make_kline(200)];
+        let buf = make_buffer(klines, 0);
+        assert_eq!(buf.next_time_after(200), None);
+    }
+
+    #[test]
+    fn prev_time_before_at_start_returns_none() {
+        let klines = vec![make_kline(100), make_kline(200)];
+        let buf = make_buffer(klines, 0);
+        assert_eq!(buf.prev_time_before(100), None);
+    }
+
+    #[test]
+    fn next_time_after_ignores_cursor_position() {
+        // cursor は表示済み位置。next/prev は cursor に依存せず全バッファから検索する。
+        let klines = vec![make_kline(100), make_kline(200), make_kline(300)];
+        let buf = make_buffer(klines, 3); // cursor 末尾
+        assert_eq!(buf.next_time_after(150), Some(200));
+        assert_eq!(buf.prev_time_before(250), Some(200));
     }
 }

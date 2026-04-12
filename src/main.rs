@@ -789,18 +789,29 @@ impl Flowsurface {
                             .unique;
 
                         // ペインの content をクリアし、kline ストリームを収集
-                        let dashboard = self.active_dashboard_mut();
-                        let kline_targets = dashboard.prepare_replay(main_window_id);
+                        let kline_targets;
+                        let trade_targets: Vec<_>;
+                        {
+                            let dashboard = self.active_dashboard_mut();
+                            kline_targets = dashboard.prepare_replay(main_window_id);
+                            trade_targets = dashboard
+                                .collect_trade_streams(main_window_id)
+                                .into_iter()
+                                .filter(|stream| {
+                                    let exchange = stream.ticker_info().exchange();
+                                    matches!(exchange.venue(), exchange::adapter::Venue::Binance)
+                                })
+                                .collect();
+                        }
 
-                        // trades ストリームも収集（Binance のみ）
-                        let trade_targets: Vec<_> = dashboard
-                            .collect_trade_streams(main_window_id)
-                            .into_iter()
-                            .filter(|stream| {
-                                let exchange = stream.ticker_info().exchange();
-                                matches!(exchange.venue(), exchange::adapter::Venue::Binance)
-                            })
-                            .collect();
+                        // D1 のみの場合は Paused で開始（日足の自動再生は UX として不自然）
+                        let all_d1 =
+                            self.active_dashboard().is_all_d1_klines(main_window_id);
+                        if all_d1
+                            && let Some(pb) = &mut self.replay.playback
+                        {
+                            pb.resume_status = replay::PlaybackStatus::Paused;
+                        }
 
                         // 各 kline ストリームに対して fetch_klines を発行
                         // リプレイ開始時点より前のローソク足も表示するため、
@@ -905,10 +916,30 @@ impl Flowsurface {
                         }
                     }
                     ReplayMessage::StepForward => {
-                        // 1分早送り: current_time を 60秒先にジャンプし、その区間の Trades を一括注入
+                        // D1 の場合は kline バッファから次の足に離散ステップ（休場日スキップ）
+                        // D1 以外は従来通り 1分（60秒）固定ステップ
+                        let main_window_id = self.main_window.id;
+                        let is_d1 = self.active_dashboard().is_all_d1_klines(main_window_id);
+
+                        // borrow checker 回避: immutable borrow で next_time を先に取得
+                        let next_kline_time = if is_d1 {
+                            let ct = self.replay.playback.as_ref().map(|pb| pb.current_time);
+                            ct.and_then(|ct| {
+                                self.active_dashboard()
+                                    .replay_next_kline_time(ct, main_window_id)
+                            })
+                        } else {
+                            None
+                        };
+
                         let collected = if let Some(pb) = &mut self.replay.playback {
-                            let step_ms = 60_000; // 1分
-                            let new_time = (pb.current_time + step_ms).min(pb.end_time);
+                            let new_time = if is_d1 {
+                                // next_kline_time は replay_kline_buffer 由来で [start, end] 内に収まる。
+                                // バッファ末尾であれば None（unwrap_or で current_time 維持）。
+                                next_kline_time.unwrap_or(pb.current_time)
+                            } else {
+                                (pb.current_time + 60_000).min(pb.end_time)
+                            };
                             pb.current_time = new_time;
 
                             let streams: Vec<_> = pb.trade_buffers.keys().copied().collect();
@@ -932,8 +963,6 @@ impl Flowsurface {
                         } else {
                             Vec::new()
                         };
-
-                        let main_window_id = self.main_window.id;
 
                         // kline バッファから new_time 以下のローソク足を即座にチャートに挿入
                         let current_time = self.replay.playback.as_ref().map(|pb| pb.current_time);
@@ -964,10 +993,29 @@ impl Flowsurface {
                     }
                     ReplayMessage::StepBackward => {
                         // 巻き戻し: バッファ保持版リビルド → kline 再挿入（フェッチ不要）
+                        // D1 の場合は kline バッファから前の足に離散ステップ（休場日スキップ）
+                        let main_window_id = self.main_window.id;
+                        let is_d1 = self.active_dashboard().is_all_d1_klines(main_window_id);
+
+                        // borrow checker 回避: immutable borrow で prev_time を先に取得
+                        let prev_kline_time = if is_d1 {
+                            let ct = self.replay.playback.as_ref().map(|pb| pb.current_time);
+                            ct.and_then(|ct| {
+                                self.active_dashboard()
+                                    .replay_prev_kline_time(ct, main_window_id)
+                            })
+                        } else {
+                            None
+                        };
+
                         if let Some(pb) = &mut self.replay.playback {
-                            let step_ms = 60_000u64;
-                            let new_time =
-                                pb.current_time.saturating_sub(step_ms).max(pb.start_time);
+                            let new_time = if is_d1 {
+                                // prev_kline_time は replay_kline_buffer 由来で [start, end] 内。
+                                // バッファ先頭より前であれば None（unwrap_or で current_time 維持）。
+                                prev_kline_time.unwrap_or(pb.current_time)
+                            } else {
+                                pb.current_time.saturating_sub(60_000).max(pb.start_time)
+                            };
                             pb.current_time = new_time;
 
                             // TradeBuffer のカーソルをリセットし、new_time まで早送り
@@ -979,8 +1027,6 @@ impl Flowsurface {
                             // StepBackward 後は Paused で止める（Loading 不要）
                             pb.status = replay::PlaybackStatus::Paused;
                         }
-
-                        let main_window_id = self.main_window.id;
 
                         // バッファ保持版リビルド
                         self.active_dashboard_mut()

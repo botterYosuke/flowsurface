@@ -404,7 +404,7 @@ pub fn kline_fetch_task(
                 // 立花証券: セッション経由で日足データを取得
                 let (issue_code, _) = ticker_info.ticker.to_full_symbol_and_type();
                 Task::perform(
-                    async move { fetch_tachibana_daily_klines(&issue_code).await },
+                    async move { fetch_tachibana_daily_klines(&issue_code, range).await },
                     move |result| match result {
                         Ok(klines) => {
                             let data = FetchedData::Klines {
@@ -462,7 +462,11 @@ pub fn kline_fetch_task(
 
 /// 立花証券の日足履歴を取得して Kline に変換する。
 /// セッションは `connector::auth` のグローバルストアから取得する。
-pub async fn fetch_tachibana_daily_klines(issue_code: &str) -> Result<Vec<Kline>, String> {
+/// `range` が指定された場合、取得後に `start <= kline.time <= end` でフィルタする。
+pub async fn fetch_tachibana_daily_klines(
+    issue_code: &str,
+    range: Option<(u64, u64)>,
+) -> Result<Vec<Kline>, String> {
     let session = super::auth::get_session()
         .ok_or_else(|| "セッションが存在しません。再ログインしてください。".to_string())?;
 
@@ -474,10 +478,14 @@ pub async fn fetch_tachibana_daily_klines(issue_code: &str) -> Result<Vec<Kline>
             format!("日足データ取得エラー: {e}")
         })?;
 
-    let klines: Vec<Kline> = records
+    let mut klines: Vec<Kline> = records
         .iter()
         .filter_map(|r| exchange::adapter::tachibana::daily_record_to_kline(r, true))
         .collect();
+
+    if let Some((start, end)) = range {
+        klines.retain(|k| k.time >= start && k.time <= end);
+    }
 
     log::info!(
         "Tachibana: fetched {} daily klines for {issue_code}",
@@ -528,7 +536,7 @@ mod tests {
     #[tokio::test]
     async fn fetch_tachibana_klines_returns_error_without_session() {
         super::super::auth::clear_session();
-        let result = fetch_tachibana_daily_klines("6501").await;
+        let result = fetch_tachibana_daily_klines("6501", None).await;
         let err = result.expect_err("セッション未設定時はエラーが返るべき");
         assert!(
             err.contains("セッション"),
@@ -538,6 +546,27 @@ mod tests {
 
     // ── Cycle D2: mockito で日足データを取得して Kline に変換 ────────────────
 
+    fn mock_session(server: &mockito::Server) -> TachibanaSession {
+        TachibanaSession {
+            url_request: String::new(),
+            url_master: String::new(),
+            url_price: format!("{}/price/", server.url()),
+            url_event: String::new(),
+            url_event_ws: String::new(),
+        }
+    }
+
+    const MOCK_DAILY_BODY: &str = r#"{
+        "aCLMMfdsMarketPriceHistory": [
+            {"sDate":"20240101","pDOP":"3200","pDHP":"3280","pDLP":"3150","pDPP":"3250","pDV":"1500000",
+             "pDOPxK":"3200","pDHPxK":"3280","pDLPxK":"3150","pDPPxK":"3250","pDVxK":"1500000"},
+            {"sDate":"20240102","pDOP":"3250","pDHP":"3300","pDLP":"3230","pDPP":"3280","pDV":"1200000",
+             "pDOPxK":"3250","pDHPxK":"3300","pDLPxK":"3230","pDPPxK":"3280","pDVxK":"1200000"},
+            {"sDate":"20240103","pDOP":"3280","pDHP":"3350","pDLP":"3260","pDPP":"3320","pDV":"1100000",
+             "pDOPxK":"3280","pDHPxK":"3350","pDLPxK":"3260","pDPPxK":"3320","pDVxK":"1100000"}
+        ]
+    }"#;
+
     #[tokio::test]
     async fn fetch_tachibana_klines_converts_daily_history_to_klines() {
         let mut server = mockito::Server::new_async().await;
@@ -545,41 +574,77 @@ mod tests {
             .mock("POST", mockito::Matcher::Any)
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(
-                r#"{
-                    "aCLMMfdsMarketPriceHistory": [
-                        {"sDate":"20240101","pDOP":"3200","pDHP":"3280","pDLP":"3150","pDPP":"3250","pDV":"1500000",
-                         "pDOPxK":"3200","pDHPxK":"3280","pDLPxK":"3150","pDPPxK":"3250","pDVxK":"1500000"},
-                        {"sDate":"20240102","pDOP":"3250","pDHP":"3300","pDLP":"3230","pDPP":"3280","pDV":"1200000",
-                         "pDOPxK":"3250","pDHPxK":"3300","pDLPxK":"3230","pDPPxK":"3280","pDVxK":"1200000"}
-                    ]
-                }"#,
-            )
+            .with_body(MOCK_DAILY_BODY)
             .create_async()
             .await;
 
-        // セッションにモックサーバーのURLを設定
-        let session = TachibanaSession {
-            url_request: String::new(),
-            url_master: String::new(),
-            url_price: format!("{}/price/", server.url()),
-            url_event: String::new(),
-            url_event_ws: String::new(),
-        };
-        super::super::auth::store_session(session);
+        super::super::auth::store_session(mock_session(&server));
 
-        let klines = fetch_tachibana_daily_klines("6501")
+        let klines = fetch_tachibana_daily_klines("6501", None)
             .await
             .expect("日足データの取得に成功するべき");
 
-        assert_eq!(klines.len(), 2, "2件の日足データが Kline に変換されるべき");
+        assert_eq!(klines.len(), 3, "3件の日足データが Kline に変換されるべき");
 
-        // 1件目の終値が 3250 であることを確認
         let close_f32 = klines[0].close.to_f32();
         assert!(
             (close_f32 - 3250.0).abs() < 1.0,
             "1件目の終値は 3250 であるべき: {close_f32}"
         );
+
+        super::super::auth::clear_session();
+    }
+
+    // ── Cycle D3: range 指定時に範囲内の kline のみ返す ────────────────────
+
+    #[tokio::test]
+    async fn fetch_tachibana_klines_filters_by_range() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("POST", mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(MOCK_DAILY_BODY)
+            .create_async()
+            .await;
+
+        super::super::auth::store_session(mock_session(&server));
+
+        // 20240101 JST = 1704034800000, 20240102 JST = 1704121200000
+        let start = 1704034800000u64;
+        let end = 1704121200000u64;
+
+        let klines = fetch_tachibana_daily_klines("6501", Some((start, end)))
+            .await
+            .expect("range 付き取得に成功するべき");
+
+        assert_eq!(klines.len(), 2, "range 内の 2 件のみ返るべき");
+        assert_eq!(klines[0].time, start);
+        assert_eq!(klines[1].time, end);
+
+        super::super::auth::clear_session();
+    }
+
+    // ── Cycle D4: range なし（None）は全履歴を返す ────────────────────────
+
+    #[tokio::test]
+    async fn fetch_tachibana_klines_returns_all_when_range_is_none() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("POST", mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(MOCK_DAILY_BODY)
+            .create_async()
+            .await;
+
+        super::super::auth::store_session(mock_session(&server));
+
+        let klines = fetch_tachibana_daily_klines("6501", None)
+            .await
+            .expect("None 指定時は全データ返却するべき");
+
+        assert_eq!(klines.len(), 3, "None の場合は全件（3件）返るべき");
 
         super::super::auth::clear_session();
     }

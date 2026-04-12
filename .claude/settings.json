@@ -69,7 +69,8 @@
     "additionalDirectories": [
       "C:\\Users\\sasai\\Documents\\marimo\\.claude\\plans",
       "\\tmp",
-      "c:\\Users\\sasai\\Documents\\flowsurface\\.claude\\skills"
+      "c:\\Users\\sasai\\Documents\\flowsurface\\.claude\\skills",
+      "c:\\Users\\sasai\\Documents\\flowsurface\\docs\\plan"
     ]
   }
 }

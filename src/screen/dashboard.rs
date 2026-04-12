@@ -1099,6 +1099,38 @@ impl Dashboard {
             });
     }
 
+    /// 全ペインのリプレイバッファから current_time より後の最も近い kline 時刻を返す。
+    pub fn replay_next_kline_time(
+        &self,
+        current_time: u64,
+        main_window: window::Id,
+    ) -> Option<u64> {
+        self.iter_all_panes(main_window)
+            .filter_map(|(_, _, state)| state.replay_next_kline_time(current_time))
+            .min()
+    }
+
+    /// 全ペインのリプレイバッファから current_time より前の最も近い kline 時刻を返す。
+    pub fn replay_prev_kline_time(
+        &self,
+        current_time: u64,
+        main_window: window::Id,
+    ) -> Option<u64> {
+        self.iter_all_panes(main_window)
+            .filter_map(|(_, _, state)| state.replay_prev_kline_time(current_time))
+            .max()
+    }
+
+    /// 全ペインの kline ストリームが D1 のみかを判定する。
+    /// kline ストリームが存在しない場合は false を返す。
+    pub fn is_all_d1_klines(&self, main_window: window::Id) -> bool {
+        let streams = self
+            .iter_all_panes(main_window)
+            .filter_map(|(_, _, state)| state.streams.ready_iter())
+            .flatten();
+        all_kline_streams_are_d1(streams)
+    }
+
     pub fn invalidate_all_panes(&mut self, main_window: window::Id) {
         self.iter_all_panes_mut(main_window)
             .for_each(|(_, _, state)| {
@@ -1370,5 +1402,88 @@ impl From<fetcher::FetchUpdate> for Message {
                 Message::ErrorOccurred(Some(pane_id), DashboardError::Fetch(error))
             }
         }
+    }
+}
+
+/// 与えられたストリーム群の kline ストリームが全て D1 かを判定する。
+/// kline ストリームが 1 件も存在しない場合は false を返す。
+fn all_kline_streams_are_d1<'a, I>(streams: I) -> bool
+where
+    I: IntoIterator<Item = &'a StreamKind>,
+{
+    let mut has_kline = false;
+    for stream in streams {
+        if let StreamKind::Kline { timeframe, .. } = stream {
+            has_kline = true;
+            if *timeframe != exchange::Timeframe::D1 {
+                return false;
+            }
+        }
+    }
+    has_kline
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use exchange::{Ticker, Timeframe, adapter::Exchange};
+
+    fn mock_ticker_info() -> TickerInfo {
+        TickerInfo::new(
+            Ticker::new("BTCUSDT", Exchange::BinanceSpot),
+            1.0,
+            1.0,
+            None,
+        )
+    }
+
+    fn kline_stream(tf: Timeframe) -> StreamKind {
+        StreamKind::Kline {
+            ticker_info: mock_ticker_info(),
+            timeframe: tf,
+        }
+    }
+
+    fn trade_stream() -> StreamKind {
+        StreamKind::Trades {
+            ticker_info: mock_ticker_info(),
+        }
+    }
+
+    #[test]
+    fn all_d1_returns_true_when_only_d1_klines() {
+        let streams = [kline_stream(Timeframe::D1)];
+        assert!(all_kline_streams_are_d1(&streams));
+    }
+
+    #[test]
+    fn all_d1_returns_true_with_multiple_d1_streams() {
+        let streams = [kline_stream(Timeframe::D1), kline_stream(Timeframe::D1)];
+        assert!(all_kline_streams_are_d1(&streams));
+    }
+
+    #[test]
+    fn all_d1_returns_false_when_any_non_d1_kline_present() {
+        let streams = [kline_stream(Timeframe::D1), kline_stream(Timeframe::M1)];
+        assert!(!all_kline_streams_are_d1(&streams));
+    }
+
+    #[test]
+    fn all_d1_returns_false_when_no_kline_streams() {
+        let streams = [trade_stream()];
+        assert!(!all_kline_streams_are_d1(&streams));
+    }
+
+    #[test]
+    fn all_d1_returns_false_for_empty_input() {
+        let streams: [StreamKind; 0] = [];
+        assert!(!all_kline_streams_are_d1(&streams));
+    }
+
+    #[test]
+    fn all_d1_ignores_trade_streams() {
+        // D1 kline + trade は「全 D1」と判定される（trade は kline 判定対象外）
+        let streams = [kline_stream(Timeframe::D1), trade_stream()];
+        assert!(all_kline_streams_are_d1(&streams));
     }
 }

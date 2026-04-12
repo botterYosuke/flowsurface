@@ -1860,6 +1860,24 @@ impl State {
         }
     }
 
+    /// リプレイバッファから current_time より後の最初の kline 時刻を返す。
+    pub fn replay_next_kline_time(&self, current_time: u64) -> Option<u64> {
+        if let Content::Kline { chart, .. } = &self.content {
+            chart.as_ref().and_then(|c| c.replay_next_kline_time(current_time))
+        } else {
+            None
+        }
+    }
+
+    /// リプレイバッファから current_time より前の最後の kline 時刻を返す。
+    pub fn replay_prev_kline_time(&self, current_time: u64) -> Option<u64> {
+        if let Content::Kline { chart, .. } = &self.content {
+            chart.as_ref().and_then(|c| c.replay_prev_kline_time(current_time))
+        } else {
+            None
+        }
+    }
+
     /// リプレイ進行: kline バッファから current_time 以下のデータを挿入する
     pub fn replay_advance_klines(&mut self, current_time: u64) {
         if let Content::Kline { chart, .. } = &mut self.content {
