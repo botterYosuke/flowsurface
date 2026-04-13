@@ -457,7 +457,8 @@ impl State {
                         ti,
                         &saved_kind,
                     );
-                    let _ = replay_mode; // data is now managed by EventStore, not chart buffers
+                    let mut new_chart = new_chart;
+                    new_chart.set_replay_mode(replay_mode);
                     *chart = Some(new_chart);
                     *layout = saved_layout;
                     *kind = saved_kind;
@@ -1841,15 +1842,18 @@ impl State {
     pub fn ingest_replay_klines(&mut self, klines: &[Kline]) {
         if let Content::Kline { chart, .. } = &mut self.content {
             if let Some(c) = chart {
+                c.set_replay_mode(true);
                 c.ingest_historical_klines(klines);
             }
         }
     }
 
     /// リプレイ seek 時: kline chart のデータをリセットする。
+    /// replay_mode=true を保持することで fetch_missing_data の live fetch を抑制する。
     pub fn reset_for_seek(&mut self) {
         if let Content::Kline { chart, .. } = &mut self.content {
             if let Some(c) = chart {
+                c.set_replay_mode(true);
                 c.reset_for_seek();
             }
         }

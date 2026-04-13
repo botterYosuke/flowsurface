@@ -160,6 +160,8 @@ pub struct KlineChart {
     request_handler: RequestHandler,
     study_configurator: study::Configurator<FootprintStudy>,
     last_tick: Instant,
+    /// リプレイ中は true。fetch_missing_data による live API fetch を抑制する。
+    replay_mode: bool,
 }
 
 impl KlineChart {
@@ -250,6 +252,7 @@ impl KlineChart {
                     kind: kind.clone(),
                     study_configurator: study::Configurator::new(),
                     last_tick: Instant::now(),
+                    replay_mode: false,
                 }
             }
             Basis::Tick(interval) => {
@@ -306,6 +309,7 @@ impl KlineChart {
                     kind: kind.clone(),
                     study_configurator: study::Configurator::new(),
                     last_tick: Instant::now(),
+                    replay_mode: false,
                 }
             }
         }
@@ -338,6 +342,11 @@ impl KlineChart {
     }
 
     fn fetch_missing_data(&mut self) -> Option<Action> {
+        // リプレイ中は live API fetch を行わない。
+        // EventStore から注入されたデータのみを表示し、live データの混入を防ぐ。
+        if self.replay_mode {
+            return None;
+        }
         match &self.data_source {
             PlotData::TimeBased(timeseries) => {
                 let timeframe_ms = timeseries.interval.to_milliseconds();
@@ -360,7 +369,6 @@ impl KlineChart {
                 // priority 1, initial klines for visible range
                 if visible_earliest < kline_earliest {
                     let range = FetchRange::Kline(prefetch_earliest, kline_earliest);
-
                     if let Some(action) = request_fetch(&mut self.request_handler, range) {
                         return Some(action);
                     }
@@ -432,6 +440,15 @@ impl KlineChart {
     pub fn reset_request_handler(&mut self) {
         self.request_handler = RequestHandler::default();
         self.fetching_trades = (false, None);
+    }
+
+    /// リプレイモードを設定する。true の場合 fetch_missing_data は live fetch を行わない。
+    pub fn set_replay_mode(&mut self, enabled: bool) {
+        self.replay_mode = enabled;
+        if enabled {
+            // replay 中は live fetch の状態をリセット（進行中のリクエストを無効化）
+            self.request_handler = RequestHandler::default();
+        }
     }
 
     pub fn raw_trades(&self) -> Vec<Trade> {
