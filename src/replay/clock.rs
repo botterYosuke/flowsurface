@@ -1,21 +1,26 @@
 use std::ops::Range;
 use std::time::{Duration, Instant};
 
-/// リプレイ再生中の単方向仮想時刻。
-/// wall elapsed × speed を積算するだけ。pause 時は `anchor_wall` を update せず holds。
-pub struct VirtualClock {
-    /// 仮想時刻 (Unix ms)。Play 開始時 = replay.start_ms、Pause 時は固定。
+/// 1x speed での wall delay (ms/bar)
+pub const BASE_STEP_DELAY_MS: u64 = 1_000;
+
+/// バーステップ離散クロック。
+/// `tick()` を各フレームで呼び、発火タイミングなら 1 ステップ進めて emit range を返す。
+pub struct StepClock {
+    /// 現在の仮想時刻 (Unix ms)。常にバー境界値。
     now_ms: u64,
-    /// 最後に now_ms を更新した実時刻。Pause 中は None。
-    anchor_wall: Option<Instant>,
-    /// 再生速度 (1.0 = 等倍)。
+    /// 次のステップを発火する wall 時刻。Playing 以外は None。
+    next_step_at: Option<Instant>,
+    /// 1 ステップで進める仮想時刻幅（min active timeframe ms）。
+    step_size_ms: u64,
+    /// 1 ステップあたりの wall delay 基準値 (1x speed, ms)。
+    base_step_delay_ms: u64,
+    /// 再生速度倍率。
     speed: f32,
     /// 再生状態。
     status: ClockStatus,
     /// リプレイ範囲 (Unix ms)
     range: Range<u64>,
-    /// D1 バーステップモード設定 (bar_interval_ms, wall_delay_ms)
-    bar_step_mode: Option<(u64, u64)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,16 +31,17 @@ pub enum ClockStatus {
     Waiting,
 }
 
-impl VirtualClock {
-    /// 新しい VirtualClock を作成する。初期状態は Paused。
-    pub fn new(start_ms: u64, end_ms: u64) -> Self {
+impl StepClock {
+    /// 新しい StepClock を作成する。初期状態は Paused。
+    pub fn new(start_ms: u64, end_ms: u64, step_size_ms: u64) -> Self {
         Self {
             now_ms: start_ms,
-            anchor_wall: None,
+            next_step_at: None,
+            step_size_ms,
+            base_step_delay_ms: BASE_STEP_DELAY_MS,
             speed: 1.0,
             status: ClockStatus::Paused,
             range: start_ms..end_ms,
-            bar_step_mode: None,
         }
     }
 
@@ -55,102 +61,119 @@ impl VirtualClock {
         self.range.clone()
     }
 
-    /// Playing に遷移する。anchor_wall を wall_now に設定。
+    /// Playing に遷移する。次のステップは wall_now + step_delay 後に発火する。
     pub fn play(&mut self, wall_now: Instant) {
         self.status = ClockStatus::Playing;
-        self.anchor_wall = Some(wall_now);
+        let delay_ms = self.step_delay_ms();
+        self.next_step_at = Some(wall_now + Duration::from_millis(delay_ms));
     }
 
     /// Paused に遷移する。
     pub fn pause(&mut self) {
         self.status = ClockStatus::Paused;
-        self.anchor_wall = None;
+        self.next_step_at = None;
     }
 
     /// now_ms を指定値に設定する（step forward/back で使用）。
-    /// 範囲を超えた値はクランプされる。
+    /// 範囲をクランプし、step_size_ms の倍数（range.start 基準）へ floor スナップする。
+    /// range.end 丁度へのクランプはスナップしない（終端状態として有効）。
     pub fn seek(&mut self, target_ms: u64) {
-        self.now_ms = target_ms.clamp(self.range.start, self.range.end);
+        let clamped = target_ms.clamp(self.range.start, self.range.end);
+        // range.end へのクランプはそのまま（終端境界はスナップ不要）
+        if clamped == self.range.end {
+            self.now_ms = clamped;
+            return;
+        }
+        let offset = clamped.saturating_sub(self.range.start);
+        let snapped_offset = if self.step_size_ms > 0 {
+            (offset / self.step_size_ms) * self.step_size_ms
+        } else {
+            offset
+        };
+        self.now_ms = self.range.start + snapped_offset;
     }
 
+    /// speed を更新する。0 以下は Pause と同義（speed は変更しない）。
     pub fn set_speed(&mut self, speed: f32) {
-        self.speed = speed.max(0.0);
+        if speed <= 0.0 {
+            self.pause();
+            return;
+        }
+        self.speed = speed;
+    }
+
+    /// active streams が変わったとき呼ぶ（最小 timeframe が変わる可能性）。
+    /// now_ms を新 step_size の倍数（range.start 基準）へ floor 再整列する。
+    pub fn set_step_size(&mut self, step_size_ms: u64) {
+        self.step_size_ms = step_size_ms;
+        let offset = self.now_ms.saturating_sub(self.range.start);
+        let aligned_offset = if step_size_ms > 0 {
+            (offset / step_size_ms) * step_size_ms
+        } else {
+            offset
+        };
+        self.now_ms = self.range.start + aligned_offset;
     }
 
     /// Waiting 状態に落とす（Store 未 load が検出されたとき）。
-    /// anchor_wall は None にリセット。冪等: 既に Waiting なら何もしない。
+    /// 冪等: 既に Waiting なら何もしない。
     pub fn set_waiting(&mut self) {
         if self.status != ClockStatus::Waiting {
             self.status = ClockStatus::Waiting;
-            self.anchor_wall = None;
+            self.next_step_at = None;
         }
     }
 
     /// Waiting → Playing へ復帰する。EventStore::ingest_loaded 完了時に呼ぶ。
-    /// 新しい wall_now を anchor にするため、待機中の実時間経過ぶんは仮想時間に反映されない。
+    /// 待機中の実時間経過分は仮想時間に反映されない。
     pub fn resume_from_waiting(&mut self, wall_now: Instant) {
         if self.status == ClockStatus::Waiting {
             self.status = ClockStatus::Playing;
-            self.anchor_wall = Some(wall_now);
+            let delay_ms = self.step_delay_ms();
+            self.next_step_at = Some(wall_now + Duration::from_millis(delay_ms));
         }
     }
 
-    /// D1 など大粒度 timeframe で使用する。
-    /// 1 バー進めたら次のバー時刻まで wall 1 秒待機。
-    #[cfg(test)]
-    pub fn enable_bar_step_mode(&mut self, bar_interval_ms: u64, wall_delay_ms: u64) {
-        self.bar_step_mode = Some((bar_interval_ms, wall_delay_ms));
-    }
-
-    /// 各フレームで呼ぶ。wall elapsed を仮想時刻に変換して now_ms を進め、
-    /// (prev_now, current_now) の範囲を返す。Playing 以外は空 range を返す。
-    pub fn advance(&mut self, wall_now: Instant) -> Range<u64> {
+    /// 各フレームで呼ぶ。
+    /// 発火タイミングなら 1 ステップ（または catch-up で複数ステップ）進めて emit range を返す。
+    /// Playing 以外、または発火タイミング未到達の場合は空 range を返す。
+    pub fn tick(&mut self, wall_now: Instant) -> Range<u64> {
         if self.status != ClockStatus::Playing {
             return self.now_ms..self.now_ms;
         }
-        let anchor = self.anchor_wall.expect("Playing without anchor");
 
-        if let Some((bar_interval_ms, wall_delay_ms)) = self.bar_step_mode {
-            return self.advance_bar_step(wall_now, anchor, bar_interval_ms, wall_delay_ms);
+        let mut next_step = self.next_step_at.expect("Playing without next_step_at");
+
+        if wall_now < next_step {
+            return self.now_ms..self.now_ms;
         }
 
-        let wall_elapsed = wall_now.duration_since(anchor);
-        let virtual_delta =
-            (wall_elapsed.as_secs_f64() * self.speed as f64 * 1000.0) as u64;
+        let step_delay_ms = self.step_delay_ms();
         let prev = self.now_ms;
-        let next = prev.saturating_add(virtual_delta).min(self.range.end);
-        self.now_ms = next;
-        self.anchor_wall = Some(wall_now);
-        if next >= self.range.end {
-            self.status = ClockStatus::Paused;
-            self.anchor_wall = None;
+
+        // Catch-up ループ: 溜まったステップをまとめて emit
+        while self.status == ClockStatus::Playing && wall_now >= next_step {
+            let new_now = self.now_ms.saturating_add(self.step_size_ms).min(self.range.end);
+            self.now_ms = new_now;
+            next_step = next_step + Duration::from_millis(step_delay_ms);
+
+            if self.now_ms >= self.range.end {
+                self.status = ClockStatus::Paused;
+                self.next_step_at = None;
+                break;
+            }
         }
-        prev..next
+
+        if self.status == ClockStatus::Playing {
+            self.next_step_at = Some(next_step);
+        }
+
+        prev..self.now_ms
     }
 
-    fn advance_bar_step(
-        &mut self,
-        wall_now: Instant,
-        anchor: Instant,
-        bar_interval_ms: u64,
-        wall_delay_ms: u64,
-    ) -> Range<u64> {
-        let prev = self.now_ms;
-        let wall_elapsed_ms = wall_now.duration_since(anchor).as_millis() as u64;
-        let bars_to_advance = wall_elapsed_ms / wall_delay_ms;
-        if bars_to_advance == 0 {
-            return prev..prev;
-        }
-        let current_bar = self.now_ms / bar_interval_ms;
-        let next_bar_time = (current_bar + bars_to_advance) * bar_interval_ms;
-        self.now_ms = next_bar_time.min(self.range.end);
-        // 消費した wall 時間ぶんだけ anchor を進める（余剰は次フレームに繰り越し）
-        self.anchor_wall = Some(anchor + Duration::from_millis(bars_to_advance * wall_delay_ms));
-        if self.now_ms >= self.range.end {
-            self.status = ClockStatus::Paused;
-            self.anchor_wall = None;
-        }
-        prev..self.now_ms
+    fn step_delay_ms(&self) -> u64 {
+        // speed > 0 保証は set_speed で担保
+        (self.base_step_delay_ms as f64 / self.speed as f64) as u64
     }
 }
 
@@ -158,120 +181,215 @@ impl VirtualClock {
 mod tests {
     use super::*;
 
-    fn make_instant_plus(base: Instant, ms: u64) -> Instant {
+    fn t(base: Instant, ms: u64) -> Instant {
         base + Duration::from_millis(ms)
     }
 
+    // ── 基本状態 ──────────────────────────────────────────────────────────────
+
     #[test]
     fn new_clock_starts_paused_at_start_time() {
-        let clock = VirtualClock::new(1_000_000, 2_000_000);
+        let clock = StepClock::new(1_000_000, 2_000_000, 60_000);
         assert_eq!(clock.now_ms(), 1_000_000);
         assert_eq!(clock.status(), ClockStatus::Paused);
     }
 
     #[test]
-    fn advance_while_paused_returns_empty_range() {
-        let mut clock = VirtualClock::new(1_000, 2_000);
+    fn tick_while_paused_returns_empty_range() {
+        let mut clock = StepClock::new(1_000, 2_000, 1_000);
         let now = Instant::now();
-        let range = clock.advance(now);
+        let range = clock.tick(now);
         assert!(range.is_empty(), "paused clock should return empty range");
         assert_eq!(clock.now_ms(), 1_000);
     }
 
     #[test]
     fn play_transitions_to_playing() {
-        let mut clock = VirtualClock::new(1_000, 2_000);
+        let mut clock = StepClock::new(1_000, 2_000, 1_000);
         let now = Instant::now();
         clock.play(now);
         assert_eq!(clock.status(), ClockStatus::Playing);
     }
 
+    // ── tick 発火タイミング ────────────────────────────────────────────────────
+
     #[test]
-    fn advance_while_playing_advances_now_ms() {
-        let mut clock = VirtualClock::new(0, 100_000);
+    fn tick_before_step_delay_returns_empty_range() {
+        let mut clock = StepClock::new(0, 100_000, 1_000);
         let base = Instant::now();
         clock.play(base);
 
-        // Simulate 1 second elapsed at 1x speed
-        let range = clock.advance(make_instant_plus(base, 1_000));
-        assert_eq!(range.start, 0);
-        assert_eq!(range.end, 1_000);
-        assert_eq!(clock.now_ms(), 1_000);
+        // 999ms 後はまだ発火しない（delay = 1000ms）
+        let range = clock.tick(t(base, 999));
+        assert!(range.is_empty());
+        assert_eq!(clock.now_ms(), 0);
     }
 
     #[test]
-    fn advance_respects_speed_multiplier() {
-        let mut clock = VirtualClock::new(0, 100_000);
+    fn tick_emits_one_step_at_step_delay() {
+        let mut clock = StepClock::new(0, 100_000, 60_000);
+        let base = Instant::now();
+        clock.play(base);
+
+        // 1000ms 後に発火（1x speed = 1000ms/step）
+        let range = clock.tick(t(base, 1_000));
+        assert!(!range.is_empty());
+        assert_eq!(range.start, 0);
+        assert_eq!(range.end, 60_000);
+        assert_eq!(clock.now_ms(), 60_000);
+    }
+
+    #[test]
+    fn tick_advances_step_size_per_fire() {
+        let mut clock = StepClock::new(0, 1_000_000, 60_000);
+        let base = Instant::now();
+        clock.play(base);
+
+        // 2 ステップ発火: 0 → 60_000 → 120_000
+        clock.tick(t(base, 1_000)); // 1st step
+        clock.tick(t(base, 2_000)); // 2nd step
+        assert_eq!(clock.now_ms(), 120_000);
+    }
+
+    // ── speed ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn set_speed_2x_halves_step_delay() {
+        let mut clock = StepClock::new(0, 1_000_000, 60_000);
         clock.set_speed(2.0);
         let base = Instant::now();
         clock.play(base);
 
-        // 1 second wall time at 2x speed → 2000ms virtual
-        let range = clock.advance(make_instant_plus(base, 1_000));
-        assert_eq!(range.end, 2_000);
+        // 2x speed → delay = 500ms/step
+        let range = clock.tick(t(base, 500));
+        assert!(!range.is_empty(), "2x speed should fire at 500ms");
+        assert_eq!(clock.now_ms(), 60_000);
     }
 
     #[test]
-    fn advance_clamps_to_range_end() {
-        let mut clock = VirtualClock::new(0, 500);
+    fn set_speed_zero_pauses_clock() {
+        let mut clock = StepClock::new(0, 100_000, 1_000);
+        let base = Instant::now();
+        clock.play(base);
+        clock.set_speed(0.0);
+        assert_eq!(clock.status(), ClockStatus::Paused);
+
+        // 以後 tick しても空 range
+        let range = clock.tick(t(base, 5_000));
+        assert!(range.is_empty());
+    }
+
+    // ── catch-up ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn multiple_ticks_catchup_in_one_frame() {
+        let mut clock = StepClock::new(0, 1_000_000, 1_000);
         let base = Instant::now();
         clock.play(base);
 
-        // 2 seconds wall time would normally give 2000ms, clamped to 500
-        let range = clock.advance(make_instant_plus(base, 2_000));
-        assert_eq!(clock.now_ms(), 500);
-        assert_eq!(range.end, 500);
+        // 3000ms wall → 3 ステップ catch-up: 0 → 1000 → 2000 → 3000
+        let range = clock.tick(t(base, 3_000));
+        assert_eq!(range.start, 0);
+        assert_eq!(range.end, 3_000);
+        assert_eq!(clock.now_ms(), 3_000);
     }
 
     #[test]
-    fn advance_past_end_sets_paused() {
-        let mut clock = VirtualClock::new(0, 500);
+    fn catchup_clamps_at_range_end_and_pauses() {
+        let mut clock = StepClock::new(0, 2_500, 1_000);
         let base = Instant::now();
         clock.play(base);
 
-        clock.advance(make_instant_plus(base, 2_000));
+        // 10s wall → range.end=2500 でクランプ
+        let range = clock.tick(t(base, 10_000));
+        // 0→1000→2000→2500 (min clamp)
+        assert_eq!(clock.now_ms(), 2_500);
+        assert_eq!(range.end, 2_500);
         assert_eq!(clock.status(), ClockStatus::Paused);
     }
 
+    // ── pause ─────────────────────────────────────────────────────────────────
+
     #[test]
-    fn pause_stops_advance() {
-        let mut clock = VirtualClock::new(0, 100_000);
+    fn pause_stops_tick() {
+        let mut clock = StepClock::new(0, 100_000, 1_000);
         let base = Instant::now();
         clock.play(base);
-        clock.advance(make_instant_plus(base, 500));
-        let after_500 = clock.now_ms();
+        clock.tick(t(base, 1_000)); // 1st step
+        let after_step = clock.now_ms();
         clock.pause();
 
-        // After pause, another advance should return empty range
-        let range = clock.advance(make_instant_plus(base, 1_500));
+        let range = clock.tick(t(base, 5_000));
         assert!(range.is_empty());
-        assert_eq!(clock.now_ms(), after_500);
+        assert_eq!(clock.now_ms(), after_step);
+    }
+
+    // ── seek ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn seek_snaps_to_bar_boundary_floor() {
+        let mut clock = StepClock::new(0, 1_000_000, 60_000);
+        clock.seek(90_000); // between 60_000 and 120_000 → snaps to 60_000
+        assert_eq!(clock.now_ms(), 60_000);
     }
 
     #[test]
-    fn seek_changes_now_ms() {
-        let mut clock = VirtualClock::new(0, 100_000);
-        clock.seek(50_000);
-        assert_eq!(clock.now_ms(), 50_000);
+    fn seek_snaps_exactly_on_boundary() {
+        let mut clock = StepClock::new(0, 1_000_000, 60_000);
+        clock.seek(120_000); // exactly on boundary → stays 120_000
+        assert_eq!(clock.now_ms(), 120_000);
     }
 
     #[test]
     fn seek_clamps_above_range_end() {
-        let mut clock = VirtualClock::new(0, 100_000);
+        let mut clock = StepClock::new(0, 100_000, 60_000);
         clock.seek(999_999);
         assert_eq!(clock.now_ms(), 100_000);
     }
 
     #[test]
     fn seek_clamps_below_range_start() {
-        let mut clock = VirtualClock::new(1_000, 100_000);
+        let mut clock = StepClock::new(60_000, 200_000, 60_000);
         clock.seek(0);
-        assert_eq!(clock.now_ms(), 1_000);
+        assert_eq!(clock.now_ms(), 60_000);
+    }
+
+    // ── set_step_size ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn set_step_size_floor_realigns_now_ms_on_expansion() {
+        // now_ms = 3m (180_000), step_size 拡大 1m→5m
+        // offset = 180_000, aligned = (180_000 / 300_000) * 300_000 = 0
+        let mut clock = StepClock::new(0, 1_000_000, 60_000);
+        let base = Instant::now();
+        clock.play(base);
+        clock.tick(t(base, 3_000)); // 3 steps: 0→60_000→120_000→180_000
+        assert_eq!(clock.now_ms(), 180_000);
+
+        clock.set_step_size(300_000); // 5m
+        // 180_000 は 300_000 の倍数でない → floor → 0
+        assert_eq!(clock.now_ms(), 0);
     }
 
     #[test]
+    fn set_step_size_shrink_direction_stays_aligned() {
+        // now_ms = 5m (300_000), step_size 縮小 5m→1m
+        let mut clock = StepClock::new(0, 1_000_000, 300_000);
+        let base = Instant::now();
+        clock.play(base);
+        clock.tick(t(base, 1_000)); // 1 step: 0→300_000
+        assert_eq!(clock.now_ms(), 300_000);
+
+        clock.set_step_size(60_000); // 1m
+        // 300_000 は 60_000 の倍数 → 変わらず
+        assert_eq!(clock.now_ms(), 300_000);
+    }
+
+    // ── waiting ───────────────────────────────────────────────────────────────
+
+    #[test]
     fn set_waiting_transitions_to_waiting() {
-        let mut clock = VirtualClock::new(0, 100_000);
+        let mut clock = StepClock::new(0, 100_000, 1_000);
         let base = Instant::now();
         clock.play(base);
         clock.set_waiting();
@@ -279,97 +397,57 @@ mod tests {
     }
 
     #[test]
-    fn advance_while_waiting_returns_empty_range() {
-        let mut clock = VirtualClock::new(0, 100_000);
+    fn tick_while_waiting_returns_empty_range() {
+        let mut clock = StepClock::new(0, 100_000, 1_000);
         let base = Instant::now();
         clock.play(base);
         clock.set_waiting();
 
-        let range = clock.advance(make_instant_plus(base, 1_000));
+        let range = clock.tick(t(base, 5_000));
         assert!(range.is_empty());
         assert_eq!(clock.now_ms(), 0);
     }
 
     #[test]
     fn set_waiting_is_idempotent() {
-        let mut clock = VirtualClock::new(0, 100_000);
+        let mut clock = StepClock::new(0, 100_000, 1_000);
         let base = Instant::now();
         clock.play(base);
         clock.set_waiting();
-        clock.set_waiting(); // second call should be no-op
+        clock.set_waiting(); // 2回目は no-op
         assert_eq!(clock.status(), ClockStatus::Waiting);
     }
 
     #[test]
     fn resume_from_waiting_transitions_to_playing() {
-        let mut clock = VirtualClock::new(0, 100_000);
+        let mut clock = StepClock::new(0, 100_000, 1_000);
         let base = Instant::now();
         clock.play(base);
         clock.set_waiting();
-
-        clock.resume_from_waiting(make_instant_plus(base, 2_000));
+        clock.resume_from_waiting(t(base, 2_000));
         assert_eq!(clock.status(), ClockStatus::Playing);
     }
 
     #[test]
-    fn resume_from_waiting_resets_anchor_so_wait_time_not_counted() {
-        let mut clock = VirtualClock::new(0, 100_000);
+    fn resume_from_waiting_resets_step_timer_so_wait_not_counted() {
+        let mut clock = StepClock::new(0, 100_000, 1_000);
         let base = Instant::now();
         clock.play(base);
+        clock.tick(t(base, 1_000)); // 1st step: now_ms = 1000
+        assert_eq!(clock.now_ms(), 1_000);
 
-        // Advance 500ms virtual
-        clock.advance(make_instant_plus(base, 500));
-        assert_eq!(clock.now_ms(), 500);
-
-        // Wait 5 seconds (Waiting state)
         clock.set_waiting();
 
-        // Resume at base+5500ms — the 5000ms wait should NOT be counted
-        let resume_wall = make_instant_plus(base, 5_500);
+        // 5000ms 待機後に resume
+        let resume_wall = t(base, 6_000);
         clock.resume_from_waiting(resume_wall);
 
-        // Only 100ms wall time passes after resume → 100ms virtual
-        let range = clock.advance(make_instant_plus(base, 5_600));
-        assert_eq!(range.start, 500);
-        assert_eq!(range.end, 600); // Only 100ms added, not 5100ms
-    }
-
-    #[test]
-    fn bar_step_mode_advances_by_bar_intervals() {
-        let mut clock = VirtualClock::new(0, 10 * 86_400_000);
-        let base = Instant::now();
-        clock.enable_bar_step_mode(86_400_000, 1_000); // D1 bars, 1 second delay
-        clock.play(base);
-
-        // 1 second wall elapsed → 1 D1 bar
-        let range = clock.advance(make_instant_plus(base, 1_000));
-        assert_eq!(range.start, 0);
-        assert_eq!(range.end, 86_400_000);
-        assert_eq!(clock.now_ms(), 86_400_000);
-    }
-
-    #[test]
-    fn bar_step_mode_no_advance_before_wall_delay() {
-        let mut clock = VirtualClock::new(0, 10 * 86_400_000);
-        let base = Instant::now();
-        clock.enable_bar_step_mode(86_400_000, 1_000);
-        clock.play(base);
-
-        // Only 500ms elapsed → not enough for 1 bar
-        let range = clock.advance(make_instant_plus(base, 500));
+        // resume から 1000ms 後に次のステップが発火するはず
+        let range = clock.tick(t(base, 6_999)); // 999ms 後 → まだ発火しない
         assert!(range.is_empty());
-        assert_eq!(clock.now_ms(), 0);
-    }
 
-    #[test]
-    fn bar_step_mode_catchup_multiple_bars() {
-        let mut clock = VirtualClock::new(0, 100 * 86_400_000);
-        let base = Instant::now();
-        clock.enable_bar_step_mode(86_400_000, 1_000);
-        clock.play(base);
-
-        // 3 seconds wall elapsed → 3 D1 bars catch-up
-        let range = clock.advance(make_instant_plus(base, 3_000));
-        assert_eq!(range.end, 3 * 86_400_000);
+        let range = clock.tick(t(base, 7_000)); // 1000ms 後 → 発火
+        assert!(!range.is_empty());
+        assert_eq!(clock.now_ms(), 2_000);
     }
 }

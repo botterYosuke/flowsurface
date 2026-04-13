@@ -4,7 +4,7 @@ use std::time::Instant;
 use exchange::{Kline, Trade};
 use exchange::adapter::StreamKind;
 
-use super::clock::{ClockStatus, VirtualClock};
+use super::clock::{ClockStatus, StepClock};
 use super::store::EventStore;
 
 /// `dispatch_tick` の戻り値。
@@ -29,9 +29,9 @@ impl DispatchResult {
 }
 
 /// 各 Tick で呼ばれ、clock を進めて emit すべきイベントを集めて返す。
-/// VirtualClock と EventStore の橋渡しをするステートレスなロジック。
+/// StepClock と EventStore の橋渡しをするステートレスなロジック。
 pub fn dispatch_tick(
-    clock: &mut VirtualClock,
+    clock: &mut StepClock,
     store: &EventStore,
     active_streams: &HashSet<StreamKind>,
     wall_now: Instant,
@@ -51,8 +51,8 @@ pub fn dispatch_tick(
         return DispatchResult::empty(clock.now_ms());
     }
 
-    // 2. clock を進める
-    let range = clock.advance(wall_now);
+    // 2. clock を 1 ステップ進める
+    let range = clock.tick(wall_now);
     if range.is_empty() {
         return DispatchResult::empty(clock.now_ms());
     }
@@ -84,7 +84,7 @@ mod tests {
     use exchange::unit::MinTicksize;
     use exchange::Volume;
 
-    fn make_instant_plus(base: Instant, ms: u64) -> Instant {
+    fn t(base: Instant, ms: u64) -> Instant {
         base + Duration::from_millis(ms)
     }
 
@@ -133,13 +133,13 @@ mod tests {
 
     #[test]
     fn dispatch_returns_empty_when_clock_is_paused() {
-        let mut clock = VirtualClock::new(0, 10_000);
-        // clock is Paused (default)
+        let mut clock = StepClock::new(0, 10_000, 1_000);
+        // clock は Paused (デフォルト)
         let store = EventStore::new();
         let streams = HashSet::new();
         let base = Instant::now();
 
-        let result = dispatch_tick(&mut clock, &store, &streams, make_instant_plus(base, 1_000));
+        let result = dispatch_tick(&mut clock, &store, &streams, t(base, 1_000));
         assert!(result.trade_events.is_empty());
         assert!(result.kline_events.is_empty());
         assert!(!result.reached_end);
@@ -147,7 +147,7 @@ mod tests {
 
     #[test]
     fn dispatch_sets_waiting_when_store_not_loaded() {
-        let mut clock = VirtualClock::new(0, 10_000);
+        let mut clock = StepClock::new(0, 10_000, 1_000);
         let base = Instant::now();
         clock.play(base);
 
@@ -156,56 +156,80 @@ mod tests {
         let mut streams = HashSet::new();
         streams.insert(stream);
 
-        dispatch_tick(&mut clock, &store, &streams, make_instant_plus(base, 1_000));
+        dispatch_tick(&mut clock, &store, &streams, t(base, 1_000));
         assert_eq!(clock.status(), ClockStatus::Waiting);
     }
 
     #[test]
-    fn dispatch_returns_events_in_range_when_store_loaded() {
+    fn dispatch_returns_one_trade_in_half_open_range_when_store_loaded() {
+        // 新モデル (step_size=1000, step_delay=1000):
+        // wall=1500ms → 1 step 発火 → range [0, 1000)
+        // trade at 500 → ✓ (included)
+        // trade at 1000 → ✗ (end 境界は半開区間で除外)
         let stream = trade_stream();
         let store = make_store_with_data(stream, 0..10_000);
-        let mut clock = VirtualClock::new(0, 10_000);
+        let mut clock = StepClock::new(0, 10_000, 1_000);
         let base = Instant::now();
         clock.play(base);
 
         let mut streams = HashSet::new();
         streams.insert(stream);
 
-        // Advance 1500ms — should get trades at 500ms and 1000ms
-        let result = dispatch_tick(&mut clock, &store, &streams, make_instant_plus(base, 1_500));
-        assert_eq!(result.current_time, 1_500);
+        let result = dispatch_tick(&mut clock, &store, &streams, t(base, 1_500));
+        assert_eq!(result.current_time, 1_000);
 
         let (_, trades) = result.trade_events.iter().find(|(s, _)| *s == stream).unwrap();
-        // trades at 500 and 1000 are within 0..1500
-        assert_eq!(trades.len(), 2);
+        assert_eq!(trades.len(), 1, "trade at 500 included; trade at 1000 excluded (half-open)");
+        assert_eq!(trades[0].time, 500);
+    }
+
+    #[test]
+    fn dispatch_catchup_two_steps_returns_events_from_entire_range() {
+        // 2000ms wall → 2 steps: range [0, 2000)
+        // trades at 500, 1000 → both included (2000 is exclusive end)
+        let stream = trade_stream();
+        let store = make_store_with_data(stream, 0..10_000);
+        let mut clock = StepClock::new(0, 10_000, 1_000);
+        let base = Instant::now();
+        clock.play(base);
+
+        let mut streams = HashSet::new();
+        streams.insert(stream);
+
+        let result = dispatch_tick(&mut clock, &store, &streams, t(base, 2_000));
+        assert_eq!(result.current_time, 2_000);
+
+        let (_, trades) = result.trade_events.iter().find(|(s, _)| *s == stream).unwrap();
+        assert_eq!(trades.len(), 2, "trades at 500 and 1000 both in [0, 2000)");
     }
 
     #[test]
     fn dispatch_sets_reached_end_when_range_end_reached() {
         let stream = trade_stream();
         let store = make_store_with_data(stream, 0..3_000);
-        let mut clock = VirtualClock::new(0, 3_000);
+        let mut clock = StepClock::new(0, 3_000, 1_000);
         let base = Instant::now();
         clock.play(base);
 
         let mut streams = HashSet::new();
         streams.insert(stream);
 
-        // 5 seconds wall → past end (3000ms)
-        let result = dispatch_tick(&mut clock, &store, &streams, make_instant_plus(base, 5_000));
+        // 5s wall → 3 steps → 0→1000→2000→3000 = range.end → Paused
+        let result = dispatch_tick(&mut clock, &store, &streams, t(base, 5_000));
         assert!(result.reached_end);
         assert_eq!(clock.status(), ClockStatus::Paused);
     }
 
     #[test]
     fn dispatch_empty_streams_just_advances_clock() {
-        let mut clock = VirtualClock::new(0, 10_000);
+        let mut clock = StepClock::new(0, 10_000, 1_000);
         let base = Instant::now();
         clock.play(base);
         let store = EventStore::new();
         let streams = HashSet::new(); // no streams
 
-        let result = dispatch_tick(&mut clock, &store, &streams, make_instant_plus(base, 1_000));
+        // 1 step fires at 1000ms: now_ms = 1000
+        let result = dispatch_tick(&mut clock, &store, &streams, t(base, 1_000));
         assert_eq!(result.current_time, 1_000);
         assert!(result.trade_events.is_empty());
         assert!(!result.reached_end);

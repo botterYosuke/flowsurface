@@ -164,6 +164,15 @@ async fn run_server(mut sender: mpsc::Sender<ApiMessage>) {
             }
         };
 
+        // スクリーンショット: iced app state 不要なため直接ここで処理
+        if method == "POST" && path == "/api/app/screenshot" {
+            let json = tokio::task::spawn_blocking(capture_screenshot)
+                .await
+                .unwrap_or_else(|e| format!(r#"{{"ok":false,"error":"task panic: {e}"}}"#));
+            let _ = write_response(&mut stream, 200, &json).await;
+            continue;
+        }
+
         let command = match route(&method, &path, &body) {
             Ok(cmd) => cmd,
             Err(RouteError::NotFound) => {
@@ -400,6 +409,29 @@ async fn write_response(
 
     stream.write_all(response.as_bytes()).await?;
     stream.flush().await
+}
+
+/// デスクトップ全体のスクリーンショットを C:/tmp/screenshot.png に保存する。
+/// spawn_blocking から呼ぶこと（sync API）。
+fn capture_screenshot() -> String {
+    const PATH: &str = "C:/tmp/screenshot.png";
+    if let Err(e) = std::fs::create_dir_all("C:/tmp") {
+        return format!(r#"{{"ok":false,"error":"mkdir failed: {e}"}}"#);
+    }
+    let screens = match screenshots::Screen::all() {
+        Ok(s) => s,
+        Err(e) => return format!(r#"{{"ok":false,"error":"screen enum: {e}"}}"#),
+    };
+    let Some(screen) = screens.into_iter().next() else {
+        return r#"{"ok":false,"error":"no screen found"}"#.to_string();
+    };
+    match screen.capture() {
+        Err(e) => format!(r#"{{"ok":false,"error":"capture: {e}"}}"#),
+        Ok(image) => match image.save(PATH) {
+            Ok(()) => format!(r#"{{"ok":true,"path":"{PATH}"}}"#),
+            Err(e) => format!(r#"{{"ok":false,"error":"save: {e}"}}"#),
+        },
+    }
 }
 
 #[cfg(test)]

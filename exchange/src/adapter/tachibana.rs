@@ -799,12 +799,23 @@ pub fn spawn_init_issue_master(session: TachibanaSession) {
 }
 
 /// キャッシュから Ticker → TickerInfo の HashMap を構築する。
+///
+/// ペイン設定は display_symbol なしで `TachibanaSpot:7203` と保存されるが、
+/// `master_record_to_ticker_info` は英語名付き Ticker をキーとして生成する。
+/// Ticker の Hash/Eq は display_bytes を含むため、両方のキーで引けるよう
+/// display なしのエントリも追加で挿入する。
 pub async fn cached_ticker_metadata() -> HashMap<Ticker, Option<TickerInfo>> {
     let mut out = HashMap::new();
     let cache = get_cached_issue_master().await;
     if let Some(records) = cache {
         for record in records.iter() {
             if let Some((ticker, info)) = master_record_to_ticker_info(record) {
+                // display なしキーも同じ TickerInfo で登録しておく。
+                // ペイン設定は display_symbol なしで保存されるため、こちらで
+                // stream resolution の resolver(&ticker) が正しくヒットする。
+                let ticker_no_display =
+                    Ticker::new(&record.issue_code, Exchange::Tachibana);
+                out.entry(ticker_no_display).or_insert(Some(info));
                 out.insert(ticker, Some(info));
             }
         }
@@ -1120,7 +1131,7 @@ pub fn connect_event_stream(
             let event_url = match get_event_http_url() {
                 Some(url) => url,
                 None => {
-                    log::warn!("Tachibana EVENT I/F URL not available, waiting...");
+                    log::warn!("[e2e-live] Tachibana EVENT I/F URL not available (no session), waiting 3s...");
                     tokio::time::sleep(Duration::from_secs(3)).await;
                     continue;
                 }
@@ -1129,7 +1140,8 @@ pub fn connect_event_stream(
             let (issue_code, _) = ticker_info.ticker.to_full_symbol_and_type();
             let params = build_event_params(&issue_code, "00");
             let url = format!("{}?{}", event_url, params);
-            log::info!("Tachibana EVENT I/F connecting: issue={}", issue_code);
+            log::info!("[e2e-live] Tachibana EVENT I/F connecting: issue={} url_domain={}", issue_code,
+                url.split('/').nth(2).unwrap_or("unknown"));
 
             let client = reqwest::Client::new();
             match client.get(&url).send().await {

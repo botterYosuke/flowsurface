@@ -10,8 +10,18 @@ use std::time::Instant;
 use exchange::Kline;
 use exchange::adapter::StreamKind;
 
-use clock::{ClockStatus, VirtualClock};
+use clock::{ClockStatus, StepClock};
 use store::{EventStore, LoadedData};
+
+/// kline streams のうち最小 timeframe を ms で返す。kline stream が 0 本なら 1m (60_000ms) を返す。
+pub fn min_timeframe_ms(active_streams: &HashSet<StreamKind>) -> u64 {
+    active_streams
+        .iter()
+        .filter_map(|s| s.as_kline_stream())
+        .map(|(_, tf)| tf.to_milliseconds())
+        .min()
+        .unwrap_or(clock::BASE_STEP_DELAY_MS * 60) // 1m fallback
+}
 
 // ── 公開 API ────────────────────────────────────────────────────────────────
 
@@ -55,8 +65,8 @@ pub struct ReplayState {
     pub mode: ReplayMode,
     /// リプレイ範囲の設定（UI入力）
     pub range_input: ReplayRangeInput,
-    /// 仮想時計。Play 開始後 Some になる。
-    pub clock: Option<VirtualClock>,
+    /// ステップ時計。Play 開始後 Some になる。
+    pub clock: Option<StepClock>,
     /// 履歴データストア。リプレイ開始時に bulk load される。
     pub event_store: EventStore,
     /// 現在アクティブなストリーム集合（dispatch_tick に渡す）。
@@ -181,8 +191,9 @@ impl ReplayState {
 
     /// リプレイを開始する（Play ボタン押下時）。
     /// clock を Waiting 状態で初期化し、load タスクが完了したら自動的に Playing に移行する。
-    pub fn start(&mut self, start_ms: u64, end_ms: u64) {
-        let mut clock = VirtualClock::new(start_ms, end_ms);
+    /// `step_size_ms`: active kline streams の最小 timeframe (ms)。`min_timeframe_ms()` で計算する。
+    pub fn start(&mut self, start_ms: u64, end_ms: u64, step_size_ms: u64) {
+        let mut clock = StepClock::new(start_ms, end_ms, step_size_ms);
         clock.set_waiting(); // データロードが完了するまで待機
         self.clock = Some(clock);
         self.event_store = EventStore::new();
@@ -391,13 +402,13 @@ mod tests {
         assert!(state.clock.is_none());
     }
 
-    // ── VirtualClock 経由の状態表現 ─────────────────────────────────────────
+    // ── StepClock 経由の状態表現 ─────────────────────────────────────────
 
     #[test]
     fn is_playing_returns_true_when_clock_is_playing() {
         let mut state = ReplayState::default();
         let base = Instant::now();
-        let mut clock = VirtualClock::new(0, 100_000);
+        let mut clock = StepClock::new(0, 100_000, 60_000);
         clock.play(base);
         state.clock = Some(clock);
         assert!(state.is_playing());
@@ -406,7 +417,7 @@ mod tests {
     #[test]
     fn is_paused_returns_true_when_clock_is_paused() {
         let mut state = ReplayState::default();
-        let mut clock = VirtualClock::new(0, 100_000);
+        let clock = StepClock::new(0, 100_000, 60_000);
         // clock starts Paused
         state.clock = Some(clock);
         assert!(state.is_paused());
@@ -416,7 +427,7 @@ mod tests {
     fn is_loading_returns_true_when_clock_is_waiting() {
         let mut state = ReplayState::default();
         let base = Instant::now();
-        let mut clock = VirtualClock::new(0, 100_000);
+        let mut clock = StepClock::new(0, 100_000, 60_000);
         clock.play(base);
         clock.set_waiting();
         state.clock = Some(clock);
@@ -433,9 +444,10 @@ mod tests {
     fn current_time_returns_clock_now_ms() {
         let mut state = ReplayState::default();
         let base = Instant::now();
-        let mut clock = VirtualClock::new(50_000, 100_000);
+        // step_size=1000, step_delay=1000ms → tick at +1000ms fires once → now_ms = 50_000+1000 = 51_000
+        let mut clock = StepClock::new(50_000, 100_000, 1_000);
         clock.play(base);
-        clock.advance(make_instant_plus(base, 1_000)); // advance 1s
+        clock.tick(make_instant_plus(base, 1_000));
         state.clock = Some(clock);
         assert_eq!(state.current_time(), 51_000);
     }
@@ -446,7 +458,7 @@ mod tests {
     fn cycle_speed_rotates_1x_2x_5x_10x_1x() {
         let mut state = ReplayState::default();
         let base = Instant::now();
-        let mut clock = VirtualClock::new(0, 100_000);
+        let mut clock = StepClock::new(0, 100_000, 60_000);
         clock.play(base);
         state.clock = Some(clock);
 
@@ -502,9 +514,10 @@ mod tests {
         let mut state = ReplayState::default();
         state.mode = ReplayMode::Replay;
         let base = Instant::now();
-        let mut clock = VirtualClock::new(1_000, 2_000);
+        // step_size=500, step_delay=1000ms → 3 ticks at +3000ms → 3 steps → 0+500+500+500=1500
+        let mut clock = StepClock::new(0, 5_000, 500);
         clock.play(base);
-        clock.advance(make_instant_plus(base, 500)); // now_ms = 1500
+        clock.tick(make_instant_plus(base, 3_000)); // 3 steps: now_ms = 1500
         state.clock = Some(clock);
 
         let status = state.to_status();
@@ -512,8 +525,8 @@ mod tests {
         assert_eq!(status.status.as_deref(), Some("Playing"));
         assert_eq!(status.current_time, Some(1_500));
         assert_eq!(status.speed.as_deref(), Some("1x"));
-        assert_eq!(status.start_time, Some(1_000));
-        assert_eq!(status.end_time, Some(2_000));
+        assert_eq!(status.start_time, Some(0));
+        assert_eq!(status.end_time, Some(5_000));
     }
 
     #[test]
@@ -521,7 +534,7 @@ mod tests {
         let mut state = ReplayState::default();
         state.mode = ReplayMode::Replay;
         let base = Instant::now();
-        let mut clock = VirtualClock::new(0, 1_000);
+        let mut clock = StepClock::new(0, 1_000, 60_000);
         clock.play(base);
         clock.set_waiting();
         state.clock = Some(clock);
@@ -534,7 +547,7 @@ mod tests {
     fn to_status_replay_paused() {
         let mut state = ReplayState::default();
         state.mode = ReplayMode::Replay;
-        let mut clock = VirtualClock::new(0, 1_000);
+        let clock = StepClock::new(0, 1_000, 60_000);
         // clock starts Paused by default
         state.clock = Some(clock);
 
@@ -577,9 +590,10 @@ mod tests {
         let mut state = ReplayState::default();
         state.mode = ReplayMode::Replay;
         let base = Instant::now();
-        let mut clock = VirtualClock::new(1_000, 2_000);
+        // step_size=500, 3 steps at +3000ms → now_ms=1500
+        let mut clock = StepClock::new(0, 5_000, 500);
         clock.play(base);
-        clock.advance(make_instant_plus(base, 500));
+        clock.tick(make_instant_plus(base, 3_000));
         state.clock = Some(clock);
         let json = serde_json::to_string(&state.to_status()).unwrap();
         assert!(json.contains(r#""mode":"Replay""#));
@@ -660,8 +674,7 @@ mod tests {
 
         // 2025-04-01 06:00:00 UTC = 1743487200000 ms
         let target_ms = 1_743_487_200_000u64;
-        let base = Instant::now();
-        let mut clock = VirtualClock::new(target_ms, target_ms + 3_600_000);
+        let clock = StepClock::new(target_ms, target_ms + 3_600_000, 60_000);
         state.clock = Some(clock);
 
         let result = format_current_time(&state, data::UserTimezone::Utc);

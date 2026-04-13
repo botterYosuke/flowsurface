@@ -2,16 +2,11 @@
 name: e2e
 description: "flowsurface 全機能の E2E テストスキル。HTTP API 経由でアプリを操作・検証し、不足 API があれば新規追加する。"
 allowed-tools: Read Grep Glob Bash Write Edit
-user-invocable: true
 ---
 
 # flowsurface E2E テスト
 
-## 概要
-
-flowsurface アプリを実際に起動し、HTTP API (`127.0.0.1:9876`) 経由で全機能を操作・検証する E2E テスト手法。
-
-### アーキテクチャ
+## アーキテクチャ
 
 ```
 テストスクリプト (curl + node)
@@ -23,12 +18,10 @@ iced アプリ (Message → update() → State 変更)
 API レスポンス (JSON)
 ```
 
-### 対象コード
-
 | レイヤー | ファイル | 役割 |
 |---------|---------|------|
 | API サーバー | `src/replay_api.rs` | HTTP → ReplayCommand 変換、ルーティング |
-| 状態管理 | `src/replay/` | VirtualClock・EventStore・dispatch_tick（R3 以降） |
+| 状態管理 | `src/replay/` | VirtualClock・EventStore・dispatch_tick |
 | アプリ本体 | `src/main.rs` | Message ハンドリング、全機能の update() |
 | 永続化 | `data/src/config/state.rs` | State / ReplayConfig の serialize/deserialize |
 | レイアウト | `data/src/layout/pane.rs` | ペイン構成・ストリーム設定 |
@@ -40,10 +33,11 @@ API レスポンス (JSON)
 - `curl`, `node` が使用可能
 - **`jq` は未インストールの可能性がある → `node -e` で代用する**
 - ポート 9876 が空いている（変更: `FLOWSURFACE_API_PORT=9877`）
+- `cargo build --release` を E2E 前に実行すること（テストは release バイナリを使用）
 
-## 実証済みヘルパー関数
+## 共通ヘルパー関数
 
-以下のヘルパーは全 E2E テストで共通利用する。
+**全 E2E テストスクリプトの先頭にそのまま貼る**:
 
 ```bash
 #!/bin/bash
@@ -88,38 +82,38 @@ stop_app() {
 
 ## テスト実行フロー
 
-### 1. saved-state.json の準備
-
 ```bash
-# バックアップ
+# 1. バックアップ & Fixture 配置
 cp "$DATA_DIR/saved-state.json" "$DATA_DIR/saved-state.json.bak"
-
-# テスト用テンプレートを配置（後述から選択）
 cp C:/tmp/test-fixture.json "$DATA_DIR/saved-state.json"
-```
 
-**注意**: Windows では `/tmp/` は使えない。`C:/tmp/` を使用すること。
+# 2. 起動
+start_app
 
-### 2. アプリ起動 & 起動待ち
+# 3. Live モード起動時はティッカー解決を待つ
+sleep 15  # ticker metadata fetch を待つ（Replay モード fixture を使う場合は不要）
 
-`start_app` ヘルパーを使用（上記参照）。
+# 4. API 操作 & 検証（scenarios.md のシナリオを参照）
 
-### 3. API 操作 & 検証（後述のシナリオ集を参照）
-
-### 4. クリーンアップ
-
-```bash
+# 5. クリーンアップ
 stop_app
 cp "$DATA_DIR/saved-state.json.bak" "$DATA_DIR/saved-state.json"
 ```
 
 ---
 
-## 重要な注意点（実証済み）
+## 重要な注意点（常に適用）
+
+### Live モード fixture を使うこと（リプレイ E2E）
+
+**Replay モードで saved-state.json を起動すると `ResolvedStream::Waiting` のため
+`prepare_replay()` が kline_targets を収集できず EventStore が空になる。**
+→ StepForward/StepBackward が機能しない。
+
+**正しいフロー**: fixture に `replay` フィールドを含めない（Live モード起動）→ 15s 待機 → Toggle + Play
 
 ### taskkill //f は保存をトリガーしない
 
-`taskkill //f` は強制終了のため `save_state_to_disk()` が呼ばれない。
 永続化テストでは **`POST /api/app/save` で明示的に保存してから** kill する:
 
 ```bash
@@ -130,669 +124,103 @@ stop_app
 ### Loading → Playing が一瞬で完了する場合がある
 
 `trade_fetch_enabled: false` かつフェッチ対象が少ない場合、Play レスポンス時点で既に Playing になる。
-テストでは **Loading と Playing の両方を許容** する:
+**両方を許容**すること:
 
 ```bash
-PLAY_ST=$(jqn "$PLAY_RESULT" "d.status")
-if [ "$PLAY_ST" = "Loading" ] || [ "$PLAY_ST" = "Playing" ]; then
-  pass "Play accepted"
-fi
+if [ "$PLAY_ST" = "Loading" ] || [ "$PLAY_ST" = "Playing" ]; then pass "Play accepted"; fi
 ```
-
-### リプレイ範囲に上限はない
-
-6時間制限は撤廃済み。`fetch_klines` は自動ページングで任意の範囲を取得する。
-ただしテストでは短い範囲（1-12h）が高速で推奨。
 
 ### テスト日時は必ず「過去」にすること
 
-**未来の日時を指定すると Binance API からデータが取得できず、EventStore が空になる。**
-その状態では `StepForward` が `next_time = None` を返し無効になるなど、テストが正しく動作しない。
+**未来の日時を指定すると Binance API からデータが取得できず EventStore が空になる。**
+→ `StepForward` が `next_time = None` を返し無効になる。
 
-- 常に **現在時刻より過去 24〜48h 以内** の範囲を使うこと
-- 現在の UTC 時刻を確認: `date -u +"%Y-%m-%d %H:%M"`
+常に **現在時刻より過去 24〜48h 以内** の範囲を使う。現在の UTC 時刻確認: `date -u +"%Y-%m-%d %H:%M"`
 
-### StepForward / StepBackward は kline 境界ジャンプ（固定 60s ではない）
+### StepForward / StepBackward は 60000ms 固定（StepClock）
 
-R3 以降、`step-forward` / `step-backward` は EventStore に格納された実際の kline タイムスタンプにジャンプする：
+Play→Pause 後に StepForward すれば 1回目から 60000ms になる（clock.now_ms はバー境界値のみ保持）。
+旧注記「初回は端数分で不定」は VirtualClock 連続モデル時代のもの。**現在は不適用。**
 
-- **初回 StepForward**: `current_time` から次の kline 境界まで（端数分）。差分は不定（例: +17304ms、+25477ms）
-- **2回目以降**: kline 間隔ちょうど（M1 なら +60000ms）
-- **StepBackward**: 前の kline 境界。M1 なら -60000ms
+### アプリがログイン画面で停止している場合
 
-検証では `T_AFTER > T_BEFORE` で十分。`== 60000` の厳密一致は初回で失敗するため使わないこと。
+API が応答しない・ログが出力されない場合、アプリがログイン画面（立花証券等）で待機中の可能性がある。
+
+```bash
+# スクリーンショットで確認
+curl -s -X POST "$API/app/screenshot"
+# → {"ok":true,"path":"C:/tmp/screenshot.png"} が返ったら Read ツールで画面を確認
+```
+
+立花証券など**ログイン画面を要するアダプタのペイン**が fixture に含まれていないか確認すること。
 
 ### Toggle→Live 時に range_input がリセットされる
 
-`POST /api/replay/toggle` で Live に切り替えると、`range_start` / `range_end` が空文字列にリセットされる。
-その状態で `POST /api/app/save` すると空のまま保存される。
-
-永続化テストでは **必ず Play 実行後（range_input が設定された状態）に保存**すること:
-
-```bash
-curl -s -X POST "$API/replay/play" -H "Content-Type: application/json" \
-  -d "{\"start\":\"$RS\",\"end\":\"$RE\"}" > /dev/null
-# Playing 待ち...
-curl -s -X POST "$API/app/save" > /dev/null
-stop_app
-```
+`POST /api/replay/toggle` で Live に切り替えると `range_start` / `range_end` が空文字列にリセットされる。
+永続化テストでは **必ず Play 実行後（range_input が設定された状態）に保存**すること。
 
 ### replay_buffer_* フィールドは削除済み（R3）
 
-R3 以降、`/api/pane/list` のレスポンスに以下のフィールドは**存在しない**:
-- `replay_buffer_ready`
-- `replay_buffer_cursor`
-- `replay_buffer_len`
-
-これらのフィールドへの参照をテストコードに書かないこと。存在チェストで「null」になっても正常。
+`/api/pane/list` のレスポンスに以下フィールドは**存在しない**:
+`replay_buffer_ready`, `replay_buffer_cursor`, `replay_buffer_len`
 
 ---
 
-## API エンドポイント一覧
-
-### リプレイ API
-
-| メソッド | パス | 用途 |
-|---------|------|------|
-| `GET` | `/api/replay/status` | 現在状態の JSON 取得 |
-| `POST` | `/api/replay/toggle` | Live↔Replay 切替 |
-| `POST` | `/api/replay/play` | 再生開始（body: `{"start":"...","end":"..."}` 必須） |
-| `POST` | `/api/replay/pause` | 一時停止 |
-| `POST` | `/api/replay/resume` | 再開 |
-| `POST` | `/api/replay/step-forward` | EventStore の次 kline 時刻へジャンプ（固定 60s ではない） |
-| `POST` | `/api/replay/step-backward` | EventStore の前 kline 時刻へジャンプ（固定 60s ではない） |
-| `POST` | `/api/replay/speed` | 速度サイクル（1x→2x→5x→10x→1x） |
-
-### アプリ API
-
-| メソッド | パス | 用途 |
-|---------|------|------|
-| `POST` | `/api/app/save` | 状態をディスクに保存（saved-state.json） |
-
-### ReplayStatus レスポンス形式
-
-```json
-// Live モード（playback なし）
-{"mode":"Live","range_start":"","range_end":""}
-
-// Replay モード（playback なし、復元直後）
-{"mode":"Replay","range_start":"2026-04-10 09:00","range_end":"2026-04-10 15:00"}
-
-// Replay モード（再生中）
-{
-  "mode":"Replay",
-  "status":"Playing",
-  "current_time":1775869740288,
-  "speed":"1x",
-  "start_time":1775869740000,
-  "end_time":1775912940000,
-  "range_start":"2026-04-11 01:09",
-  "range_end":"2026-04-11 13:09"
-}
-```
-
-**フィールド説明**:
-- `mode`: `"Live"` or `"Replay"`
-- `status`: `"Loading"` / `"Playing"` / `"Paused"` / null（playback なし時は省略）
-- `current_time`: 現在の仮想時刻 (Unix ms)。playback なし時は省略
-- `speed`: `"1x"` / `"2x"` / `"5x"` / `"10x"`。playback なし時は省略
-- `start_time` / `end_time`: パース済み範囲 (Unix ms)。playback なし時は省略
-- `range_start` / `range_end`: UI の範囲入力テキスト（常に存在）
-
-### 追加が必要な API（機能別）
-
-E2E テストで全機能をカバーするために追加するエンドポイント:
-
-#### アプリ状態 `/api/app/*`
-
-| メソッド | パス | Body | 用途 |
-|---------|------|------|------|
-| `GET` | `/api/app/status` | — | アプリ全体の状態（画面、テーマ、timezone 等） |
-| `POST` | `/api/app/theme` | `{"theme":"..."}` | テーマ切替 |
-| `POST` | `/api/app/timezone` | `{"timezone":"UTC"}` | タイムゾーン変更 |
-| `POST` | `/api/app/scale` | `{"factor":1.0}` | UI スケール変更 |
-| `POST` | `/api/app/trade-fetch` | `{"enabled":true}` | Trades 自動フェッチの ON/OFF |
-| `POST` | `/api/app/volume-unit` | `{"unit":"Base"}` | 出来高の表示単位（Base/Quote） |
-
-#### レイアウト `/api/layout/*`
-
-| メソッド | パス | Body | 用途 |
-|---------|------|------|------|
-| `GET` | `/api/layout/list` | — | レイアウト一覧 |
-| `GET` | `/api/layout/active` | — | アクティブレイアウトの詳細（ペイン構成含む） |
-| `POST` | `/api/layout/select` | `{"name":"..."}` | アクティブレイアウト切替 |
-| `POST` | `/api/layout/create` | `{"name":"..."}` | 新規レイアウト作成 |
-| `POST` | `/api/layout/delete` | `{"name":"..."}` | レイアウト削除 |
-| `POST` | `/api/layout/rename` | `{"from":"...","to":"..."}` | リネーム |
-
-#### ペイン操作 `/api/pane/*`
-
-| メソッド | パス | Body | 用途 |
-|---------|------|------|------|
-| `GET` | `/api/pane/list` | — | 現在のペイン一覧（種類・ティッカー・設定） |
-| `POST` | `/api/pane/add` | `{"type":"KlineChart","ticker":"BinanceLinear:BTCUSDT","timeframe":"M1"}` | ペイン追加 |
-| `POST` | `/api/pane/remove` | `{"id":"..."}` | ペイン削除 |
-| `POST` | `/api/pane/replace` | `{"id":"...","type":"...","ticker":"..."}` | ペイン差替え |
-| `POST` | `/api/pane/link-group` | `{"id":"...","group":"A"}` | リンクグループ変更 |
-
-#### 接続・データ `/api/connection/*`
-
-| メソッド | パス | Body | 用途 |
-|---------|------|------|------|
-| `GET` | `/api/connection/status` | — | WebSocket 接続状態（exchange ごと） |
-| `GET` | `/api/connection/streams` | — | アクティブなストリーム一覧 |
-
-#### 通知 `/api/notification/*`
-
-| メソッド | パス | Body | 用途 |
-|---------|------|------|------|
-| `GET` | `/api/notification/list` | — | 現在の通知一覧 |
-
----
-
-## API 追加の実装パターン
-
-現在の API は `src/replay_api.rs` でリプレイ + app/save。全機能対応のためにルーティングを拡張する。
-
-### Step 1: コマンド型を汎用化
-
-```rust
-// src/replay.rs の ReplayCommand を拡張するか、新しい ApiCommand enum を作成
-pub enum ReplayCommand {
-    // 既存リプレイ
-    GetStatus,
-    Toggle,
-    Play { start: String, end: String },
-    Pause,
-    Resume,
-    StepForward,
-    StepBackward,
-    CycleSpeed,
-    // アプリ
-    SaveState,
-    // ... 新規コマンドを追加
-}
-```
-
-### Step 2: route() を拡張
-
-```rust
-fn route(method: &str, path: &str, body: &str) -> Result<ReplayCommand, RouteError> {
-    match (method, path) {
-        // 既存
-        ("GET",  "/api/replay/status")  => Ok(ReplayCommand::GetStatus),
-        ("POST", "/api/replay/toggle")  => Ok(ReplayCommand::Toggle),
-        // ...
-        ("POST", "/api/app/save")       => Ok(ReplayCommand::SaveState),
-        // 新規を追加
-        _ => Err(RouteError::NotFound),
-    }
-}
-```
-
-### Step 3: main.rs でハンドリング
-
-`Message::ReplayApi` のマッチアームに新規コマンドのケースを追加。
-
-### Step 4: ユニットテスト
-
-`route()` のテストは `#[cfg(test)]` 内に追加（既存パターンを踏襲）。
-
----
-
-## 実証済みテストシナリオ集
-
-### カテゴリ 1: リプレイ基本ライフサイクル（20項目、全PASS確認済み）
-
-```bash
-# Step 1: 起動・復元確認
-STATUS=$(curl -s "$API/replay/status")
-MODE=$(jqn "$STATUS" "d.mode")         # → "Replay"
-PSTATUS=$(jqn "$STATUS" "d.status")    # → "null" (playback なし)
-RS=$(jqn "$STATUS" "d.range_start")    # → 保存された日時
-RE=$(jqn "$STATUS" "d.range_end")      # → 保存された日時
-
-# Step 2: Play
-PLAY_RESULT=$(curl -s -X POST "$API/replay/play" \
-  -H "Content-Type: application/json" \
-  -d "{\"start\":\"$RS\",\"end\":\"$RE\"}")
-PLAY_ST=$(jqn "$PLAY_RESULT" "d.status")  # → "Loading" or "Playing"
-
-# Step 3: Loading → Playing 遷移待ち
-for i in $(seq 1 120); do
-  ST=$(jqn "$(curl -s "$API/replay/status")" "d.status")
-  [ "$ST" = "Playing" ] && break
-  sleep 1
-done
-
-# Step 4: 再生中の検証
-CT=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
-sleep 2
-CT2=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
-# CT2 > CT なら時間が進んでいる
-
-# Step 5: Pause
-curl -s -X POST "$API/replay/pause" > /dev/null
-P1=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
-sleep 2
-P2=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
-# P1 == P2 なら固定されている
-
-# Step 6: Resume
-curl -s -X POST "$API/replay/resume" > /dev/null
-sleep 2
-R1=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
-# R1 > P2 なら再開している
-
-# Step 7: Speed サイクル
-for expected in "2x" "5x" "10x" "1x"; do
-  SPEED=$(jqn "$(curl -s -X POST "$API/replay/speed")" "d.speed")
-  # SPEED == expected
-done
-
-# Step 8: Step forward/backward (pause 中)
-curl -s -X POST "$API/replay/pause" > /dev/null
-T_BEFORE=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
-curl -s -X POST "$API/replay/step-forward" > /dev/null
-T_AFTER=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
-# T_AFTER > T_BEFORE であることを確認（差分は不定：初回は端数分、2回目以降は +60000ms）
-# 厳密に == 60000 で検証するなら 2 回目以降に実施すること
-
-curl -s -X POST "$API/replay/step-backward" > /dev/null
-T_BACK=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
-# T_BACK < T_AFTER（前の kline 境界に戻る）
-
-# Step 9: Toggle back to Live
-TOGGLE=$(curl -s -X POST "$API/replay/toggle")
-# mode == "Live", status == null
-```
-
-### カテゴリ 2: 永続化テスト（11項目、全PASS確認済み）
-
-```bash
-# Test 1: replay 付きテンプレートで起動
-# → mode=="Replay", status==null, range_start/range_end 復元
-
-# Test 2: replay フィールドなしで起動（後方互換）
-# → mode=="Live", range_start=="", range_end==""
-
-# Test 3: 保存→再起動 往復テスト
-# → toggle to Replay → POST /api/app/save → kill → restart → mode still Replay
-# → toggle to Live → POST /api/app/save → kill → check saved-state.json replay.mode=="live"
-```
-
-### カテゴリ 3: エラーケース
-
-```bash
-# 404: 存在しないパス
-curl -s -o /dev/null -w "%{http_code}" "$API/nonexistent"
-# → 404
-
-# 400: 不正 JSON
-curl -s -o /dev/null -w "%{http_code}" -X POST "$API/replay/play" \
-  -H "Content-Type: application/json" -d 'not json'
-# → 400
-
-# 400: 必須フィールド欠損
-curl -s -o /dev/null -w "%{http_code}" -X POST "$API/replay/play" \
-  -H "Content-Type: application/json" -d '{"start":"2026-04-10 09:00"}'
-# → 400
-
-# 404: メソッド不一致 (GET on POST endpoint)
-curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:9876/api/replay/toggle"
-# → 404
-```
-
----
-
-## テスト用テンプレート (saved-state.json)
-
-### 最小構成（KlineChart 1枚）
-
-フェッチが速く、基本動作テストに最適:
-
-```json
-{
-  "layout_manager": {
-    "layouts": [{
-      "name": "E2E-Test",
-      "dashboard": {
-        "pane": {
-          "KlineChart": {
-            "layout": { "splits": [0.78], "autoscale": "FitToVisible" },
-            "kind": "Candles",
-            "stream_type": [{ "Kline": { "ticker": "BinanceLinear:BTCUSDT", "timeframe": "M1" } }],
-            "settings": { "tick_multiply": null, "visual_config": null, "selected_basis": { "Time": "M1" } },
-            "indicators": ["Volume"],
-            "link_group": "A"
-          }
-        },
-        "popout": []
-      }
-    }],
-    "active_layout": "E2E-Test"
-  },
-  "timezone": "UTC",
-  "trade_fetch_enabled": false,
-  "size_in_quote_ccy": "Base"
-}
-```
-
-### 最小構成 + リプレイ復元テスト
-
-```json
-{
-  "layout_manager": {
-    "layouts": [{
-      "name": "E2E-Test",
-      "dashboard": {
-        "pane": {
-          "KlineChart": {
-            "layout": { "splits": [0.78], "autoscale": "FitToVisible" },
-            "kind": "Candles",
-            "stream_type": [{ "Kline": { "ticker": "BinanceLinear:BTCUSDT", "timeframe": "M1" } }],
-            "settings": { "tick_multiply": null, "visual_config": null, "selected_basis": { "Time": "M1" } },
-            "indicators": ["Volume"],
-            "link_group": "A"
-          }
-        },
-        "popout": []
-      }
-    }],
-    "active_layout": "E2E-Test"
-  },
-  "timezone": "UTC",
-  "trade_fetch_enabled": false,
-  "size_in_quote_ccy": "Base",
-  "replay": {
-    "mode": "replay",
-    "range_start": "2026-04-10 09:00",
-    "range_end": "2026-04-10 15:00"
-  }
-}
-```
-
-### マルチペイン構成（KlineChart + TimeAndSales + Ladder）
-
-複数ペインの連動・ストリーム接続テスト用:
-
-```json
-{
-  "layout_manager": {
-    "layouts": [{
-      "name": "E2E-MultiPane",
-      "dashboard": {
-        "pane": {
-          "Split": {
-            "axis": "Vertical", "ratio": 0.5,
-            "a": {
-              "KlineChart": {
-                "layout": { "splits": [0.78], "autoscale": "FitToVisible" },
-                "kind": "Candles",
-                "stream_type": [{ "Kline": { "ticker": "BinanceLinear:BTCUSDT", "timeframe": "M1" } }],
-                "settings": { "tick_multiply": null, "visual_config": null, "selected_basis": { "Time": "M1" } },
-                "indicators": ["Volume"],
-                "link_group": "A"
-              }
-            },
-            "b": {
-              "Split": {
-                "axis": "Horizontal", "ratio": 0.5,
-                "a": {
-                  "TimeAndSales": {
-                    "stream_type": [{ "Trades": { "ticker": "BinanceLinear:BTCUSDT" } }],
-                    "settings": { "tick_multiply": null, "visual_config": null, "selected_basis": { "Time": "MS100" } },
-                    "link_group": "A"
-                  }
-                },
-                "b": {
-                  "Ladder": {
-                    "stream_type": [
-                      { "Depth": { "ticker": "BinanceLinear:BTCUSDT", "depth_aggr": "Client", "push_freq": "ServerDefault" } },
-                      { "Trades": { "ticker": "BinanceLinear:BTCUSDT" } }
-                    ],
-                    "settings": { "tick_multiply": 5, "visual_config": null, "selected_basis": { "Time": "MS100" } },
-                    "link_group": "A"
-                  }
-                }
-              }
-            }
-          }
-        },
-        "popout": []
-      }
-    }],
-    "active_layout": "E2E-MultiPane"
-  },
-  "timezone": "UTC",
-  "trade_fetch_enabled": false,
-  "size_in_quote_ccy": "Base"
-}
-```
-
-### マルチレイアウト構成（レイアウト管理テスト用）
-
-```json
-{
-  "layout_manager": {
-    "layouts": [
-      {
-        "name": "Layout-A",
-        "dashboard": {
-          "pane": {
-            "KlineChart": {
-              "layout": { "splits": [0.78], "autoscale": "FitToVisible" },
-              "kind": "Candles",
-              "stream_type": [{ "Kline": { "ticker": "BinanceLinear:BTCUSDT", "timeframe": "M1" } }],
-              "settings": { "tick_multiply": null, "visual_config": null, "selected_basis": { "Time": "M1" } },
-              "indicators": ["Volume"],
-              "link_group": "A"
-            }
-          },
-          "popout": []
-        }
-      },
-      {
-        "name": "Layout-B",
-        "dashboard": {
-          "pane": {
-            "KlineChart": {
-              "layout": { "splits": [0.78], "autoscale": "FitToVisible" },
-              "kind": "Candles",
-              "stream_type": [{ "Kline": { "ticker": "BinanceLinear:ETHUSDT", "timeframe": "M5" } }],
-              "settings": { "tick_multiply": null, "visual_config": null, "selected_basis": { "Time": "M5" } },
-              "indicators": ["Volume"],
-              "link_group": "A"
-            }
-          },
-          "popout": []
-        }
-      }
-    ],
-    "active_layout": "Layout-A"
-  },
-  "timezone": "UTC",
-  "trade_fetch_enabled": false,
-  "size_in_quote_ccy": "Base"
-}
-```
-
----
-
-## テストデータの選び方
-
-| 項目 | 推奨値 | 理由 |
-|------|--------|------|
-| ティッカー | `BinanceLinear:BTCUSDT` | データ豊富。`fetch_trades_batched()` は Binance のみ対応 |
-| タイムフレーム | `M1` | 本数が多いが fetch_klines は自動ページングで取得 |
-| `timezone` | `"UTC"` | API の unix ms との照合が容易 |
-| `trade_fetch_enabled` | `false` | ライブ trades フェッチを止めてノイズ削減 |
-| ペイン数 | 最小限 | フェッチ対象減でテスト高速化 |
-| リプレイ日時 | 過去 24-48h 以内 | Binance API からデータ取得可能な範囲 |
-| リプレイ範囲 | テスト目的による | 短い(1-3h)ほど高速。制限なし |
-
----
-
-## API 追加の判断基準
-
-### 追加する場合
-
-テストで以下を検証したいが API がないとき:
-
-| カテゴリ | 検証したいこと | 追加する API |
-|---------|--------------|-------------|
-| リプレイ | 指定時刻へのジャンプ | `POST /api/replay/seek {"time": <unix_ms>}` |
-| リプレイ | 再生の完全停止 | `POST /api/replay/stop` |
-| アプリ設定 | テーマ/TZ/スケール変更 | `/api/app/*` 系 |
-| レイアウト | CRUD・切替 | `/api/layout/*` 系 |
-| ペイン | 一覧・追加・削除・差替え | `/api/pane/*` 系 |
-| 接続 | WebSocket 状態確認 | `/api/connection/*` 系 |
-
-### 追加しない場合
-
-- GUI 描画の検証（スクリーンショット回帰テストの領域）
-- WebSocket ストリームの直接操作（内部実装の詳細）
-- Exchange アダプターの直接テスト（統合テストで別途実施）
-- ログイン/認証（立花証券のセッション管理は手動テスト or モック）
-
-### 実装の参照パターン
-
-既存の `src/replay_api.rs` を拡張する形で追加:
-
-1. コマンド enum にバリアント追加
-2. `route()` にパスマッチ追加
-3. `main.rs` の `Message::ReplayApi` ハンドラにケース追加
-4. `route()` のユニットテストを `#[cfg(test)]` に追加
-
----
-
-## 検証の指針
+## 検証チートシート
 
 | 検証対象 | 方法 | 注意 |
 |---------|------|------|
-| モード遷移 | `jqn "$STATUS" "d.mode"` で厳密一致 | "Live" or "Replay" |
-| current_time 前進 | 2回取得して差分 > 0 | 再生中は厳密一致NG |
-| step-forward | pause 後に step → `T_AFTER > T_BEFORE` で確認 | 初回は端数分のため `== 60000` 厳密一致は不可。2回目以降は +60000ms（M1） |
+| モード遷移 | `jqn "$STATUS" "d.mode"` | "Live" or "Replay" |
+| current_time 前進 | 2回取得して差分 > 0 | BigInt 比較推奨 |
+| step-forward | pause 後に step → `T_AFTER > T_BEFORE` | Play→Pause後1回目から 60000ms |
 | speed | cycle 後に期待値一致 | "1x","2x","5x","10x" の順 |
 | Loading→Playing | ポーリング（最大120秒） | 即 Playing になる場合あり |
 | HTTP ステータス | `-o /dev/null -w "%{http_code}"` | 200/400/404 |
 | 永続化復元 | テンプレート配置→起動→status 確認 | playback は常に null |
 | 永続化保存 | `POST /api/app/save` → kill → JSON 確認 | taskkill だけでは保存されない |
-| range_start/end | `jqn "$STATUS" "d.range_start"` | 常に存在するフィールド |
-| レイアウト CRUD | 作成→一覧確認→削除→一覧確認 | 名前の一意性 |
-| 設定変更 | POST→GET で反映確認 | 再起動後の永続化も確認 |
-
-### カテゴリ 4: マルチペイン・リプレイ回帰テスト（7項目、全PASS確認済み 2026-04-12）
-
-**背景**: kline/trades 分離修正（trades を `Task::sip` でバックグラウンド実行）の回帰テスト。
-単一ペイン構成では trades フェッチの遅延が顕在化しないため、マルチペイン + 長時間レンジで検証する。
-
-**テンプレート**: マルチペイン構成（BTCUSDT KlineChart + ETHUSDT KlineChart + BTCUSDT TimeAndSales）
-
-```json
-{
-  "layout_manager": {
-    "layouts": [{
-      "name": "E2E-MultiPane-Replay",
-      "dashboard": {
-        "pane": {
-          "Split": {
-            "axis": "Vertical", "ratio": 0.33,
-            "a": {
-              "KlineChart": {
-                "layout": { "splits": [0.78], "autoscale": "FitToVisible" },
-                "kind": "Candles",
-                "stream_type": [{ "Kline": { "ticker": "BinanceLinear:BTCUSDT", "timeframe": "M1" } }],
-                "settings": { "tick_multiply": null, "visual_config": null, "selected_basis": { "Time": "M1" } },
-                "indicators": ["Volume"],
-                "link_group": "A"
-              }
-            },
-            "b": {
-              "Split": {
-                "axis": "Vertical", "ratio": 0.5,
-                "a": {
-                  "KlineChart": {
-                    "layout": { "splits": [0.78], "autoscale": "FitToVisible" },
-                    "kind": "Candles",
-                    "stream_type": [{ "Kline": { "ticker": "BinanceLinear:ETHUSDT", "timeframe": "M1" } }],
-                    "settings": { "tick_multiply": null, "visual_config": null, "selected_basis": { "Time": "M1" } },
-                    "indicators": ["Volume"],
-                    "link_group": "B"
-                  }
-                },
-                "b": {
-                  "TimeAndSales": {
-                    "stream_type": [{ "Trades": { "ticker": "BinanceLinear:BTCUSDT" } }],
-                    "settings": { "tick_multiply": null, "visual_config": null, "selected_basis": { "Time": "MS100" } },
-                    "link_group": "A"
-                  }
-                }
-              }
-            }
-          }
-        },
-        "popout": []
-      }
-    }],
-    "active_layout": "E2E-MultiPane-Replay"
-  },
-  "timezone": "UTC",
-  "trade_fetch_enabled": false,
-  "size_in_quote_ccy": "Base",
-  "replay": {
-    "mode": "replay",
-    "range_start": "YYYY-MM-DD HH:MM",
-    "range_end": "YYYY-MM-DD HH:MM"
-  }
-}
-```
-
-**注意**: `range_start` / `range_end` は過去 24-48h 以内、12 時間レンジを推奨。
-
-```bash
-# Test A: Playing transition within 15 seconds (regression for kline/trades separation)
-PLAY_RESULT=$(curl -s -X POST "$API/replay/play" \
-  -H "Content-Type: application/json" \
-  -d "{\"start\":\"$RS\",\"end\":\"$RE\"}")
-PLAY_ST=$(jqn "$PLAY_RESULT" "d.status")
-# Accept Loading or Playing
-START_TIME=$(date +%s)
-for i in $(seq 1 15); do
-  ST=$(jqn "$(curl -s "$API/replay/status")" "d.status")
-  [ "$ST" = "Playing" ] && break
-  sleep 1
-done
-ELAPSED=$(($(date +%s) - START_TIME))
-# MUST reach Playing within 15s — if not, trades may be blocking kline gate
-
-# Test B: current_time progression
-CT1=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
-sleep 3
-CT2=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
-# CT2 > CT1 (use BigInt for comparison)
-
-# Test C: App stability after 10s (trades arriving in background)
-sleep 10
-ST=$(jqn "$(curl -s "$API/replay/status")" "d.status")
-# Still "Playing" — app not crashed by background trades
-```
-
-### 検証の指針（追加）
-
-| 検証対象 | 方法 | 注意 |
-|---------|------|------|
-| Loading→Playing 高速遷移 | 15秒タイムアウト付きポーリング | **マルチペイン構成必須**。単一ペインでは trades 影響が小さく検出不能 |
-| trades バックグラウンド | Playing 遷移後 10s 経過しても Playing 継続 | 直接 API なし。間接検証 |
-| BigInt 比較 | `node -e "console.log(BigInt(a)>BigInt(b))"` | current_time は大きい数値。JS Number で精度不足の場合あり |
+| BigInt 比較 | `node -e "console.log(BigInt('$A')>BigInt('$B'))"` | current_time は大きな数値 |
 
 ---
 
+## 計画書運用（複数セッション作業）
+
+`docs/plan/<feature>.md` を作成し、セッション間のコンテキストを保持する:
+
+- **目的**: 何を達成するか（1〜3行）
+- **実装ステップ (Phase 分割)**: 完了したものに `✅` をつける
+- **Tips**: Phase 中に発見したエッジケース・落とし穴をその場で追記
+- **撤回した旧仕様**: 前のセッションで変更した内容を明示的に記録
+
+参考実例: [docs/plan/replay_bar_step_loop.md](../../docs/plan/replay_bar_step_loop.md)
+
+---
+
+## ログ駆動デバッグ
+
+確認したい箇所に `eprintln!("[E2E DEBUG] field={:?}", value);` を追加して検証する。
+stderr に出るため API の JSON レスポンスと混ざらない。
+
+```bash
+"$EXE" 2>C:/tmp/debug.log &
+tail -f C:/tmp/debug.log
+```
+
+**PR 前に必ず削除**すること: `grep -r "E2E DEBUG" src/`
+
+---
+
+## 支援ファイル
+
+| ファイル | 内容 |
+|---------|------|
+| [api-reference.md](api-reference.md) | API エンドポイント一覧・レスポンス形式・追加実装パターン |
+| [fixtures.md](fixtures.md) | saved-state.json テンプレート集（5種類） |
+| [scenarios.md](scenarios.md) | テストシナリオコード（カテゴリ 1〜4） |
+
 ## Windows 固有の注意
 
-- **`jq` がインストールされていない** → `node -e` でJSON パースする（上記 `jqn` ヘルパー）
-- **`/tmp/` パスは使えない** → `C:/tmp/` を使用
+- `jq` がインストールされていない → `node -e` で JSON パース（上記 `jqn` ヘルパー）
+- `/tmp/` パスは使えない → `C:/tmp/` を使用
 - exe 起動中は `cargo build` が失敗 → `taskkill //f //im flowsurface.exe` で先に停止
 - bash から taskkill はスラッシュを `//f //im` にエスケープ
 - `$APPDATA` は `C:\Users\{user}\AppData\Roaming`
-- **`taskkill //f` は `save_state_to_disk()` を呼ばない** → 永続化テストでは `POST /api/app/save` を先に呼ぶ

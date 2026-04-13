@@ -497,6 +497,7 @@ impl Flowsurface {
 
                             let has_any_ticker_info =
                                 tickers_info.values().any(|opt| opt.is_some());
+                            log::info!("[e2e-live] ResolveStreams pane={pane_id} streams={} has_ticker_info={has_any_ticker_info}", streams.len());
                             if !has_any_ticker_info {
                                 log::debug!(
                                     "Deferring persisted stream resolution for pane {pane_id}: ticker metadata not loaded yet"
@@ -523,6 +524,7 @@ impl Flowsurface {
 
                             match resolved_streams {
                                 Ok(resolved) => {
+                                    log::info!("[e2e-live] Streams resolved: {} streams for pane={pane_id}", resolved.len());
                                     if resolved.is_empty() {
                                         Task::none()
                                     } else {
@@ -536,7 +538,7 @@ impl Flowsurface {
                                 }
                                 Err(err) => {
                                     // This is typically a transient state (e.g. partial metadata, stale symbol)
-                                    log::debug!("{err}");
+                                    log::info!("[e2e-live] Stream resolution failed: {err}");
                                     Task::none()
                                 }
                             }
@@ -824,13 +826,19 @@ impl Flowsurface {
                             }
                         };
 
-                        // VirtualClock を Waiting 状態で初期化
-                        self.replay.start(start_ms, end_ms);
-
                         let main_window_id = self.main_window.id;
 
                         // ペインの content をクリアし、kline ストリームを収集
                         let kline_targets = self.active_dashboard_mut().prepare_replay(main_window_id);
+
+                        // active kline streams から最小 timeframe を計算して StepClock を初期化
+                        let step_size_ms = kline_targets
+                            .iter()
+                            .filter_map(|(_, s)| s.as_kline_stream())
+                            .map(|(_, tf)| tf.to_milliseconds())
+                            .min()
+                            .unwrap_or(replay::min_timeframe_ms(&Default::default()));
+                        self.replay.start(start_ms, end_ms, step_size_ms);
 
                         // active_streams に登録
                         for (_, stream) in &kline_targets {
@@ -951,7 +959,13 @@ impl Flowsurface {
                             .push(Toast::error(format!("Replay data load failed: {err}")));
                         self.replay.clock = None;
                     }
-                    ReplayMessage::SyncReplayBuffers => {}
+                    ReplayMessage::SyncReplayBuffers => {
+                        // mid-replay でペイン構成が変わった場合に step_size を再計算する
+                        if let Some(clock) = &mut self.replay.clock {
+                            let step_size_ms = replay::min_timeframe_ms(&self.replay.active_streams);
+                            clock.set_step_size(step_size_ms);
+                        }
+                    }
                 }
             }
             Message::ReplayApi((command, reply_tx)) => {
@@ -1270,6 +1284,7 @@ impl Flowsurface {
             return Subscription::batch(vec![window_events, sidebar, tick, hotkeys, replay_api]);
         }
 
+        log::info!("[e2e-live] Live mode: building market subscriptions");
         let exchange_streams = self
             .active_dashboard()
             .market_subscriptions()
