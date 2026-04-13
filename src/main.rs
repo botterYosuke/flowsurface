@@ -105,59 +105,6 @@ fn extract_pane_ticker_timeframe(
     }
 }
 
-/// kline stream 1 本分のバックフィル Task を構築する（§Phase 3-0-a）。
-/// `start_ms` より 450 本分前から `end_ms` までのフェッチタスクを生成する（リプレイ開始前の
-/// ヒストリカルも確保）。Play ハンドラと mid-replay backfill の両方で再利用される。
-fn build_kline_backfill_task(
-    pane_id: uuid::Uuid,
-    stream: exchange::adapter::StreamKind,
-    start_ms: u64,
-    end_ms: u64,
-    layout_id: uuid::Uuid,
-) -> Task<Message> {
-    let req_id = uuid::Uuid::new_v4();
-    let fetch_start = if let Some((_, tf)) = stream.as_kline_stream() {
-        start_ms.saturating_sub(450 * tf.to_milliseconds())
-    } else {
-        start_ms
-    };
-    connector::fetcher::kline_fetch_task(
-        layout_id,
-        pane_id,
-        stream,
-        Some(req_id),
-        Some((fetch_start, end_ms)),
-    )
-    .map(move |update| Message::Dashboard {
-        layout_id: Some(layout_id),
-        event: update.into(),
-    })
-}
-
-/// Binance trades stream 1 本分のバックフィル Task を構築する（§Phase 3-0-b）。
-/// `fetch_trades_batched` の sip ストリームを `TradesBatchReceived` / `TradesFetchCompleted`
-/// に変換して返す。非 Binance stream は呼び出し側で弾くこと。
-fn build_trades_backfill_task(
-    stream: exchange::adapter::StreamKind,
-    start_ms: u64,
-    end_ms: u64,
-) -> Task<Message> {
-    let ticker_info = stream.ticker_info();
-    let stream_kind = stream;
-    let data_path = data::data_path(Some("market_data/binance/"));
-
-    let (task, _handle) = Task::sip(
-        connector::fetcher::fetch_trades_batched(ticker_info, start_ms, end_ms, data_path),
-        move |batch| Message::Replay(ReplayMessage::TradesBatchReceived(stream_kind, batch)),
-        move |result| match result {
-            Ok(()) => Message::Replay(ReplayMessage::TradesFetchCompleted(stream_kind)),
-            Err(err) => Message::Replay(ReplayMessage::DataLoadFailed(err.ui_message())),
-        },
-    )
-    .abortable();
-    task
-}
-
 fn main() {
     logger::setup(cfg!(debug_assertions)).expect("Failed to initialize logger");
 
@@ -272,9 +219,9 @@ impl Flowsurface {
                         start: saved_state.replay_config.range_start,
                         end: saved_state.replay_config.range_end,
                     },
-                    playback: None,
-                    last_tick: None,
-                    virtual_elapsed_ms: 0.0,
+                    clock: None,
+                    event_store: replay::store::EventStore::new(),
+                    active_streams: std::collections::HashSet::new(),
                 }
             },
         };
@@ -399,91 +346,48 @@ impl Flowsurface {
             }
             Message::Tick(now) => {
                 let main_window_id = self.main_window.id;
+                let mut all_tasks: Vec<Task<Message>> = Vec::new();
 
-                // リプレイ再生中の場合はフレームごとに時間を進めて Trades を注入
-                let elapsed_ms = self
-                    .replay
-                    .last_tick
-                    .map(|prev| now.duration_since(prev).as_secs_f64() * 1000.0)
-                    .unwrap_or(16.0);
-                self.replay.last_tick = Some(now);
-
-                // fire_status() は &self を取るため、&mut self.replay.playback を取る前に
-                // 計算してローカル変数へ保存する。
-                let current = self
-                    .replay
-                    .playback
-                    .as_ref()
-                    .map(|p| p.current_time)
-                    .unwrap_or(0);
-                let fire_status_opt =
-                    self.active_dashboard().fire_status(current, main_window_id);
-
-                let (replay_trades, replay_current_time) = if let Some(pb) =
-                    &mut self.replay.playback
-                {
-                    if pb.status != replay::PlaybackStatus::Playing {
-                        (None, None)
-                    } else if let Some(fire_status) = fire_status_opt {
-                        // 統一 Tick 経路（§2.1 案 C）: kline chart が存在する通常経路
-                        let result = replay::process_tick(
-                            pb,
-                            &mut self.replay.virtual_elapsed_ms,
-                            elapsed_ms,
-                            fire_status,
+                // リプレイ再生中: dispatch_tick でイベントを抽出してチャートに注入する
+                if self.replay.is_replay() {
+                    if let Some(clock) = &mut self.replay.clock {
+                        let dispatch = replay::dispatcher::dispatch_tick(
+                            clock,
+                            &self.replay.event_store,
+                            &self.replay.active_streams,
+                            now,
                         );
-                        (result.trades_collected, result.current_time)
-                    } else {
-                        // フォールバック: kline chart が 1 つも無い heatmap-only 等のリプレイ。
-                        // 既存の linear advance 経路を使用。
-                        let current_time = pb.advance_time(elapsed_ms);
 
-                        let streams: Vec<_> = pb.trade_buffers.keys().copied().collect();
-                        let mut collected = Vec::new();
-
-                        for stream in streams {
-                            if let Some(buffer) = pb.trade_buffers.get_mut(&stream) {
-                                let drained = buffer.drain_until(current_time);
-                                if !drained.is_empty() {
-                                    let update_t =
-                                        drained.last().map_or(current_time, |t| t.time);
-                                    collected.push((stream, drained.to_vec(), update_t));
-                                }
+                        // klines を kline chart ペインに注入
+                        for (stream, klines) in &dispatch.kline_events {
+                            if !klines.is_empty() {
+                                self.active_dashboard_mut()
+                                    .ingest_replay_klines(stream, klines, main_window_id);
                             }
                         }
 
-                        if pb.current_time >= pb.end_time {
-                            pb.status = replay::PlaybackStatus::Paused;
+                        // trades を heatmap 等に注入
+                        for (stream, trades) in &dispatch.trade_events {
+                            if !trades.is_empty() {
+                                let update_t = trades.last().map_or(dispatch.current_time, |t| t.time);
+                                let task = self
+                                    .active_dashboard_mut()
+                                    .ingest_trades(stream, trades, update_t, main_window_id)
+                                    .map(move |msg| Message::Dashboard {
+                                        layout_id: None,
+                                        event: msg,
+                                    });
+                                all_tasks.push(task);
+                            }
                         }
 
-                        (Some(collected), Some(current_time))
-                    }
-                } else {
-                    (None, None)
-                };
-
-                let mut all_tasks: Vec<Task<Message>> = Vec::new();
-
-                // kline バッファから current_time 以下のローソク足を段階的にチャートに挿入
-                if let Some(current_time) = replay_current_time {
-                    self.active_dashboard_mut()
-                        .replay_advance_klines(current_time, main_window_id);
-                }
-
-                if let Some(collected) = replay_trades {
-                    for (stream, trades, update_t) in &collected {
-                        let task = self
-                            .active_dashboard_mut()
-                            .ingest_trades(stream, trades, *update_t, main_window_id)
-                            .map(move |msg| Message::Dashboard {
-                                layout_id: None,
-                                event: msg,
-                            });
-                        all_tasks.push(task);
+                        if dispatch.reached_end {
+                            // リプレイ終端に到達 → Paused のまま停止
+                        }
                     }
                 }
 
-                // リプレイ中も tick() を呼んでチャートのアニメーション更新を維持する
+                // 通常 tick() でアニメーション更新
                 let tick_task =
                     self.active_dashboard_mut()
                         .tick(now, main_window_id)
@@ -894,7 +798,6 @@ impl Flowsurface {
                         // Replay → Live に戻る場合はペイン content を再構築
                         // （replay_kline_buffer を無効化してライブデータが直接チャートに入るようにする）
                         if was_replay && !self.replay.is_replay() {
-                            self.replay.playback = None;
                             let main_window_id = self.main_window.id;
                             let dashboard = self.active_dashboard_mut();
                             dashboard.rebuild_for_live(main_window_id);
@@ -921,317 +824,134 @@ impl Flowsurface {
                             }
                         };
 
-                        // PlaybackState を初期化（Loading）
-                        self.replay.playback = Some(replay::PlaybackState {
-                            start_time: start_ms,
-                            end_time: end_ms,
-                            current_time: start_ms,
-                            status: replay::PlaybackStatus::Loading,
-                            speed: 1.0,
-                            trade_buffers: std::collections::HashMap::new(),
-                            resume_status: replay::PlaybackStatus::Playing,
-                            pending_trade_streams: std::collections::HashSet::new(),
-                        });
+                        // VirtualClock を Waiting 状態で初期化
+                        self.replay.start(start_ms, end_ms);
 
                         let main_window_id = self.main_window.id;
-                        let layout_id = self
-                            .layout_manager
-                            .active_layout_id()
-                            .expect("No active layout")
-                            .unique;
 
                         // ペインの content をクリアし、kline ストリームを収集
-                        let kline_targets;
-                        let trade_targets: Vec<_>;
-                        {
-                            let dashboard = self.active_dashboard_mut();
-                            kline_targets = dashboard.prepare_replay(main_window_id);
-                            trade_targets = dashboard
-                                .collect_trade_streams(main_window_id)
-                                .into_iter()
-                                .filter(|stream| {
-                                    let exchange = stream.ticker_info().exchange();
-                                    matches!(exchange.venue(), exchange::adapter::Venue::Binance)
-                                })
-                                .collect();
+                        let kline_targets = self.active_dashboard_mut().prepare_replay(main_window_id);
+
+                        // active_streams に登録
+                        for (_, stream) in &kline_targets {
+                            self.replay.active_streams.insert(*stream);
                         }
 
-                        // 各 kline ストリームに対して fetch_klines を発行
-                        // リプレイ開始時点より前のローソク足も表示するため、
-                        // 450本分のヒストリカルデータを含めてフェッチする
+                        // 各 kline ストリームに対して load_klines を発行
                         let kline_tasks: Vec<Task<Message>> = kline_targets
                             .into_iter()
-                            .map(|(pane_id, stream)| {
-                                build_kline_backfill_task(pane_id, stream, start_ms, end_ms, layout_id)
+                            .map(|(_pane_id, stream)| {
+                                let range = start_ms..end_ms;
+                                Task::perform(
+                                    replay::loader::load_klines(stream, range),
+                                    |result| match result {
+                                        Ok(r) => Message::Replay(ReplayMessage::KlinesLoadCompleted(
+                                            r.stream, r.range, r.klines,
+                                        )),
+                                        Err(e) => Message::Replay(ReplayMessage::DataLoadFailed(e)),
+                                    },
+                                )
                             })
                             .collect();
 
-                        // Binance trades のフェッチ（バックグラウンドで独立実行）
-                        let mut trade_tasks: Vec<Task<Message>> = Vec::new();
-                        for stream in &trade_targets {
-                            trade_tasks.push(build_trades_backfill_task(*stream, start_ms, end_ms));
-                        }
-
-                        // kline タスク完了後に DataLoaded → Playing へ遷移
-                        // trades は独立してバックグラウンドでストリーミング
-                        let mut all_tasks: Vec<Task<Message>> = Vec::new();
-
-                        if kline_tasks.is_empty() {
-                            if let Some(pb) = &mut self.replay.playback {
-                                pb.status = pb.resume_status;
-                            }
+                        if !kline_tasks.is_empty() {
+                            return Task::batch(kline_tasks);
                         } else {
-                            let data_loaded =
-                                Task::done(Message::Replay(ReplayMessage::DataLoaded));
-                            all_tasks
-                                .push(Task::batch(kline_tasks).chain(data_loaded));
-                        }
-
-                        all_tasks.extend(trade_tasks);
-
-                        if !all_tasks.is_empty() {
-                            return Task::batch(all_tasks);
+                            // kline chart 無し: 即座に Playing へ
+                            self.replay.resume_from_waiting(std::time::Instant::now());
                         }
                     }
+                    ReplayMessage::KlinesLoadCompleted(stream, range, klines) => {
+                        let now = std::time::Instant::now();
+                        let main_window_id = self.main_window.id;
+
+                        // klines を EventStore に格納し、全 stream が揃ったら Playing 開始
+                        self.replay.on_klines_loaded(stream, range, klines.clone(), now);
+
+                        // kline chart ペインに即座に注入（現在時刻まで）
+                        self.active_dashboard_mut()
+                            .ingest_replay_klines(&stream, &klines, main_window_id);
+                    }
                     ReplayMessage::Resume => {
-                        if let Some(pb) = &mut self.replay.playback {
-                            // end_time に到達済みの場合は最初から再生（Play に委譲）
-                            if pb.current_time >= pb.end_time {
-                                let saved_speed = pb.speed;
-                                let task = self.update(Message::Replay(ReplayMessage::Play));
-                                // Play で再作成された PlaybackState に speed を復元
-                                if let Some(pb) = &mut self.replay.playback {
-                                    pb.speed = saved_speed;
-                                }
-                                return task;
+                        let now = std::time::Instant::now();
+                        if let Some(clock) = &mut self.replay.clock {
+                            if clock.status() == replay::clock::ClockStatus::Paused {
+                                clock.play(now);
                             }
-                            pb.status = replay::PlaybackStatus::Playing;
                         }
                     }
                     ReplayMessage::Pause => {
-                        if let Some(pb) = &mut self.replay.playback {
-                            pb.status = replay::PlaybackStatus::Paused;
+                        if let Some(clock) = &mut self.replay.clock {
+                            clock.pause();
                         }
                     }
                     ReplayMessage::StepForward => {
-                        // 全 timeframe で kline バッファから次の足に離散ステップ（§Phase 1b）
-                        // バッファ末尾なら current_time 維持（fallback）
+                        // EventStore から次の kline 時刻を求めてシーク
                         let main_window_id = self.main_window.id;
+                        let current_time = self.replay.current_time();
+                        let full_range = self.replay.clock.as_ref().map(|c| c.full_range());
 
-                        // borrow checker 回避: immutable borrow で next_time を先に取得
-                        let ct = self.replay.playback.as_ref().map(|pb| pb.current_time);
-                        let next_kline_time = ct.and_then(|ct| {
-                            self.active_dashboard()
-                                .replay_next_kline_time(ct, main_window_id)
-                        });
-
-                        let collected = if let Some(pb) = &mut self.replay.playback {
-                            let new_time = next_kline_time.unwrap_or(pb.current_time);
-                            pb.current_time = new_time;
-
-                            let streams: Vec<_> = pb.trade_buffers.keys().copied().collect();
-                            let mut result = Vec::new();
-
-                            for stream in streams {
-                                if let Some(buffer) = pb.trade_buffers.get_mut(&stream) {
-                                    let drained = buffer.drain_until(new_time);
-                                    if !drained.is_empty() {
-                                        let update_t = drained.last().map_or(new_time, |t| t.time);
-                                        result.push((stream, drained.to_vec(), update_t));
-                                    }
-                                }
-                            }
-
-                            if pb.current_time >= pb.end_time {
-                                pb.status = replay::PlaybackStatus::Paused;
-                            }
-
-                            result
+                        // 全アクティブ stream の次 kline 時刻の最小値
+                        let next_time = if let Some(range) = full_range {
+                            self.replay.active_streams.iter().filter_map(|stream| {
+                                let klines = self.replay.event_store.klines_in(stream, current_time..range.end);
+                                klines.iter().find(|k| k.time > current_time).map(|k| k.time)
+                            }).min()
                         } else {
-                            Vec::new()
+                            None
                         };
 
-                        // kline バッファから new_time 以下のローソク足を即座にチャートに挿入
-                        let current_time = self.replay.playback.as_ref().map(|pb| pb.current_time);
-                        if let Some(ct) = current_time {
-                            self.active_dashboard_mut()
-                                .replay_advance_klines(ct, main_window_id);
-                        }
-
-                        let mut tasks = Vec::new();
-                        for (stream, trades, update_t) in &collected {
-                            let task = self
-                                .active_dashboard_mut()
-                                .ingest_trades(stream, trades, *update_t, main_window_id)
-                                .map(move |msg| Message::Dashboard {
-                                    layout_id: None,
-                                    event: msg,
-                                });
-                            tasks.push(task);
-                        }
-                        if !tasks.is_empty() {
-                            return Task::batch(tasks);
+                        if let (Some(new_time), Some(clock)) = (next_time, &mut self.replay.clock) {
+                            clock.seek(new_time);
+                            // 新時刻までの klines を即座に注入
+                            for stream in self.replay.active_streams.clone().iter() {
+                                let klines = self.replay.event_store.klines_in(stream, 0..new_time + 1);
+                                if !klines.is_empty() {
+                                    let klines_vec = klines.to_vec();
+                                    self.active_dashboard_mut()
+                                        .ingest_replay_klines(stream, &klines_vec, main_window_id);
+                                }
+                            }
                         }
                     }
                     ReplayMessage::CycleSpeed => {
-                        if let Some(pb) = &mut self.replay.playback {
-                            pb.cycle_speed();
-                        }
+                        self.replay.cycle_speed();
                     }
                     ReplayMessage::StepBackward => {
-                        // 巻き戻し: バッファ保持版リビルド → kline 再挿入（フェッチ不要）
-                        // 全 timeframe で kline バッファから前の足に離散ステップ（§Phase 1b）
                         let main_window_id = self.main_window.id;
+                        let current_time = self.replay.current_time();
 
-                        // borrow checker 回避: immutable borrow で prev_time を先に取得
-                        let ct = self.replay.playback.as_ref().map(|pb| pb.current_time);
-                        let prev_kline_time = ct.and_then(|ct| {
-                            self.active_dashboard()
-                                .replay_prev_kline_time(ct, main_window_id)
-                        });
+                        // 全アクティブ stream の前の kline 時刻の最大値
+                        let prev_time = self.replay.active_streams.iter().filter_map(|stream| {
+                            let klines = self.replay.event_store.klines_in(stream, 0..current_time);
+                            klines.iter().rev().find(|k| k.time < current_time).map(|k| k.time)
+                        }).max();
 
-                        if let Some(pb) = &mut self.replay.playback {
-                            let new_time = prev_kline_time.unwrap_or(pb.current_time);
-                            pb.current_time = new_time;
-
-                            // TradeBuffer のカーソルをリセットし、new_time まで早送り
-                            for buffer in pb.trade_buffers.values_mut() {
-                                buffer.cursor = 0;
-                                buffer.drain_until(new_time);
-                            }
-
-                            // StepBackward 後は Paused で止める（Loading 不要）
-                            pb.status = replay::PlaybackStatus::Paused;
+                        let new_time = prev_time.unwrap_or(current_time);
+                        if let Some(clock) = &mut self.replay.clock {
+                            clock.seek(new_time);
+                            clock.pause();
                         }
 
-                        // バッファ保持版リビルド
+                        // pane chart をリビルドして new_time まで再注入
                         self.active_dashboard_mut()
-                            .rebuild_for_step_backward(main_window_id);
+                            .prepare_replay(main_window_id);
 
-                        // new_time まで kline を再挿入（フェッチ不要）
-                        let current_time = self.replay.playback.as_ref().map(|pb| pb.current_time);
-                        if let Some(ct) = current_time {
-                            self.active_dashboard_mut()
-                                .replay_advance_klines(ct, main_window_id);
-                        }
-                    }
-                    ReplayMessage::TradesBatchReceived(stream, batch) => {
-                        // orphan 防止（review 🔴 #2）: 登録済み stream のみ受け入れ、
-                        // SyncReplayBuffers で削除された後に届くバッチは黙って捨てる。
-                        // or_insert_with 経由で buffer が復活すると、次の SyncReplayBuffers で
-                        // 再度 orphan 判定 → 削除 → 復活 のループになるため。
-                        if let Some(pb) = &mut self.replay.playback {
-                            let _accepted = pb.ingest_trades_batch(stream, batch);
-                        }
-                    }
-                    ReplayMessage::TradesFetchCompleted(stream) => {
-                        // trades フェッチ完了（個別ストリーム）。
-                        // §2.3.1 + §2.3.1.1: `advance_cursor_to(current_time)` で過去 trades を
-                        // 読み捨て、`pending_trade_streams` から削除して drain 対象に復帰させる
-                        if let Some(pb) = &mut self.replay.playback {
-                            if let Some(buffer) = pb.trade_buffers.get_mut(&stream) {
-                                let _skipped = buffer.advance_cursor_to(pb.current_time);
-                            }
-                            pb.pending_trade_streams.remove(&stream);
-                        }
-                    }
-                    ReplayMessage::DataLoaded => {
-                        if let Some(pb) = &mut self.replay.playback {
-                            pb.status = pb.resume_status;
-                        }
-
-                        // Paused で復帰する場合、kline バッファから current_time までを即座にチャートに挿入
-                        if let Some(pb) = &self.replay.playback {
-                            if pb.status == replay::PlaybackStatus::Paused {
-                                let current_time = pb.current_time;
-                                let main_window_id = self.main_window.id;
+                        for stream in self.replay.active_streams.clone().iter() {
+                            let klines = self.replay.event_store.klines_in(stream, 0..new_time + 1);
+                            if !klines.is_empty() {
+                                let klines_vec = klines.to_vec();
                                 self.active_dashboard_mut()
-                                    .replay_advance_klines(current_time, main_window_id);
+                                    .ingest_replay_klines(stream, &klines_vec, main_window_id);
                             }
                         }
                     }
                     ReplayMessage::DataLoadFailed(err) => {
                         self.notifications
                             .push(Toast::error(format!("Replay data load failed: {err}")));
-                        // リプレイモードをリセット
-                        self.replay.playback = None;
+                        self.replay.clock = None;
                     }
-                    ReplayMessage::SyncReplayBuffers => {
-                        // mid-replay で stream 構成が変わった時のバックフィル発火（§2.6.5）
-                        if !self.replay.is_replay() || self.replay.playback.is_none() {
-                            return Task::none();
-                        }
-                        let main_window_id = self.main_window.id;
-                        let layout_id = match self.layout_manager.active_layout_id() {
-                            Some(id) => id.unique,
-                            None => return Task::none(),
-                        };
-
-                        // 1. 新規 kline ターゲットを収集（replay モード未切替のペイン）
-                        let kline_targets = self
-                            .active_dashboard_mut()
-                            .collect_new_replay_klines(main_window_id);
-
-                        // 2. 現在の dashboard の Binance trade stream 集合を収集
-                        let current_trade_streams: Vec<_> = self
-                            .active_dashboard()
-                            .collect_trade_streams(main_window_id)
-                            .into_iter()
-                            .filter(|stream| {
-                                let exchange = stream.ticker_info().exchange();
-                                matches!(
-                                    exchange.venue(),
-                                    exchange::adapter::Venue::Binance
-                                )
-                            })
-                            .collect();
-
-                        let (start_ms, end_ms) = {
-                            let pb = self.replay.playback.as_ref().unwrap();
-                            (pb.start_time, pb.end_time)
-                        };
-
-                        // 3. 差分計算（review 🟡 #4: PlaybackState::diff_trade_streams に抽出）
-                        let diff = self
-                            .replay
-                            .playback
-                            .as_ref()
-                            .map(|pb| pb.diff_trade_streams(&current_trade_streams))
-                            .unwrap_or_default();
-
-                        // 4. pb の状態を更新: 新規 trade stream 用バッファ作成 + pending 登録、orphan 削除
-                        if let Some(pb) = &mut self.replay.playback {
-                            for stream in &diff.new_streams {
-                                pb.trade_buffers.insert(
-                                    *stream,
-                                    replay::TradeBuffer {
-                                        trades: Vec::new(),
-                                        cursor: 0,
-                                    },
-                                );
-                                pb.pending_trade_streams.insert(*stream);
-                            }
-                            for stream in &diff.orphan_streams {
-                                pb.trade_buffers.remove(stream);
-                                pb.pending_trade_streams.remove(stream);
-                            }
-                        }
-
-                        // 5. バックフィル Task 構築
-                        let mut tasks: Vec<Task<Message>> = Vec::new();
-                        for (pane_id, stream) in kline_targets {
-                            tasks.push(build_kline_backfill_task(
-                                pane_id, stream, start_ms, end_ms, layout_id,
-                            ));
-                        }
-                        for stream in diff.new_streams {
-                            tasks.push(build_trades_backfill_task(stream, start_ms, end_ms));
-                        }
-
-                        if !tasks.is_empty() {
-                            return Task::batch(tasks);
-                        }
-                    }
+                    ReplayMessage::SyncReplayBuffers => {}
                 }
             }
             Message::ReplayApi((command, reply_tx)) => {
@@ -1429,27 +1149,15 @@ impl Flowsurface {
             end_input = end_input.on_input(|s| Message::Replay(ReplayMessage::EndTimeChanged(s)));
         }
 
-        let is_loading = self
-            .replay
-            .playback
-            .as_ref()
-            .is_some_and(|pb| pb.status == replay::PlaybackStatus::Loading);
-
-        let is_playing = self
-            .replay
-            .playback
-            .as_ref()
-            .is_some_and(|pb| pb.status == replay::PlaybackStatus::Playing);
+        let is_loading = self.replay.is_loading();
+        let is_playing = self.replay.is_playing();
+        let is_paused = self.replay.is_paused();
+        let has_clock = self.replay.clock.is_some();
 
         let play_pause_label = if is_playing { "\u{23F8}" } else { "\u{25B6}" };
         let mut play_pause_btn =
             button(text(play_pause_label).size(12)).padding(padding::all(2).left(4).right(4));
         if is_replay && !is_loading {
-            let is_paused = self
-                .replay
-                .playback
-                .as_ref()
-                .is_some_and(|pb| pb.status == replay::PlaybackStatus::Paused);
             play_pause_btn = play_pause_btn.on_press(if is_playing {
                 Message::Replay(ReplayMessage::Pause)
             } else if is_paused {
@@ -1462,7 +1170,7 @@ impl Flowsurface {
         // ⏮ StepBackward
         let mut step_back_btn =
             button(text("\u{23EE}").size(12)).padding(padding::all(2).left(4).right(4));
-        if is_replay && self.replay.playback.is_some() && !is_loading {
+        if is_replay && has_clock && !is_loading {
             step_back_btn = step_back_btn.on_press(Message::Replay(ReplayMessage::StepBackward));
         }
 
@@ -1474,21 +1182,12 @@ impl Flowsurface {
         }
 
         // Speed button
-        let speed_label = self
-            .replay
-            .playback
-            .as_ref()
-            .map_or("1x".to_string(), |pb| pb.speed_label());
+        let speed_label = self.replay.speed_label();
         let mut speed_btn =
             button(text(speed_label).size(11)).padding(padding::all(2).left(4).right(4));
-        if is_replay && self.replay.playback.is_some() && !is_loading {
+        if is_replay && has_clock && !is_loading {
             speed_btn = speed_btn.on_press(Message::Replay(ReplayMessage::CycleSpeed));
         }
-        // §2.1.1 案 C: 速度セマンティクスを tooltip で明示。
-        // 境界は `replay::COARSE_CUTOFF_MS = 3_600_000ms`（1h）:
-        //   delta_to_next <  1h (M1〜M30): 実時間連動（threshold = delta × speed）
-        //   delta_to_next >= 1h (H1〜D1): 1 バー/sec × speed（threshold = 1000ms × speed）
-        // H1 は境界の上側（粗補正モード）。
         let speed_tooltip: Element<'_, Message> = iced::widget::tooltip(
             speed_btn,
             container(
@@ -1884,24 +1583,13 @@ impl Flowsurface {
     fn build_pane_list_json(&self) -> String {
         let main_window_id = self.main_window.id;
         let dashboard = self.active_dashboard();
-        let pending_streams: Vec<String> = self
-            .replay
-            .playback
-            .as_ref()
-            .map(|pb| {
-                pb.pending_trade_streams
-                    .iter()
-                    .map(|s| format!("{s:?}"))
-                    .collect()
-            })
-            .unwrap_or_default();
-        // trade_buffers は orphan 除去の可視化用（E4 で close 後に該当 stream が消えること）。
+        let pending_streams: Vec<String> = Vec::new();
         let trade_buffer_streams: Vec<String> = self
             .replay
-            .playback
-            .as_ref()
-            .map(|pb| pb.trade_buffers.keys().map(|s| format!("{s:?}")).collect())
-            .unwrap_or_default();
+            .active_streams
+            .iter()
+            .map(|s| format!("{s:?}"))
+            .collect();
 
         let panes: Vec<serde_json::Value> = dashboard
             .iter_all_panes(main_window_id)
@@ -1911,10 +1599,6 @@ impl Flowsurface {
                 // ticker / timeframe の抽出（Ready → Waiting の順にフォールバック）
                 let (ticker, timeframe) = extract_pane_ticker_timeframe(&state.streams);
 
-                let buffer_ready = state.replay_kline_chart_ready();
-                let buffer_cursor = state.replay_buffer_cursor();
-                let buffer_len = state.replay_buffer_len();
-
                 serde_json::json!({
                     "id": state.unique_id().to_string(),
                     "window_id": format!("{window_id:?}"),
@@ -1922,9 +1606,6 @@ impl Flowsurface {
                     "ticker": ticker,
                     "timeframe": timeframe,
                     "link_group": state.link_group.map(|g| format!("{g:?}")),
-                    "replay_buffer_ready": buffer_ready,
-                    "replay_buffer_cursor": buffer_cursor,
-                    "replay_buffer_len": buffer_len,
                 })
             })
             .collect();

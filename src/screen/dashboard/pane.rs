@@ -425,44 +425,8 @@ impl State {
         self.rebuild_content(true);
     }
 
-    /// mid-replay バックフィル用: この kline chart が replay モードに入っていなければ入れる。
-    /// - 既に `replay_kline_buffer` が Some なら no-op（冪等）
-    /// - 非 kline ペインなら no-op
-    ///
-    /// 戻り値: 実際に replay モードへ切り替えた（= バックフィル発火が必要）なら true
-    pub fn enable_replay_mode_if_needed(&mut self) -> bool {
-        if let Content::Kline { chart: Some(c), .. } = &mut self.content
-            && c.replay_kline_buffer.is_none()
-        {
-            c.enable_replay_mode();
-            return true;
-        }
-        false
-    }
-
     pub fn rebuild_content_for_live(&mut self) {
         self.rebuild_content(false);
-    }
-
-    /// StepBackward 用: チャートをリビルドしつつ kline バッファを保持する。
-    pub fn rebuild_content_for_step_backward(&mut self) {
-        // バッファを退避
-        let saved_buf = match &mut self.content {
-            Content::Kline { chart, .. } => {
-                chart.as_mut().and_then(|c| c.replay_kline_buffer.take())
-            }
-            _ => None,
-        };
-
-        self.rebuild_content(true);
-
-        // バッファを復元（cursor=0 にリセット）
-        if let (Content::Kline { chart, .. }, Some(mut buf)) = (&mut self.content, saved_buf) {
-            if let Some(c) = chart.as_mut() {
-                buf.cursor = 0;
-                c.replay_kline_buffer = Some(buf);
-            }
-        }
     }
 
     fn rebuild_content(&mut self, replay_mode: bool) {
@@ -483,7 +447,7 @@ impl State {
                     let basis = c.basis();
                     let saved_indicators = indicators.clone();
 
-                    let mut new_chart = KlineChart::new(
+                    let new_chart = KlineChart::new(
                         saved_layout.clone(),
                         basis,
                         step,
@@ -493,9 +457,7 @@ impl State {
                         ti,
                         &saved_kind,
                     );
-                    if replay_mode {
-                        new_chart.enable_replay_mode();
-                    }
+                    let _ = replay_mode; // data is now managed by EventStore, not chart buffers
                     *chart = Some(new_chart);
                     *layout = saved_layout;
                     *kind = saved_kind;
@@ -539,12 +501,6 @@ impl State {
                     }
                     chart.insert_hist_klines(id, klines);
                 } else {
-                    // req_id = None はライブモードの全チャートリロード。
-                    // リプレイモード中にこれが来た場合（Play 押下後に旧フェッチが遅延完了した
-                    // ケースなど）は replay_kline_buffer を上書きしないようスキップする。
-                    if chart.is_replay_mode() {
-                        return;
-                    }
                     let (raw_trades, tick_size) = (chart.raw_trades(), chart.tick_size());
                     let layout = chart.chart_layout();
 
@@ -1881,59 +1837,20 @@ impl State {
         }
     }
 
-    /// リプレイ用 kline バッファの準備状態（§2.1 `fire_status` 判定用）。
-    /// - `None`: このペインは kline ではない（判定対象外）
-    /// - `Some(false)`: kline だがバッファ未 ready（未初期化 or バックフィル中）
-    /// - `Some(true)`: kline かつバッファにデータあり（`replay_next_kline_time` を使う）
-    pub fn replay_kline_chart_ready(&self) -> Option<bool> {
-        if let Content::Kline { chart, .. } = &self.content {
-            chart.as_ref().map(|c| c.replay_buffer_ready())
-        } else {
-            None
-        }
-    }
-
-    /// リプレイバッファのカーソル位置（挿入済み件数）。kline でない場合は None。
-    pub fn replay_buffer_cursor(&self) -> Option<usize> {
-        if let Content::Kline { chart, .. } = &self.content {
-            chart.as_ref().and_then(|c| c.replay_buffer_cursor())
-        } else {
-            None
-        }
-    }
-
-    /// リプレイバッファ内の kline 総数。kline でない場合は None。
-    pub fn replay_buffer_len(&self) -> Option<usize> {
-        if let Content::Kline { chart, .. } = &self.content {
-            chart.as_ref().and_then(|c| c.replay_buffer_len())
-        } else {
-            None
-        }
-    }
-
-    /// リプレイバッファから current_time より後の最初の kline 時刻を返す。
-    pub fn replay_next_kline_time(&self, current_time: u64) -> Option<u64> {
-        if let Content::Kline { chart, .. } = &self.content {
-            chart.as_ref().and_then(|c| c.replay_next_kline_time(current_time))
-        } else {
-            None
-        }
-    }
-
-    /// リプレイバッファから current_time より前の最後の kline 時刻を返す。
-    pub fn replay_prev_kline_time(&self, current_time: u64) -> Option<u64> {
-        if let Content::Kline { chart, .. } = &self.content {
-            chart.as_ref().and_then(|c| c.replay_prev_kline_time(current_time))
-        } else {
-            None
-        }
-    }
-
-    /// リプレイ進行: kline バッファから current_time 以下のデータを挿入する
-    pub fn replay_advance_klines(&mut self, current_time: u64) {
+    /// リプレイ用: EventStore から得た klines をこのペインの kline chart に注入する。
+    pub fn ingest_replay_klines(&mut self, klines: &[Kline]) {
         if let Content::Kline { chart, .. } = &mut self.content {
             if let Some(c) = chart {
-                c.replay_advance(current_time);
+                c.ingest_historical_klines(klines);
+            }
+        }
+    }
+
+    /// リプレイ seek 時: kline chart のデータをリセットする。
+    pub fn reset_for_seek(&mut self) {
+        if let Content::Kline { chart, .. } = &mut self.content {
+            if let Some(c) = chart {
+                c.reset_for_seek();
             }
         }
     }

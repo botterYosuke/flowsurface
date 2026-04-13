@@ -28,7 +28,7 @@ API レスポンス (JSON)
 | レイヤー | ファイル | 役割 |
 |---------|---------|------|
 | API サーバー | `src/replay_api.rs` | HTTP → ReplayCommand 変換、ルーティング |
-| 状態管理 | `src/replay.rs` | リプレイ状態・PlaybackState |
+| 状態管理 | `src/replay/` | VirtualClock・EventStore・dispatch_tick（R3 以降） |
 | アプリ本体 | `src/main.rs` | Message ハンドリング、全機能の update() |
 | 永続化 | `data/src/config/state.rs` | State / ReplayConfig の serialize/deserialize |
 | レイアウト | `data/src/layout/pane.rs` | ペイン構成・ストリーム設定 |
@@ -144,6 +144,48 @@ fi
 6時間制限は撤廃済み。`fetch_klines` は自動ページングで任意の範囲を取得する。
 ただしテストでは短い範囲（1-12h）が高速で推奨。
 
+### テスト日時は必ず「過去」にすること
+
+**未来の日時を指定すると Binance API からデータが取得できず、EventStore が空になる。**
+その状態では `StepForward` が `next_time = None` を返し無効になるなど、テストが正しく動作しない。
+
+- 常に **現在時刻より過去 24〜48h 以内** の範囲を使うこと
+- 現在の UTC 時刻を確認: `date -u +"%Y-%m-%d %H:%M"`
+
+### StepForward / StepBackward は kline 境界ジャンプ（固定 60s ではない）
+
+R3 以降、`step-forward` / `step-backward` は EventStore に格納された実際の kline タイムスタンプにジャンプする：
+
+- **初回 StepForward**: `current_time` から次の kline 境界まで（端数分）。差分は不定（例: +17304ms、+25477ms）
+- **2回目以降**: kline 間隔ちょうど（M1 なら +60000ms）
+- **StepBackward**: 前の kline 境界。M1 なら -60000ms
+
+検証では `T_AFTER > T_BEFORE` で十分。`== 60000` の厳密一致は初回で失敗するため使わないこと。
+
+### Toggle→Live 時に range_input がリセットされる
+
+`POST /api/replay/toggle` で Live に切り替えると、`range_start` / `range_end` が空文字列にリセットされる。
+その状態で `POST /api/app/save` すると空のまま保存される。
+
+永続化テストでは **必ず Play 実行後（range_input が設定された状態）に保存**すること:
+
+```bash
+curl -s -X POST "$API/replay/play" -H "Content-Type: application/json" \
+  -d "{\"start\":\"$RS\",\"end\":\"$RE\"}" > /dev/null
+# Playing 待ち...
+curl -s -X POST "$API/app/save" > /dev/null
+stop_app
+```
+
+### replay_buffer_* フィールドは削除済み（R3）
+
+R3 以降、`/api/pane/list` のレスポンスに以下のフィールドは**存在しない**:
+- `replay_buffer_ready`
+- `replay_buffer_cursor`
+- `replay_buffer_len`
+
+これらのフィールドへの参照をテストコードに書かないこと。存在チェストで「null」になっても正常。
+
 ---
 
 ## API エンドポイント一覧
@@ -157,8 +199,8 @@ fi
 | `POST` | `/api/replay/play` | 再生開始（body: `{"start":"...","end":"..."}` 必須） |
 | `POST` | `/api/replay/pause` | 一時停止 |
 | `POST` | `/api/replay/resume` | 再開 |
-| `POST` | `/api/replay/step-forward` | +60s ジャンプ |
-| `POST` | `/api/replay/step-backward` | -60s ジャンプ |
+| `POST` | `/api/replay/step-forward` | EventStore の次 kline 時刻へジャンプ（固定 60s ではない） |
+| `POST` | `/api/replay/step-backward` | EventStore の前 kline 時刻へジャンプ（固定 60s ではない） |
 | `POST` | `/api/replay/speed` | 速度サイクル（1x→2x→5x→10x→1x） |
 
 ### アプリ API
@@ -353,11 +395,12 @@ curl -s -X POST "$API/replay/pause" > /dev/null
 T_BEFORE=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
 curl -s -X POST "$API/replay/step-forward" > /dev/null
 T_AFTER=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
-# T_AFTER - T_BEFORE == 60000
+# T_AFTER > T_BEFORE であることを確認（差分は不定：初回は端数分、2回目以降は +60000ms）
+# 厳密に == 60000 で検証するなら 2 回目以降に実施すること
 
 curl -s -X POST "$API/replay/step-backward" > /dev/null
 T_BACK=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
-# T_BACK == T_BEFORE
+# T_BACK < T_AFTER（前の kline 境界に戻る）
 
 # Step 9: Toggle back to Live
 TOGGLE=$(curl -s -X POST "$API/replay/toggle")
@@ -629,7 +672,7 @@ curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:9876/api/replay/toggle"
 |---------|------|------|
 | モード遷移 | `jqn "$STATUS" "d.mode"` で厳密一致 | "Live" or "Replay" |
 | current_time 前進 | 2回取得して差分 > 0 | 再生中は厳密一致NG |
-| step-forward | pause 後に step → 差分 == 60000 | pause 中なら厳密一致OK |
+| step-forward | pause 後に step → `T_AFTER > T_BEFORE` で確認 | 初回は端数分のため `== 60000` 厳密一致は不可。2回目以降は +60000ms（M1） |
 | speed | cycle 後に期待値一致 | "1x","2x","5x","10x" の順 |
 | Loading→Playing | ポーリング（最大120秒） | 即 Playing になる場合あり |
 | HTTP ステータス | `-o /dev/null -w "%{http_code}"` | 200/400/404 |

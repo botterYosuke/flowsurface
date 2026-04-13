@@ -160,34 +160,6 @@ pub struct KlineChart {
     request_handler: RequestHandler,
     study_configurator: study::Configurator<FootprintStudy>,
     last_tick: Instant,
-    /// リプレイモード: kline をバッファリングして段階的に挿入する
-    pub(crate) replay_kline_buffer: Option<ReplayKlineBuffer>,
-}
-
-/// リプレイ用 kline バッファ。時系列順にソートされた kline を保持し、
-/// current_time に追いつくまで段階的に挿入する。
-pub(crate) struct ReplayKlineBuffer {
-    pub(crate) klines: Vec<Kline>,
-    pub(crate) cursor: usize,
-}
-
-impl ReplayKlineBuffer {
-    /// リプレイ用 buffer にデータが入っているか。
-    /// `klines` が 1 件以上あれば ready、空ならバックフィル中（または未初期化）。
-    /// ready == true はデータが存在する状態を指し、cursor が末尾に到達した終端とは独立。
-    pub(crate) fn is_ready(&self) -> bool {
-        !self.klines.is_empty()
-    }
-
-    /// current_time より後の最初の kline 時刻を返す（休場日を自動スキップ）。
-    pub(crate) fn next_time_after(&self, current_time: u64) -> Option<u64> {
-        self.klines.iter().find(|k| k.time > current_time).map(|k| k.time)
-    }
-
-    /// current_time より前の最後の kline 時刻を返す（休場日を自動スキップ）。
-    pub(crate) fn prev_time_before(&self, current_time: u64) -> Option<u64> {
-        self.klines.iter().rev().find(|k| k.time < current_time).map(|k| k.time)
-    }
 }
 
 impl KlineChart {
@@ -278,7 +250,6 @@ impl KlineChart {
                     kind: kind.clone(),
                     study_configurator: study::Configurator::new(),
                     last_tick: Instant::now(),
-                    replay_kline_buffer: None,
                 }
             }
             Basis::Tick(interval) => {
@@ -335,114 +306,9 @@ impl KlineChart {
                     kind: kind.clone(),
                     study_configurator: study::Configurator::new(),
                     last_tick: Instant::now(),
-                    replay_kline_buffer: None,
                 }
             }
         }
-    }
-
-    /// リプレイモードを有効にする。以降の insert_hist_klines はバッファに格納される。
-    pub fn enable_replay_mode(&mut self) {
-        self.replay_kline_buffer = Some(ReplayKlineBuffer {
-            klines: Vec::new(),
-            cursor: 0,
-        });
-    }
-
-    /// リプレイモードを無効にする。
-    pub fn disable_replay_mode(&mut self) {
-        self.replay_kline_buffer = None;
-    }
-
-    /// リプレイモード中か否か（`replay_kline_buffer` が `Some` かどうか）。
-    pub fn is_replay_mode(&self) -> bool {
-        self.replay_kline_buffer.is_some()
-    }
-
-    /// リプレイ buffer が存在し、かつ klines が 1 件以上あるか。
-    /// `false` の場合は以下のいずれか:
-    /// - リプレイモードではない (`replay_kline_buffer == None`)
-    /// - バックフィル中 (`Some(buf)` だが `buf.klines.is_empty()`)
-    ///
-    /// 統一 Tick (§2.1 `fire_status`) は `false` の chart を `next_time_after` の
-    /// min 計算から除外することで、バックフィル待ちと終端を区別する。
-    pub fn replay_buffer_ready(&self) -> bool {
-        self.replay_kline_buffer
-            .as_ref()
-            .is_some_and(|b| b.is_ready())
-    }
-
-    /// リプレイバッファ内の現在のカーソル位置（挿入済み件数）。
-    pub fn replay_buffer_cursor(&self) -> Option<usize> {
-        self.replay_kline_buffer.as_ref().map(|b| b.cursor)
-    }
-
-    /// リプレイバッファ内の kline 総数。
-    pub fn replay_buffer_len(&self) -> Option<usize> {
-        self.replay_kline_buffer.as_ref().map(|b| b.klines.len())
-    }
-
-    /// リプレイバッファから current_time より後の最初の kline 時刻を返す。
-    pub fn replay_next_kline_time(&self, current_time: u64) -> Option<u64> {
-        self.replay_kline_buffer
-            .as_ref()
-            .and_then(|buf| buf.next_time_after(current_time))
-    }
-
-    /// リプレイバッファから current_time より前の最後の kline 時刻を返す。
-    pub fn replay_prev_kline_time(&self, current_time: u64) -> Option<u64> {
-        self.replay_kline_buffer
-            .as_ref()
-            .and_then(|buf| buf.prev_time_before(current_time))
-    }
-
-    /// リプレイ進行: current_time 以下の kline をバッファからチャートに挿入する。
-    /// 新しい kline が挿入された場合は true を返す。
-    pub fn replay_advance(&mut self, current_time: u64) -> bool {
-        let buf = match &mut self.replay_kline_buffer {
-            Some(b) => b,
-            None => return false,
-        };
-
-        let start = buf.cursor;
-        while buf.cursor < buf.klines.len() && buf.klines[buf.cursor].time <= current_time {
-            buf.cursor += 1;
-        }
-
-        if buf.cursor == start {
-            return false;
-        }
-
-        let new_klines = &buf.klines[start..buf.cursor];
-
-        match &mut self.data_source {
-            PlotData::TimeBased(timeseries) => {
-                timeseries.insert_klines(new_klines);
-                timeseries.insert_trades_existing_buckets(&self.raw_trades);
-
-                if let Some(ts_latest) = timeseries.latest_timestamp() {
-                    if ts_latest > self.chart.latest_x {
-                        self.chart.latest_x = ts_latest;
-                    }
-                }
-
-                self.indicators
-                    .values_mut()
-                    .filter_map(Option::as_mut)
-                    .for_each(|indi| indi.on_insert_klines(new_klines));
-
-                if let Some(last_k) = new_klines.last() {
-                    self.chart.last_price =
-                        Some(PriceInfoLabel::new(last_k.close, last_k.open));
-                }
-            }
-            PlotData::TickBased(_) => {
-                // TickBased は trades ベースで構築されるため kline バッファ不要
-            }
-        }
-
-        self.invalidate(None);
-        true
     }
 
     pub fn update_latest_kline(&mut self, kline: &Kline) {
@@ -684,14 +550,6 @@ impl KlineChart {
             }
         }
 
-        // リプレイ中の timeframe 変更: 旧 timeframe のバッファは新 timeseries に
-        // 注入できないため空に再初期化する。以降は SyncReplayBuffers が発火して
-        // 新 timeframe のフェッチが走り、完了後に ready=true に戻る。
-        if let Some(buf) = &mut self.replay_kline_buffer {
-            buf.klines.clear();
-            buf.cursor = 0;
-        }
-
         self.indicators
             .values_mut()
             .filter_map(Option::as_mut)
@@ -777,33 +635,6 @@ impl KlineChart {
     }
 
     pub fn insert_hist_klines(&mut self, req_id: uuid::Uuid, klines_raw: &[Kline]) {
-        // リプレイモード時はバッファに格納して段階的に挿入する
-        if let Some(ref mut buf) = self.replay_kline_buffer {
-            // cursor 直前ま��の最大時刻を記録（��ート後にカーソル位置を復元す���ため）
-            let last_inserted_time = if buf.cursor > 0 {
-                buf.klines.get(buf.cursor - 1).map(|k| k.time)
-            } else {
-                None
-            };
-
-            buf.klines.extend_from_slice(klines_raw);
-            buf.klines.sort_by_key(|k| k.time);
-            buf.klines.dedup_by_key(|k| k.time);
-
-            // ソート後にカーソルを正しい位置に復元
-            if let Some(last_t) = last_inserted_time {
-                buf.cursor = buf.klines.partition_point(|k| k.time <= last_t);
-            }
-
-            if !klines_raw.is_empty() {
-                self.request_handler.mark_completed(req_id);
-            } else {
-                self.request_handler
-                    .mark_failed(req_id, "No new data received".to_string());
-            }
-            return;
-        }
-
         match self.data_source {
             PlotData::TimeBased(ref mut timeseries) => {
                 let before = timeseries.datapoints.len();
@@ -839,6 +670,51 @@ impl KlineChart {
             }
             PlotData::TickBased(_) => {}
         }
+    }
+
+    /// リプレイ用: EventStore から得た klines を一括挿入する。
+    /// Live の `insert_hist_klines` とほぼ同一だが req_id 不要。
+    pub fn ingest_historical_klines(&mut self, klines: &[Kline]) {
+        if let PlotData::TimeBased(ref mut timeseries) = self.data_source {
+            timeseries.insert_klines(klines);
+            timeseries.insert_trades_existing_buckets(&self.raw_trades);
+
+            self.indicators
+                .values_mut()
+                .filter_map(Option::as_mut)
+                .for_each(|indi| indi.on_insert_klines(klines));
+
+            if let Some(ts_latest) = timeseries.latest_timestamp() {
+                let chart = self.mut_state();
+                if ts_latest > chart.latest_x {
+                    chart.latest_x = ts_latest;
+                }
+            }
+
+            if let Some(last_k) = klines.last() {
+                self.chart.last_price = Some(PriceInfoLabel::new(last_k.close, last_k.open));
+            }
+
+            self.invalidate(None);
+        }
+    }
+
+    /// リプレイ seek 時にチャートデータをリセットする。
+    pub fn reset_for_seek(&mut self) {
+        match self.data_source {
+            PlotData::TimeBased(ref mut timeseries) => {
+                let interval = timeseries.interval;
+                let step = self.chart.tick_size;
+                *timeseries = TimeSeries::<KlineDataPoint>::new(interval, step, &[]);
+            }
+            PlotData::TickBased(ref mut tick_aggr) => {
+                let interval = tick_aggr.interval;
+                let step = self.chart.tick_size;
+                *tick_aggr = TickAggr::new(interval, step, &[]);
+            }
+        }
+        self.chart.last_price = None;
+        self.invalidate(None);
     }
 
     pub fn insert_open_interest(&mut self, req_id: Option<uuid::Uuid>, oi_data: &[OIData]) {
@@ -2072,10 +1948,6 @@ fn should_show_text(cell_height_unscaled: f32, cell_width_unscaled: f32, min_w: 
 mod tests {
     use super::*;
 
-    fn make_buffer(klines: Vec<Kline>, cursor: usize) -> ReplayKlineBuffer {
-        ReplayKlineBuffer { klines, cursor }
-    }
-
     fn make_kline(time: u64) -> Kline {
         use exchange::{Volume, unit::{Qty, price::Price}};
         Kline {
@@ -2087,127 +1959,6 @@ mod tests {
             volume: Volume::TotalOnly(Qty::zero()),
         }
     }
-
-    #[test]
-    fn buffer_cursor_reset_allows_full_reinsert() {
-        // 5 本の kline を持つバッファを作成し、cursor を全進行(5)にする
-        let klines: Vec<Kline> = (1..=5).map(|i| make_kline(i * 60_000)).collect();
-        let mut buf = make_buffer(klines, 5);
-
-        // cursor をリセット
-        buf.cursor = 0;
-
-        // cursor=0 から time=180_000 まで進行 → 3 本が対象
-        let start = buf.cursor;
-        while buf.cursor < buf.klines.len() && buf.klines[buf.cursor].time <= 180_000 {
-            buf.cursor += 1;
-        }
-        assert_eq!(buf.cursor, 3, "cursor should advance to 3 (klines at 60k, 120k, 180k)");
-        assert_eq!(buf.cursor - start, 3, "3 klines should be selected");
-    }
-
-    #[test]
-    fn buffer_take_and_restore_preserves_klines() {
-        // pub(crate) アクセスによるバッファの退避・復元をテスト
-        let klines: Vec<Kline> = (1..=10).map(|i| make_kline(i * 60_000)).collect();
-        let mut buf = Some(make_buffer(klines, 7));
-
-        // take で退避
-        let mut saved = buf.take();
-        assert!(buf.is_none(), "original should be None after take");
-
-        // cursor リセットして復元
-        if let Some(ref mut b) = saved {
-            b.cursor = 0;
-        }
-        buf = saved;
-
-        let b = buf.as_ref().unwrap();
-        assert_eq!(b.klines.len(), 10, "all klines preserved");
-        assert_eq!(b.cursor, 0, "cursor reset to 0");
-    }
-
-    // ── 離散ステップ: ReplayKlineBuffer の next/prev_time ───────────────
-
-    #[test]
-    fn next_time_after_skips_to_next_existing_kline() {
-        // 営業日: Mon=100, Tue=200, (Wed=休場), Thu=400, Fri=500
-        let klines = vec![
-            make_kline(100), make_kline(200), make_kline(400), make_kline(500),
-        ];
-        let buf = make_buffer(klines, 0);
-
-        assert_eq!(buf.next_time_after(100), Some(200));
-        assert_eq!(buf.next_time_after(200), Some(400), "休場日 300 をスキップ");
-        assert_eq!(buf.next_time_after(500), None, "終端は None");
-    }
-
-    #[test]
-    fn prev_time_before_skips_to_prev_existing_kline() {
-        let klines = vec![
-            make_kline(100), make_kline(200), make_kline(400), make_kline(500),
-        ];
-        let buf = make_buffer(klines, 0);
-
-        assert_eq!(buf.prev_time_before(500), Some(400));
-        assert_eq!(buf.prev_time_before(400), Some(200), "休場日 300 をスキップ");
-        assert_eq!(buf.prev_time_before(100), None, "始端は None");
-    }
-
-    #[test]
-    fn next_time_after_at_end_returns_none() {
-        let klines = vec![make_kline(100), make_kline(200)];
-        let buf = make_buffer(klines, 0);
-        assert_eq!(buf.next_time_after(200), None);
-    }
-
-    #[test]
-    fn prev_time_before_at_start_returns_none() {
-        let klines = vec![make_kline(100), make_kline(200)];
-        let buf = make_buffer(klines, 0);
-        assert_eq!(buf.prev_time_before(100), None);
-    }
-
-    #[test]
-    fn next_time_after_ignores_cursor_position() {
-        // cursor は表示済み位置。next/prev は cursor に依存せず全バッファから検索する。
-        let klines = vec![make_kline(100), make_kline(200), make_kline(300)];
-        let buf = make_buffer(klines, 3); // cursor 末尾
-        assert_eq!(buf.next_time_after(150), Some(200));
-        assert_eq!(buf.prev_time_before(250), Some(200));
-    }
-
-    // ── replay_buffer_ready: backfill pending vs. terminal 区別のための述語 ──
-
-    #[test]
-    fn replay_buffer_is_ready_false_when_klines_empty() {
-        // klines が空 = バックフィル中 or 未初期化 → not ready
-        let buf = ReplayKlineBuffer { klines: Vec::new(), cursor: 0 };
-        assert!(!buf.is_ready());
-    }
-
-    #[test]
-    fn replay_buffer_is_ready_true_after_insert() {
-        // 1 本でも入っていれば ready（cursor 位置に依らず）
-        let buf = ReplayKlineBuffer {
-            klines: vec![make_kline(100)],
-            cursor: 0,
-        };
-        assert!(buf.is_ready());
-    }
-
-    #[test]
-    fn replay_buffer_is_ready_true_even_when_cursor_at_end() {
-        // 終端に到達した buffer も「ready（=データはある）」と扱う。
-        // Pending は「klines が空」だけを指す。
-        let buf = ReplayKlineBuffer {
-            klines: vec![make_kline(100), make_kline(200)],
-            cursor: 2,
-        };
-        assert!(buf.is_ready());
-    }
-
-    // ── set_basis: リプレイ中 timeframe 変更で buffer を再初期化する（review 🔴 #1） ──
 
     fn build_test_kline_chart(basis: Basis) -> KlineChart {
         use data::chart::{Autoscale, KlineChartKind, ViewConfig};
@@ -2236,81 +1987,33 @@ mod tests {
         )
     }
 
-    // ── is_replay_mode: replay_kline_buffer の有無を返す ──
-
     #[test]
-    fn is_replay_mode_returns_false_when_replay_disabled() {
-        let chart = build_test_kline_chart(Basis::Time(exchange::Timeframe::M1));
-        assert!(!chart.is_replay_mode(), "新規チャートはリプレイモード無効");
-    }
-
-    #[test]
-    fn is_replay_mode_returns_true_when_replay_enabled() {
+    fn ingest_historical_klines_inserts_into_timeseries() {
         let mut chart = build_test_kline_chart(Basis::Time(exchange::Timeframe::M1));
-        chart.enable_replay_mode();
-        assert!(chart.is_replay_mode(), "enable_replay_mode 後は true");
-    }
+        let klines: Vec<Kline> = (0..5).map(|i| make_kline(i * 60_000)).collect();
 
-    #[test]
-    fn is_replay_mode_returns_false_after_disable() {
-        let mut chart = build_test_kline_chart(Basis::Time(exchange::Timeframe::M1));
-        chart.enable_replay_mode();
-        chart.disable_replay_mode();
-        assert!(!chart.is_replay_mode(), "disable_replay_mode 後は false");
-    }
+        chart.ingest_historical_klines(&klines);
 
-    #[test]
-    fn set_basis_resets_replay_kline_buffer_when_in_replay_mode() {
-        use exchange::Timeframe;
-
-        let mut chart = build_test_kline_chart(Basis::Time(Timeframe::M1));
-        chart.enable_replay_mode();
-
-        // バックフィル経由でバッファへ投入された状態を模擬する
-        {
-            let buf = chart.replay_kline_buffer.as_mut().expect("replay mode enabled");
-            buf.klines.push(make_kline(60_000));
-            buf.klines.push(make_kline(120_000));
-            buf.cursor = 1;
+        if let PlotData::TimeBased(ref ts) = chart.data_source {
+            assert_eq!(ts.datapoints.len(), 5);
+        } else {
+            panic!("expected TimeBased data source");
         }
-        assert!(
-            chart.replay_buffer_ready(),
-            "precondition: buffer populated"
-        );
-
-        // timeframe 変更 (M1 → M5)
-        let _ = chart.set_basis(Basis::Time(Timeframe::M5));
-
-        // リプレイモードは維持されたまま、buffer だけが空に再初期化される
-        let buf = chart
-            .replay_kline_buffer
-            .as_ref()
-            .expect("replay mode should be preserved across set_basis");
-        assert!(
-            buf.klines.is_empty(),
-            "set_basis should clear stale klines from old timeframe"
-        );
-        assert_eq!(buf.cursor, 0, "cursor should be reset to 0");
-        assert!(
-            !chart.replay_buffer_ready(),
-            "after reset, ready==false so fire_status treats it as Pending"
-        );
     }
 
     #[test]
-    fn set_basis_does_not_enable_replay_mode_when_disabled() {
-        use exchange::Timeframe;
+    fn reset_for_seek_clears_timeseries() {
+        let mut chart = build_test_kline_chart(Basis::Time(exchange::Timeframe::M1));
+        let klines: Vec<Kline> = (0..5).map(|i| make_kline(i * 60_000)).collect();
+        chart.ingest_historical_klines(&klines);
 
-        let mut chart = build_test_kline_chart(Basis::Time(Timeframe::M1));
-        // リプレイモード無効のまま（replay_kline_buffer == None）
-        assert!(chart.replay_kline_buffer.is_none());
+        chart.reset_for_seek();
 
-        let _ = chart.set_basis(Basis::Time(Timeframe::M5));
-
-        // 非リプレイ chart に副作用を出してはならない
-        assert!(
-            chart.replay_kline_buffer.is_none(),
-            "set_basis must not activate replay mode on a live chart"
-        );
+        if let PlotData::TimeBased(ref ts) = chart.data_source {
+            assert!(ts.datapoints.is_empty(), "reset_for_seek should clear all data");
+        } else {
+            panic!("expected TimeBased data source");
+        }
+        assert!(chart.chart.last_price.is_none());
     }
 }

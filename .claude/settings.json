@@ -75,13 +75,19 @@
       "Bash(ls C:/tmp/e2e-*.sh)",
       "Bash(bash C:/tmp/e2e-tachibana-t2.sh)",
       "Bash(\"C:/Users/sasai/Documents/flowsurface/target/release/flowsurface.exe\")",
-      "Bash(bash C:/tmp/e2e-tachibana-d1.sh)"
+      "Bash(bash C:/tmp/e2e-tachibana-d1.sh)",
+      "Bash(node -e \"console.log\\(Date.now\\(\\)\\)\")",
+      "Bash(node -e \"console.log\\(new Date\\('2026-04-13T06:00:00Z'\\).getTime\\(\\)\\)\")",
+      "Bash(node -e \"console.log\\(new Date\\('2026-04-13T09:00:00Z'\\).getTime\\(\\)\\)\")",
+      "Bash(node -e \"console.log\\(new Date\\(\\).toISOString\\(\\)\\)\")",
+      "Edit(/.claude/skills/e2e-test/**)"
     ],
     "additionalDirectories": [
       "C:\\Users\\sasai\\Documents\\marimo\\.claude\\plans",
       "\\tmp",
       "c:\\Users\\sasai\\Documents\\flowsurface\\.claude\\skills",
-      "c:\\Users\\sasai\\Documents\\flowsurface\\docs\\plan"
+      "c:\\Users\\sasai\\Documents\\flowsurface\\docs\\plan",
+      "C:\\tmp"
     ]
   }
 }

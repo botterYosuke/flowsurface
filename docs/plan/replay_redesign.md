@@ -136,6 +136,17 @@ impl VirtualClock {
     pub fn pause(&mut self) { ... }
     pub fn seek(&mut self, target_ms: u64) { ... } // step forward/back で使用
     pub fn set_speed(&mut self, speed: f32) { ... }
+
+    /// Waiting 状態に落とす（Store 未 load が検出されたとき）。
+    /// anchor_wall は None にリセット、Playing へ戻るときに再設定。
+    /// **冪等**: 既に Waiting なら何もしない。毎フレームの dispatch_tick から
+    /// 安全に呼び出せる。
+    pub fn set_waiting(&mut self) { ... }
+
+    /// Waiting → Playing へ復帰する。EventStore::ingest_loaded 完了時に呼ぶ。
+    /// 新しい wall_now を anchor にするため、待機中の実時間経過ぶんは
+    /// 仮想時間に反映されない（= データ待ちで空転する秒を飛ばす）。
+    pub fn resume_from_waiting(&mut self, wall_now: Instant) { ... }
 }
 ```
 
@@ -174,27 +185,21 @@ impl EventStore {
 ```
 
 **ポイント**: cursor を廃止。クエリ API で時刻範囲を受け取り、binary search で slice を返す。
-Step Backward も `Clock::seek(t)` → 次フレームで `trades_in(s, t..new_now)` で自然に処理される。
+Step Backward は Store 側では自然に扱えるが、チャート側の再構築が必要（下記「Step Backward フロー」参照）。
 
-#### `Dispatcher`
+#### `dispatch_tick` (free function)
+
+Dispatcher はフィールドを持たないため struct ではなく module-level free function にする。
 
 ```rust
-/// VirtualClock と EventStore を橋渡しするステートレスなロジック層。
-/// 各 Tick で呼ばれ、emit すべきイベントを集めて返す。
-pub struct Dispatcher;
-
-impl Dispatcher {
-    /// フレーム駆動エントリポイント。
-    /// - clock を advance してイベント範囲を取得
-    /// - 各 active stream について store.*_in() でイベント抽出
-    /// - (stream, events) 列を返す（呼び出し側が chart に ingest）
-    pub fn tick(
-        clock: &mut VirtualClock,
-        store: &EventStore,
-        active_streams: &HashSet<StreamKind>,
-        wall_now: Instant,
-    ) -> DispatchResult;
-}
+/// 各 Tick で呼ばれ、clock を進めて emit すべきイベントを集めて返す。
+/// VirtualClock と EventStore の橋渡しをするステートレスなロジック。
+pub fn dispatch_tick(
+    clock: &mut VirtualClock,
+    store: &EventStore,
+    active_streams: &HashSet<StreamKind>,
+    wall_now: Instant,
+) -> DispatchResult;
 
 pub struct DispatchResult {
     pub current_time: u64,
@@ -205,7 +210,7 @@ pub struct DispatchResult {
 }
 ```
 
-**ポイント**: FireStatus が消滅。Dispatcher は clock が進めば進んだぶんのイベントを返すだけで、
+**ポイント**: FireStatus が消滅。`dispatch_tick` は clock が進めば進んだぶんのイベントを返すだけで、
 「バックフィル中」「pending」といった概念を持たない（待機は Clock 側の `Waiting` で表現）。
 
 #### チャート側の変更
@@ -217,9 +222,46 @@ pub struct DispatchResult {
 // update_latest_kline / insert_hist_klines は Live / Replay で完全に同一経路
 pub fn ingest_historical_klines(&mut self, klines: &[Kline]) { ... }
 pub fn ingest_trades(&mut self, trades: &[Trade]) { ... } // Live と同じ
+
+// Step Backward / Seek 時のチャート全リセット。
+// 呼び出し後に Dashboard が [replay.start_ms, seek_target] の履歴を再 ingest する。
+pub fn reset_for_seek(&mut self) { ... }
 ```
 
 **ポイント**: チャートは自分がリプレイ中かを一切知らない。WebSocket と Dispatcher が emit するイベントが同じ型なので、ingest 経路も同一。
+
+#### Step Backward / Seek フロー
+
+`Clock::seek(t_past)` で巻き戻す場合、チャートは既に `t_prev > t_past` までの kline/trade を描画済みであり、
+単に Clock の `now_ms` を戻すだけでは画面状態と仮想時刻が不整合になる。
+このため Dashboard は seek リクエスト時に全 active pane のチャートを**一度リセットしてから**
+`[replay.start_ms, t_past]` の履歴を Store から引き直して再 ingest する。
+
+```text
+Message::Replay(StepBackward) / SeekTo(t_past)
+  ↓
+for each active pane:
+    chart.reset_for_seek()                                 // 描画済み状態をクリア
+    for each stream in pane.streams:
+        let klines = store.klines_in(stream, start..t_past).to_vec();
+        let trades = store.trades_in(stream, start..t_past).to_vec();
+        chart.ingest_historical_klines(&klines);           // チャートを t_past 時点に再構築
+        chart.ingest_trades(&trades);
+  ↓
+clock.seek(t_past)                                         // Clock を巻き戻し
+clock.play(wall_now)                                       // 必要なら再開
+```
+
+**コスト見積もり**:
+- `klines_in` / `trades_in` は binary search で slice を返すだけなので `O(log N)`。
+- `ingest_historical_klines` / `ingest_trades` は既存の live 経路と同じコストで、通常 replay range（Binance 数時間）では 10ms オーダーと見込まれる。
+- 頻繁な step backward（数秒に 1 回）でも UI 操作として許容範囲。
+- 非常に長い replay range で問題が出た場合は、Store 側に「seek target 近辺のみ再 ingest」の window 最適化を追加する余地がある（R3 の範囲外）。
+
+**旧設計との比較**:
+- 旧設計では `TradeBuffer::advance_cursor_to` が cursor を遡上させるだけで、チャート側の巻き戻しは別経路だった。
+- 新設計では「チャート状態 = Store からの全再生」という single source of truth が成立するため、
+  巻き戻し処理が「reset → 再 ingest」の 2 ステップで閉じる。cursor 復元ロジックや「未処理 trade の破棄」といった特殊ケースが消える。
 
 ---
 
@@ -231,7 +273,7 @@ src/
 │   ├── mod.rs              # 公開 API (ReplayState, ReplayMessage)
 │   ├── clock.rs            # VirtualClock + ClockStatus
 │   ├── store.rs            # EventStore + SortedVec
-│   ├── dispatcher.rs       # Dispatcher::tick
+│   ├── dispatcher.rs       # dispatch_tick (free function)
 │   ├── loader.rs           # 履歴データ fetch (現 fetch_trades_batched をここに移動)
 │   └── ui.rs               # Replay header widget (現 replay.rs の UI 部分)
 └── chart/kline.rs          # replay_* 系フィールド/メソッド全削除
@@ -241,24 +283,32 @@ src/
 
 ## 移行計画（Phase 分割）
 
+現状コードを段階的に差し替える。Phase 間で `cargo check` / 既存テストが壊れないことを必須とする。
+**feature flag は使わない**（`#[cfg]` ノイズが最終コードに残るため）。
+R4 で旧経路を一括で新経路に差し替え、不具合時は `git revert` で戻す。
+
 | Phase | 内容 | 検証 |
 |:-:|---|---|
-| **R0** | 新モジュール `src/replay/` スケルトン追加。既存 `src/replay.rs` はそのまま残す。 | `cargo check` |
-| **R1** | `VirtualClock` 実装 + 単体テスト (play/pause/seek/speed)。 | `cargo test replay::clock` |
-| **R2** | `EventStore` 実装 + 単体テスト (trades_in / klines_in / is_loaded)。 | `cargo test replay::store` |
-| **R3** | `Dispatcher::tick` 実装 + 単体テスト (range 抽出と DispatchResult)。 | `cargo test replay::dispatcher` |
-| **R4** | 新 Clock/Store/Dispatcher を **feature flag `new_replay`** で配線。`main.rs::Tick` 分岐で新経路を選択可能に。既存経路はそのまま残す。 | 手動切替で両経路を並行動作 |
-| **R5** | Binance 向け履歴 loader (`replay/loader.rs`) 移植。EventStore に bulk load できるか確認。 | Replay Play で M1 が描画される |
-| **R6** | KlineChart から `replay_kline_buffer` / `enable_replay_mode` / `replay_advance` を削除。`update_latest_kline` / `insert_hist_klines` が Live 経路と統一されることを確認。 | E2E: §6.2 #1 (M1 etc.) |
-| **R7** | mid-replay CRUD: set-ticker / split / set-timeframe / close が新経路で動作することを確認。`SyncReplayBuffers` メッセージを削除。 | E2E: §6.2 #2, #5, #6, #7, #8 |
-| **R8** | Tachibana D1 経路で throttling を新設計に移植。COARSE_CUTOFF_MS を廃止し、**Clock に `bar_step_mode: bool`** を導入して D1 のときだけ「1 バー描画後に wall 1 秒待機」へ切替。 | E2E: §6.2 #2 (Tachibana D1) |
-| **R9** | heatmap-only fallback 経路が新設計では自動的に動作することを確認 (FireStatus 廃止により linear advance fallback も不要)。 | E2E: heatmap-only mid-replay |
-| **R10** | 旧 `src/replay.rs` の全コード削除。feature flag `new_replay` を削除して新経路を既定に。全 236 E2E + ユニットテストが PASS することを確認。 | `cargo test` + 全 E2E green |
+| **R1** ✅ | 新モジュール `src/replay/` スケルトン + `VirtualClock` + `EventStore` + `dispatch_tick` を 1 PR で追加。既存コードに一切触れない新規ファイルのみ。各コンポーネントの単体テストを同時に追加。 | `cargo test replay::{clock,store,dispatcher}` |
+| **R2** ✅ | Binance 向け履歴 loader (`replay/loader.rs`) 実装。現 `fetch_trades_batched` / kline fetch ロジックを EventStore に bulk load する形に書き直す。既存コードは未変更のため Live も Replay も現状動作のまま。 | loader 単体テスト: bulk load が完了すると EventStore::is_loaded が true を返す |
+| **R3** ✅ | `main.rs::Tick` で旧 `process_tick` 経路を新 `dispatch_tick` 経路に差し替え。KlineChart から `replay_kline_buffer` / `enable_replay_mode` / `replay_advance` / `is_replay_mode` を削除し、`update_latest_kline` / `insert_hist_klines` を Live 経路と統一。旧 `src/replay.rs` の `PlaybackState` / `FireStatus` / `process_tick` / `TradeBuffer` / `ReplayKlineBuffer` を削除。 | 既存 E2E: §6.2 #1 / #3 / #4（Binance M1 等の基本リプレイ 21 件）、`cargo test` |
+| **R4** | mid-replay CRUD: `SyncReplayBuffers` メッセージを削除し、set-ticker / split / set-timeframe / close 各ハンドラで `EventStore::request_load` / `drop_stream` を直接呼ぶ形に。`Message::ReplayLoadCompleted` を追加し Waiting 復帰フローを配線。 | E2E: §6.2 #2, #5, #6, #7, #8（mid-replay CRUD 系） |
+| **R5** | Tachibana D1 経路: `VirtualClock::enable_bar_step_mode` を実装。Dashboard で active pane の最大 timeframe を判定して `>= D1` なら呼び出す。 | E2E: §6.2 #2 (Tachibana D1) |
+| **R6** | heatmap-only リプレイ: FireStatus / linear advance fallback が廃止されたため、新経路で自動動作することを確認。`pane_crud_api.md` Phase T 残課題 G9 に対応。 | E2E: heatmap-only mid-replay |
+| **R7** | cleanup: 残った旧コード削除、import 整理、ドキュメント更新 (`replay_header.md` の記述を新設計に合わせる)。全 236 E2E + ユニットテストが PASS することを確認。 | `cargo test` + 全 E2E green |
 
 ### ロールバック戦略
 
-R4〜R9 の全期間で feature flag `new_replay` により旧実装へ即座に戻せる。
-R10 のみ不可逆だが、git revert で巻き戻し可能。
+各 Phase を独立した PR にし、不具合検出時は `git revert` で直前 Phase に戻す。
+R3 が最大の差分（旧経路削除）のため、R3 の PR だけは特に入念なレビューと手動検証を行う。
+
+### 旧設計との並行動作を行わない理由
+
+feature flag `new_replay` で旧経路を残す選択肢もあるが、次の理由で採用しない：
+
+1. **`#[cfg]` ノイズ**: 旧 `src/replay.rs` と新 `src/replay/` が両方ビルドされる期間、`main.rs::Tick` / Dashboard / KlineChart に `#[cfg(feature = "new_replay")]` 分岐が入る
+2. **二重メンテ**: Phase R3-R7 中に既存バグが報告された場合、新旧両方に修正が必要になる
+3. **git は十分なロールバック手段**: R3 の PR を revert すれば 1 コマンドで旧経路に戻せる
 
 ---
 
@@ -301,12 +351,30 @@ fn advance(&mut self, wall_now: Instant) -> Range<u64> {
 - `last_tick` — `anchor_wall` に統合
 - `comparison_threshold` / COARSE_CUTOFF_MS — 不要
 
+#### ✅ R1 実装メモ (2026-04-13)
+
+- `src/replay.rs` → `src/replay/mod.rs` に移動し、先頭に `pub mod clock; pub mod store; pub mod dispatcher;` を追加。既存コードへの変更はこれのみ。
+- `replay/clock.rs`: `VirtualClock` + `ClockStatus` 実装。`bar_step_mode` も R5 用に先行実装（フィールド追加のみ、R5 で配線する）。
+- `replay/store.rs`: `EventStore` + `SortedVec<T>` 実装。`partition_point` で binary search range 切り出し。`dedup_by_key` で重複排除。
+- `replay/dispatcher.rs`: `dispatch_tick` free function + `DispatchResult` 実装。
+- テスト: 合計 32 件追加（clock: 19件、store: 7件、dispatcher: 5件）。全 190 件 green。
+- 注意点: `exchange::Volume::default()` は存在しない。`Volume::empty_total()` を使う。
+- 注意点: `TickerInfo::new(ticker, min_ticksize_f32, min_qty_f32, contract_size_option_f32)` のシグネチャ（型変換は内部で行う）。
+
 ### R2: EventStore
 
 #### 保存形式
 
 `SortedVec<T>` は内部的に `Vec<T>` で、挿入時に `sort_by_key` で時刻順を維持、
 クエリは `binary_search_by_key` で range 切り出し。メモリ効率と実装単純性のトレードオフで `Vec` を選択。
+
+#### ✅ R2 実装メモ (2026-04-13)
+
+- `replay/loader.rs` 作成。`load_klines(stream, range) -> Result<KlineLoadResult, String>` async fn を実装。
+- klines は `Task::perform(load_klines(...), ...)` で一括 fetch する設計。
+- trades は既存 `build_trades_backfill_task` の sip パターンを踏襲（R4 で EventStore 統合）。
+- 単体テスト 5 件: `ingest_loaded → is_loaded / trades_in / klines_in` の振る舞いを検証。全 195 件 green。
+- 注意点: `range_slice` は `partition_point(t < range.end)` なので **range.end 自体は含まない**（half-open range）。テスト設計時に注意。
 
 #### 複数 range の管理
 
@@ -316,24 +384,46 @@ fn advance(&mut self, wall_now: Instant) -> Range<u64> {
 
 #### CRUD 時の追加 load
 
+`active_streams` は **Dashboard が所有する** `HashSet<StreamKind>` であり、
+ペインの追加・削除・ticker 変更に応じて Dashboard が更新する。
+Dispatcher は受け取るだけで自身は保持しない。
+
 ```
 // Message::PaneSetTicker(pane_id, new_ticker)
 // → 旧: SyncReplayBuffers チェーン
-// → 新: Task::batch [
-//        EventStore::request_load(new_stream, replay.range),
-//        Dispatcher は次フレームで自動的に new_stream を active_streams に含む
-//      ]
+// → 新:
+//    1. dashboard.active_streams.insert(new_stream)    // Dashboard が管理
+//    2. dashboard.active_streams.remove(old_stream)    // 旧 stream が orphan なら削除
+//    3. Task::batch [
+//         EventStore::request_load(new_stream, replay.range),
+//         store.drop_stream(old_stream) if orphan,
+//       ]
+//    4. 次フレームの Message::Tick で dispatch_tick(active_streams, ...)
+//       が呼ばれ、新 stream の events が自動的に emit される
 ```
+
+#### ✅ R3 実装メモ (2026-04-13)
+
+- `src/chart/kline.rs`: `replay_kline_buffer` フィールド削除、`enable_replay_mode` / `disable_replay_mode` / `is_replay_mode` / `replay_buffer_ready` / `replay_buffer_cursor` / `replay_buffer_len` / `replay_next_kline_time` / `replay_prev_kline_time` / `replay_advance` メソッド削除。`insert_hist_klines` の replay 分岐を削除（Live 経路のみに統一）。`set_basis` の replay バッファクリア処理を削除。`ingest_historical_klines` / `reset_for_seek` を新規追加。旧 replay テスト群を削除し `ingest_historical_klines`・`reset_for_seek` の新規テストを追加。
+- `src/screen/dashboard/pane.rs`: `enable_replay_mode_if_needed` / `rebuild_content_for_step_backward` / `replay_kline_chart_ready` / `replay_buffer_cursor` / `replay_buffer_len` / `replay_next_kline_time` / `replay_prev_kline_time` / `replay_advance_klines` を削除。`rebuild_content_for_replay` を追加（内部は `rebuild_content(true)`）。`ingest_replay_klines` / `reset_for_seek` を新規追加。`insert_hist_klines` の `is_replay_mode()` ガードを削除。
+- `src/screen/dashboard.rs`: `replay_advance_klines` / `replay_next_kline_time` / `replay_prev_kline_time` / `fire_status` / `collect_new_replay_klines` / `rebuild_for_step_backward` を削除。`ingest_replay_klines(stream, klines, main_window)` を新規追加（stream で対応ペインを検索して注入）。
+- `src/replay/mod.rs`: `ReplayState` を `clock: Option<VirtualClock>` / `event_store: EventStore` / `active_streams: HashSet<StreamKind>` ベースに再定義。`PlaybackState` / `PlaybackStatus` / `FireStatus` / `process_tick` / `TradeBuffer` / `TradeStreamDiff` / `last_tick` / `virtual_elapsed_ms` をすべて削除。`on_klines_loaded` / `on_trades_loaded` / `try_resume_from_waiting` / `start` / `resume_from_waiting` / `is_playing` / `is_paused` / `is_loading` / `current_time` / `cycle_speed` / `speed_label` を新規追加。
+- `src/main.rs`: `Tick` ハンドラを `dispatch_tick` 経路に差し替え。`Play` ハンドラを `replay.start()` + `Task::perform(load_klines)` に差し替え。`KlinesLoadCompleted` ハンドラを追加。`Resume` / `Pause` / `CycleSpeed` / `StepForward` / `StepBackward` を新 API に更新。旧互換メッセージ (`DataLoaded`, `TradesBatchReceived`, `TradesFetchCompleted`, `SyncReplayBuffers`) を no-op スタブ化。View コードの `playback.status == PlaybackStatus::*` 参照を `replay.is_playing()` / `is_paused()` / `is_loading()` に置き換え。
+- 設計偏差: `TickAggr::tick_interval` は存在せず `interval` が正フィールド名。`klines_in` は半開区間 `Range<u64>` のみ受け付け、`0..=t` の代わりに `0..t+1` を使用。旧互換 `build_kline_backfill_task` / `build_trades_backfill_task` は R4 まで残置（dead_code 警告あり）。
 
 ### R3: Dispatcher
 
 #### tick の擬似コード
 
+設計原則 #4「Play 押下時に replay range 全体を bulk load する」により、
+Dispatcher は常に **full replay range** が loaded されているかだけを確認すれば良い。
+`estimated_delta` 等の予測は不要。
+
 ```
-fn tick(clock, store, active_streams, wall_now) -> DispatchResult {
-    // 1. 全 active_streams の range が loaded か確認
+fn dispatch_tick(clock, store, active_streams, wall_now) -> DispatchResult {
+    // 1. 全 active_streams の full replay range が loaded か確認
     for stream in active_streams {
-        if !store.is_loaded(stream, clock.now_ms..clock.now_ms + estimated_delta) {
+        if !store.is_loaded(stream, clock.full_range()) {
             clock.set_waiting();
             return DispatchResult::empty(clock.now_ms);
         }
@@ -362,6 +452,24 @@ fn tick(clock, store, active_streams, wall_now) -> DispatchResult {
 }
 ```
 
+#### Waiting → Playing 復帰フロー
+
+`set_waiting` に落ちた後の再開は **Dashboard::update (Message::ReplayLoadCompleted) で明示的にトリガ**する。
+次フレームの自動検出にしない理由：
+- `VirtualClock::anchor_wall` のリセットを確実に行うため
+- load 完了タイミングと次フレームの `wall_now` を区別するため
+
+```
+Message::ReplayLoadCompleted(stream, range, data)
+  → store.ingest_loaded(stream, range, data)
+  → if clock.status == Waiting && all active_streams loaded:
+        clock.resume_from_waiting(Instant::now())
+  → 次の Message::Tick で dispatch_tick が通常経路を走る
+```
+
+これにより load 完了から再生再開までのラグが 1 フレーム以内に抑えられ、
+かつ待機中に仮想時間が進まない（anchor_wall を load 完了時刻にリセットするため）ことが保証される。
+
 #### FireStatus 廃止の根拠
 
 旧設計で `Pending` が必要だったのは「バックフィル中の chart に next_time を問い合わせられない」ため。
@@ -369,9 +477,9 @@ fn tick(clock, store, active_streams, wall_now) -> DispatchResult {
 
 - **チャートに next_time は一切問い合わせない**。Store に問い合わせる。
 - **Store がまだデータを持っていない場合は Clock が Waiting に落ちる**。自動的にタイム進行が止まる。
-- **新 stream の追加は Store::request_load で完結**。バックフィル完了時に自動再開。
+- **新 stream の追加は Store::request_load で完結**。バックフィル完了時に上記の復帰フローで自動再開。
 
-### R8: D1 自動再生スロットリング (新設計)
+### R5: D1 自動再生スロットリング (新設計)
 
 COARSE_CUTOFF_MS ベースの heuristic を廃止し、**Clock に明示的な `bar_step_mode` を導入**する。
 
@@ -386,20 +494,36 @@ impl VirtualClock {
 #### 切替判断
 
 Dashboard が active pane の最大 timeframe を計算し、`>= D1` なら `enable_bar_step_mode(86_400_000, 1_000)` を呼ぶ。
-この判断はリプレイ Play 時に 1 回だけ行う。timeframe 変更時に再計算。
+この判断はリプレイ Play 時に 1 回だけ行う。timeframe 変更時に再計算。Phase R5 で実装する。
 
 #### advance の擬似コード（bar_step_mode 有効時）
 
+`bar_step_mode` は **wall_delay_ms ごとに確実に 1 バーずつ進める** 仕様とする。
+wall 時間が `wall_delay_ms × N` 経過していれば **N バー catch-up する**（等速ペーシング）。
+この catch-up により、フレーム落ちやユーザーがウィンドウ切替等で戻って来た際にも
+「1 秒あたり 1 バー」の期待を保てる。
+
 ```
 if bar_step_mode {
-    let next_bar = ((now_ms / bar_interval_ms) + 1) * bar_interval_ms;
-    if wall_now - anchor_wall >= wall_delay_ms {
-        self.now_ms = next_bar;
-        self.anchor_wall = Some(wall_now);
+    let prev = self.now_ms;
+    let wall_elapsed_ms = (wall_now - anchor_wall).as_millis() as u64;
+    let bars_to_advance = wall_elapsed_ms / wall_delay_ms;
+    if bars_to_advance > 0 {
+        let current_bar = now_ms / bar_interval_ms;
+        let next_bar_time = (current_bar + bars_to_advance) * bar_interval_ms;
+        self.now_ms = next_bar_time.min(self.range.end);
+        // 消費した wall 時間ぶんだけ anchor を進める（余剰は次 frame に繰り越し）
+        self.anchor_wall = Some(anchor_wall + Duration::from_millis(bars_to_advance * wall_delay_ms));
+        if self.now_ms >= self.range.end { self.status = Paused; }
     }
     return prev..self.now_ms;
 }
 ```
+
+**ポイント**:
+- **「1 バーだけ」ではなく「経過時間ぶんの catch-up」**。タブ切替で 10 秒止まった後に戻ってくると 10 バー一気に進む。
+- `anchor_wall` は消費した bar 分だけ進めることで、余剰の wall 時間（`wall_elapsed_ms % wall_delay_ms`）を次フレームに繰り越す。これにより端数誤差が累積しない。
+- UX 上「タブ切替後に瞬時に 10 バー進む」が許容できない場合は catch-up 上限を設ける（例：`bars_to_advance.min(3)`）。初期実装では上限なしで始め、必要なら R5 のレビューで追加。
 
 **利点**: D1 throttling が統一 Tick ループから独立した設定になり、テストが単純化される。
 
@@ -413,17 +537,17 @@ if bar_step_mode {
 2. **FireStatus 廃止**: Dashboard → 各ペイン → Clock の依存グラフが消え、コンポーネント単方向に整う。
 3. **チャートが非対称性を持たない**: `fix_replay_pending_deadlock.md` で発生したようなモード取り違いバグが構造的に不可能になる。
 4. **mid-replay CRUD がイベント駆動**: `SyncReplayBuffers` チェーン忘れバグが構造的に不可能になる。
-5. **Step Backward が自然**: `Clock::seek(t)` → Dispatcher が次フレームで `t..new_now` を返すだけ。cursor 復元ロジック不要。
+5. **Step Backward が 2 ステップで閉じる**: `chart.reset_for_seek()` → `store.klines_in(start..t)` を再 ingest するだけ。cursor 復元 / 「未処理 trade 破棄」のような特殊ケースが消え、「画面状態 = Store からの全再生」という single source of truth が成立する。
 6. **テストの単純化**: Clock / Store / Dispatcher が互いに独立した純粋関数層になり、境界値テストが激減する。
 
 ### Cons / リスク
 
-1. **移行コストが大きい**: Phase R0-R10 で推定 1-2 週間。既存 E2E 236 件の再検証が必要。
+1. **移行コストが大きい**: Phase R1-R7 で推定 1-2 週間。既存 E2E 236 件の再検証が必要。
 2. **EventStore のメモリ使用量**: replay range 全体を bulk load するため、長時間 replay でメモリが増える。
    - 対策: 初期実装は Binance 数時間の range を想定 → 問題が出たら lazy window 方式に移行。
-3. **bar_step_mode の導入タイミング**: D1 判断ロジックを Dashboard 側に持たせるか Clock 側に持たせるかで責務境界が悩ましい。R8 でプロトタイプし決定。
-4. **Dispatcher が全 active_streams をループするコスト**: 各フレームで stream 数 × binary_search。現実的には stream 数 ≤ 10 程度なので問題ないはずだが、R5 で計測する。
-5. **feature flag 期間の二重メンテ**: R4-R10 中は旧経路と新経路が共存するため、バグ修正が両方に必要になる可能性がある。R4-R10 を連続実行して期間を最小化する。
+3. **bar_step_mode の導入タイミング**: D1 判断ロジックを Dashboard 側に持たせるか Clock 側に持たせるかで責務境界が悩ましい。R5 でプロトタイプし決定。
+4. **`dispatch_tick` が全 active_streams をループするコスト**: 各フレームで stream 数 × binary_search。現実的には stream 数 ≤ 10 程度なので問題ないはずだが、R2 で計測する。
+5. **R3 の一括差し替えリスク**: feature flag を使わないため、R3 の PR で旧経路が即削除される。手動検証 + 主要 E2E の事前 run を必須とする。
 
 ---
 
@@ -444,16 +568,16 @@ if bar_step_mode {
 
 ### 立花 D1 経路
 
-新設計 R8 の `bar_step_mode` は現行 COARSE 経路より意図が明示的で、テスト容易性が向上する。
+新設計 R5 の `bar_step_mode` は現行 COARSE 経路より意図が明示的で、テスト容易性が向上する。
 
 ---
 
 ## 次のステップ
 
 1. 本プランをレビュー → 合意取得
-2. Phase R0 着手: `src/replay/` スケルトン追加 + 既存 `src/replay.rs` をそのまま保持
-3. 各 Phase ごとに短い PR を作成し、feature flag `new_replay` 経由で段階的に切替
-4. R10 で旧コード削除
+2. Phase R1 着手: `src/replay/` スケルトン + `VirtualClock` + `EventStore` + `dispatch_tick` を 1 PR で追加（既存コード未変更）
+3. R2 以降は各 Phase を独立 PR にし、不具合時は `git revert` でロールバック
+4. R3 の PR は特に入念なレビュー（旧経路を一括削除するため）
 
 ## 参考
 

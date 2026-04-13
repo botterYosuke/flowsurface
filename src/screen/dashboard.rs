@@ -12,7 +12,6 @@ use crate::{
         ResolvedStream,
         fetcher::{self, FetchedData, InfoKind},
     },
-    replay,
     screen::dashboard::tickers_table::TickersTable,
     style,
     widget::toast::Toast,
@@ -1084,87 +1083,23 @@ impl Dashboard {
         }
     }
 
-    /// リプレイ進行: 全ペインの kline バッファから current_time 以下のデータを挿入する
-    /// StepBackward 用: 全ペインのチャートをリビルドしつつ kline バッファを保持する。
-    pub fn rebuild_for_step_backward(&mut self, main_window: window::Id) {
-        self.iter_all_panes_mut(main_window)
-            .for_each(|(_, _, state)| {
-                state.rebuild_content_for_step_backward();
-            });
-    }
-
-    pub fn replay_advance_klines(&mut self, current_time: u64, main_window: window::Id) {
-        self.iter_all_panes_mut(main_window)
-            .for_each(|(_, _, state)| {
-                state.replay_advance_klines(current_time);
-            });
-    }
-
-    /// 全ペインのリプレイバッファから current_time より後の最も近い kline 時刻を返す。
-    pub fn replay_next_kline_time(
-        &self,
-        current_time: u64,
+    /// リプレイ用: dispatch_tick から得た klines を対応するペインに注入する。
+    /// stream の ticker_info でペインを照合して注入する。
+    pub fn ingest_replay_klines(
+        &mut self,
+        stream: &exchange::adapter::StreamKind,
+        klines: &[Kline],
         main_window: window::Id,
-    ) -> Option<u64> {
-        self.iter_all_panes(main_window)
-            .filter_map(|(_, _, state)| state.replay_next_kline_time(current_time))
-            .min()
-    }
-
-    /// 全ペインのリプレイバッファから current_time より前の最も近い kline 時刻を返す。
-    pub fn replay_prev_kline_time(
-        &self,
-        current_time: u64,
-        main_window: window::Id,
-    ) -> Option<u64> {
-        self.iter_all_panes(main_window)
-            .filter_map(|(_, _, state)| state.replay_prev_kline_time(current_time))
-            .max()
-    }
-
-    /// 統一 Tick ハンドラ用の `FireStatus` を計算する（§2.1 / §2.2）。
-    ///
-    /// 全ペインの kline chart を走査し:
-    /// - ready chart の `replay_next_kline_time(current_time)` の min を `Ready(t)` として返す
-    /// - ready chart が 1 つも min を返さず、unready (backfill 中) chart があれば `Pending`
-    /// - それ以外（全 ready が終端、unready 無し）は `Terminal`
-    ///
-    /// 戻り値 `None`: このダッシュボードに kline chart が 1 つも存在しない
-    /// （fire_status では判定できないので、呼び出し側で linear fallback などを使う）。
-    pub fn fire_status(
-        &self,
-        current_time: u64,
-        main_window: window::Id,
-    ) -> Option<replay::FireStatus> {
-        let mut min_time: Option<u64> = None;
-        let mut has_pending = false;
-        let mut has_any_kline = false;
-
-        for (_, _, state) in self.iter_all_panes(main_window) {
-            match state.replay_kline_chart_ready() {
-                None => continue,
-                Some(false) => {
-                    has_any_kline = true;
-                    has_pending = true;
-                }
-                Some(true) => {
-                    has_any_kline = true;
-                    if let Some(t) = state.replay_next_kline_time(current_time) {
-                        min_time = Some(min_time.map_or(t, |m| m.min(t)));
-                    }
-                }
+    ) {
+        for (_, _, state) in self.iter_all_panes_mut(main_window) {
+            let has_stream = state
+                .streams
+                .ready_iter()
+                .is_some_and(|mut iter| iter.any(|s| s == stream));
+            if has_stream {
+                state.ingest_replay_klines(klines);
             }
         }
-
-        if !has_any_kline {
-            return None;
-        }
-
-        Some(match (min_time, has_pending) {
-            (Some(t), _) => replay::FireStatus::Ready(t),
-            (None, true) => replay::FireStatus::Pending,
-            (None, false) => replay::FireStatus::Terminal,
-        })
     }
 
     pub fn invalidate_all_panes(&mut self, main_window: window::Id) {
@@ -1354,41 +1289,6 @@ impl Dashboard {
             .for_each(|(_, _, state)| {
                 state.content.update_theme(theme);
             });
-    }
-
-    /// mid-replay で新規追加されたペインの kline chart を replay モードに切り替え、
-    /// そのペインの kline stream (pane_id, stream) を返す（バックフィル対象）。
-    ///
-    /// 「新規追加」の判定: `chart.replay_buffer_ready() == false && replay_kline_buffer == None`
-    /// すなわち kline chart があるが replay モードに入っていないペイン。
-    /// 既に replay モードのペインはスキップ（冪等）。
-    pub fn collect_new_replay_klines(
-        &mut self,
-        main_window: window::Id,
-    ) -> Vec<(uuid::Uuid, StreamKind)> {
-        let mut targets = Vec::new();
-        for (_, _, state) in self.iter_all_panes_mut(main_window) {
-            let pane_id = state.unique_id();
-            let kline_streams: Vec<StreamKind> = state
-                .streams
-                .ready_iter()
-                .map(|iter| {
-                    iter.filter(|s| matches!(s, StreamKind::Kline { .. }))
-                        .copied()
-                        .collect()
-                })
-                .unwrap_or_default();
-            if kline_streams.is_empty() {
-                continue;
-            }
-            if !state.enable_replay_mode_if_needed() {
-                continue;
-            }
-            for stream in kline_streams {
-                targets.push((pane_id, stream));
-            }
-        }
-        targets
     }
 
     /// リプレイ用にペインの content をクリアし、各ペインの kline StreamKind + pane_id を返す。
