@@ -96,7 +96,9 @@
       "Bash(node -e \"const d=JSON.parse\\(require\\('fs'\\).readFileSync\\('C:/Users/sasai/AppData/Roaming/flowsurface/saved-state_old.json','utf8'\\)\\); console.log\\('mode:', d.replay?.mode, 'range_start:', d.replay?.range_start, 'stream:', JSON.stringify\\(d.layout_manager?.layouts?.[0]?.dashboard?.pane?.KlineChart?.stream_type?.[0]\\)\\);\")",
       "Bash(node -e \"const d=JSON.parse\\(require\\('fs'\\).readFileSync\\('C:/Users/sasai/AppData/Roaming/flowsurface/saved-state.json.phase4.bak','utf8'\\)\\); console.log\\('timezone:', d.timezone\\);\")",
       "Bash(bash C:/tmp/e2e_phase4_fix.sh)",
-      "Bash(node -e \"const d=JSON.parse\\(require\\('fs'\\).readFileSync\\('C:/Users/sasai/AppData/Roaming/flowsurface/saved-state.json','utf8'\\)\\); console.log\\('mode:', d.replay?.mode, 'timezone:', d.timezone, 'stream:', d.layout_manager?.layouts?.[0]?.dashboard?.pane?.KlineChart?.stream_type?.[0]?.Kline?.ticker\\);\")"
+      "Bash(node -e \"const d=JSON.parse\\(require\\('fs'\\).readFileSync\\('C:/Users/sasai/AppData/Roaming/flowsurface/saved-state.json','utf8'\\)\\); console.log\\('mode:', d.replay?.mode, 'timezone:', d.timezone, 'stream:', d.layout_manager?.layouts?.[0]?.dashboard?.pane?.KlineChart?.stream_type?.[0]?.Kline?.ticker\\);\")",
+      "Bash(bash C:/tmp/e2e_tac_tokyo.sh)",
+      "Bash(tasklist //fi \"imagename eq flowsurface.exe\")"
     ],
     "additionalDirectories": [
       "C:\\Users\\sasai\\Documents\\marimo\\.claude\\plans",

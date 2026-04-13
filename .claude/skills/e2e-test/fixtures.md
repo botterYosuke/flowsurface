@@ -9,7 +9,7 @@
 |------|--------|------|
 | ティッカー | `BinanceLinear:BTCUSDT` | データ豊富。`fetch_trades_batched()` は Binance のみ対応 |
 | タイムフレーム | `M1` | 本数が多いが fetch_klines は自動ページングで取得 |
-| `timezone` | `"UTC"` または `"Local"` | **"Asia/Tokyo" 等は parse エラー** → `saved-state_old.json` に rename されてデフォルト Live 起動になる |
+| `timezone` | `"UTC"` または `"Local"` | 不明値（"Asia/Tokyo" 等）は warn ログを出して `UTC` にフォールバック（他フィールドは温存される）。fixture では明示的に `"UTC"` を指定すること |
 | `trade_fetch_enabled` | `false` | ライブ trades フェッチを止めてノイズ削減 |
 | ペイン数 | 最小限 | フェッチ対象減でテスト高速化 |
 | リプレイ日時 | 過去 24-48h 以内 | Binance API からデータ取得可能な範囲 |
@@ -284,6 +284,6 @@ Tachibana セッション有り → session 復元 → master download → auto-
 ```
 
 **注意**:
-- `timezone` は必ず `"UTC"` または `"Local"` を使うこと（`"Asia/Tokyo"` は parse エラーになる）
+- `timezone` は `"UTC"` または `"Local"` のみが正規値。不明値は warn ログ + `UTC` フォールバックで他フィールドは温存されるが、fixture では明示的に `"UTC"` を指定する
 - セッションあり: auto-play が master download 後に発火（最大 120s でポーリング）
 - セッションなし: ログに `auto-play deferred`、mode=Replay のまま、Playing にならない

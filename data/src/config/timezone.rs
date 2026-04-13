@@ -110,7 +110,19 @@ impl<'de> Deserialize<'de> for UserTimezone {
         match timezone_str.to_lowercase().as_str() {
             "utc" => Ok(UserTimezone::Utc),
             "local" => Ok(UserTimezone::Local),
-            _ => Err(serde::de::Error::custom("Invalid UserTimezone")),
+            _ => {
+                // Unknown values (e.g. IANA names like "Asia/Tokyo") would
+                // otherwise fail the whole `State` deserialize and cause
+                // saved-state.json to be rotated to `_old`, silently losing
+                // layout/replay settings. Fall back to default instead.
+                ::log::warn!(
+                    "Unknown UserTimezone value {:?}; falling back to default ({:?}). \
+                     Supported values: \"UTC\", \"Local\".",
+                    timezone_str,
+                    UserTimezone::default(),
+                );
+                Ok(UserTimezone::default())
+            }
         }
     }
 }
