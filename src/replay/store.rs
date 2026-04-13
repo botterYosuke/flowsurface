@@ -332,4 +332,37 @@ mod tests {
         // dedup: 100, 200, 300 = 3 unique
         assert_eq!(store.trade_count(&stream), 3);
     }
+
+    #[test]
+    fn klines_in_with_exclusive_start_skips_current_time_kline() {
+        let mut store = EventStore::new();
+        let stream = kline_stream();
+        let klines = vec![
+            dummy_kline(60_000),
+            dummy_kline(120_000),
+            dummy_kline(180_000),
+        ];
+        store.ingest_loaded(
+            stream,
+            0..3_000_000,
+            LoadedData {
+                klines,
+                trades: vec![],
+            },
+        );
+
+        // New pattern: current_time + 1 as range start — excludes the kline AT current_time.
+        let current_time: u64 = 120_000;
+        let next = store.klines_in(&stream, current_time + 1..3_000_000);
+        assert_eq!(next.len(), 1);
+        assert_eq!(next[0].time, 180_000);
+
+        // Old pattern: current_time as range start — INCLUDES the kline AT current_time,
+        // meaning .find(|k| k.time > current_time) has to skip it explicitly.
+        let old_first = store
+            .klines_in(&stream, current_time..3_000_000)
+            .first()
+            .map(|k| k.time);
+        assert_eq!(old_first, Some(120_000)); // proves old pattern starts at current_time's kline
+    }
 }

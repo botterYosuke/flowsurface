@@ -255,6 +255,13 @@ fn body_uuid_field(body: &str, key: &str) -> Result<uuid::Uuid, RouteError> {
     uuid::Uuid::parse_str(&s).map_err(|_| RouteError::BadRequest)
 }
 
+/// "YYYY-MM-DD HH:MM" 形式の日時文字列を検証する。不正なら RouteError::BadRequest を返す。
+fn validate_datetime_str(s: &str) -> Result<(), RouteError> {
+    chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M")
+        .map(|_| ())
+        .map_err(|_| RouteError::BadRequest)
+}
+
 /// パスとメソッドから ApiCommand にルーティング
 fn route(method: &str, path: &str, body: &str) -> Result<ApiCommand, RouteError> {
     // replay / app 系は ReplayCommand にラップ
@@ -274,6 +281,8 @@ fn route(method: &str, path: &str, body: &str) -> Result<ApiCommand, RouteError>
                 .and_then(|v| v.as_str())
                 .ok_or(RouteError::BadRequest)?
                 .to_string();
+            validate_datetime_str(&start)?;
+            validate_datetime_str(&end)?;
             return Ok(ApiCommand::Replay(ReplayCommand::Play { start, end }));
         }
         ("POST", "/api/replay/pause") => return Ok(ApiCommand::Replay(ReplayCommand::Pause)),
@@ -301,6 +310,11 @@ fn route(method: &str, path: &str, body: &str) -> Result<ApiCommand, RouteError>
         ("POST", "/api/pane/split") => {
             let pane_id = body_uuid_field(body, "pane_id")?;
             let axis = body_str_field(body, "axis")?;
+            // axis は "Vertical" または "Horizontal" のみ許可する
+            match axis.as_str() {
+                "Vertical" | "vertical" | "Horizontal" | "horizontal" => {}
+                _ => return Err(RouteError::BadRequest),
+            }
             Ok(ApiCommand::Pane(PaneCommand::Split { pane_id, axis }))
         }
         ("POST", "/api/pane/close") => {
@@ -584,6 +598,20 @@ mod tests {
     #[test]
     fn route_post_play_empty_body() {
         let result = route("POST", "/api/replay/play", "");
+        assert!(matches!(result, Err(RouteError::BadRequest)));
+    }
+
+    #[test]
+    fn route_post_play_invalid_datetime_start_returns_bad_request() {
+        let body = r#"{"start":"not-a-date","end":"2026-04-10 15:00"}"#;
+        let result = route("POST", "/api/replay/play", body);
+        assert!(matches!(result, Err(RouteError::BadRequest)));
+    }
+
+    #[test]
+    fn route_post_play_invalid_datetime_end_returns_bad_request() {
+        let body = r#"{"start":"2026-04-10 09:00","end":"bad-end"}"#;
+        let result = route("POST", "/api/replay/play", body);
         assert!(matches!(result, Err(RouteError::BadRequest)));
     }
 

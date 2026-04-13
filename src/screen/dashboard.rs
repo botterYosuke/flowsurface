@@ -1357,6 +1357,21 @@ impl Dashboard {
         kline_targets
     }
 
+    /// StepBackward 用: kline 収集をせずチャートデータのみクリアする。
+    pub fn clear_chart_for_replay(&mut self, main_window: window::Id) {
+        for (_, _, state) in self.iter_all_panes_mut(main_window) {
+            state.rebuild_content_for_replay();
+        }
+    }
+
+    /// StepBackward/StepForward seek 用: ビューポートを保持したままデータのみリセットする。
+    /// `clear_chart_for_replay` と異なり KlineChart を再構築しないため、チラつきが発生しない。
+    pub fn reset_charts_for_seek(&mut self, main_window: window::Id) {
+        for (_, _, state) in self.iter_all_panes_mut(main_window) {
+            state.reset_for_seek();
+        }
+    }
+
     /// Replay→Live 切替時にペインの content をリビルドする（replay_kline_buffer を無効化）。
     pub fn rebuild_for_live(&mut self, main_window: window::Id) {
         for (_, _, state) in self.iter_all_panes_mut(main_window) {
@@ -1508,5 +1523,13 @@ mod tests {
         let dashboard = Dashboard::default();
         // Default dashboard has no streams
         assert!(!dashboard.has_tachibana_stream_pane(main_window));
+    }
+
+    // compile-time: clear_chart_for_replay returns (), not Vec<...>
+    fn _type_check_clear_chart_for_replay_returns_unit(
+        d: &mut super::Dashboard,
+        id: iced::window::Id,
+    ) {
+        let _: () = d.clear_chart_for_replay(id);
     }
 }

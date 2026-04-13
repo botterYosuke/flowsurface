@@ -891,9 +891,11 @@ impl Flowsurface {
                             .unwrap_or(replay::min_timeframe_ms(&Default::default()));
                         self.replay.start(start_ms, end_ms, step_size_ms);
 
-                        // active_streams に登録
+                        // active_streams に登録（Kline stream のみ — Trade/Depth は除外）
                         for (_, stream) in &kline_targets {
-                            self.replay.active_streams.insert(*stream);
+                            if matches!(stream, exchange::adapter::StreamKind::Kline { .. }) {
+                                self.replay.active_streams.insert(*stream);
+                            }
                         }
 
                         // 各 kline ストリームに対して load_klines を発行
@@ -924,18 +926,41 @@ impl Flowsurface {
                         let now = std::time::Instant::now();
                         let main_window_id = self.main_window.id;
 
+                        // (D) 空 klines は "未ロード" と同義 — EventStore に登録しない。
+                        // 未来日時など Binance が [] を返した場合、loaded_ranges に range が登録されず
+                        // try_resume_from_waiting は全ストリームが揃うまで待機し続ける。
+                        if klines.is_empty() {
+                            return Task::none();
+                        }
+
                         // klines を EventStore に格納し、全 stream が揃ったら Playing 開始
                         self.replay.on_klines_loaded(stream, range, klines.clone(), now);
 
-                        // kline chart ペインに即座に注入（現在時刻まで）
-                        self.active_dashboard_mut()
-                            .ingest_replay_klines(&stream, &klines, main_window_id);
+                        // kline chart ペインに現在時刻（= start_ms）までの klines のみ注入。
+                        // 全区間を注入すると chart が最初から全バーを持ち、dispatch_tick での
+                        // 逐次注入が dedup により無視されてバーが増えなくなる。
+                        let clock_now = self.replay.current_time();
+                        let initial_klines: Vec<exchange::Kline> = klines
+                            .iter()
+                            .filter(|k| k.time <= clock_now)
+                            .cloned()
+                            .collect();
+                        if !initial_klines.is_empty() {
+                            self.active_dashboard_mut()
+                                .ingest_replay_klines(&stream, &initial_klines, main_window_id);
+                        }
                     }
                     ReplayMessage::Resume => {
                         let now = std::time::Instant::now();
                         if let Some(clock) = &mut self.replay.clock {
-                            if clock.status() == replay::clock::ClockStatus::Paused {
-                                clock.play(now);
+                            match clock.status() {
+                                replay::clock::ClockStatus::Paused => {
+                                    clock.play(now);
+                                }
+                                // Waiting: ロード完了時に try_resume_from_waiting が自動で Playing に移行する
+                                replay::clock::ClockStatus::Waiting => {}
+                                // Playing: 既に再生中 — no-op
+                                replay::clock::ClockStatus::Playing => {}
                             }
                         }
                     }
@@ -945,22 +970,24 @@ impl Flowsurface {
                         }
                     }
                     ReplayMessage::StepForward => {
-                        // EventStore から次の kline 時刻を求めてシーク
+                        // Playing 中は tick が自動で進める — StepForward は Paused 時のみ有効
+                        if !self.replay.is_paused() {
+                            return Task::none();
+                        }
+
                         let main_window_id = self.main_window.id;
                         let current_time = self.replay.current_time();
-                        let full_range = self.replay.clock.as_ref().map(|c| c.full_range());
 
-                        // 全アクティブ stream の次 kline 時刻の最小値
-                        let next_time = if let Some(range) = full_range {
-                            self.replay.active_streams.iter().filter_map(|stream| {
-                                let klines = self.replay.event_store.klines_in(stream, current_time..range.end);
-                                klines.iter().find(|k| k.time > current_time).map(|k| k.time)
-                            }).min()
-                        } else {
-                            None
-                        };
+                        // step_size = active kline streams の最小 timeframe（デフォルト 60000ms）
+                        // EventStore の実データ境界ではなく、step_size 刻みで決定論的に前進する
+                        let step_size = replay::min_timeframe_ms(&self.replay.active_streams);
+                        let new_time = current_time + step_size;
 
-                        if let (Some(new_time), Some(clock)) = (next_time, &mut self.replay.clock) {
+                        if let Some(clock) = &mut self.replay.clock {
+                            let range_end = clock.full_range().end;
+                            if new_time > range_end {
+                                return Task::none(); // 範囲終端を超える場合は no-op
+                            }
                             clock.seek(new_time);
                             // 新時刻までの klines を即座に注入
                             for stream in self.replay.active_streams.clone().iter() {
@@ -992,9 +1019,9 @@ impl Flowsurface {
                             clock.pause();
                         }
 
-                        // pane chart をリビルドして new_time まで再注入
+                        // ビューポートを保持したままデータのみリセット（KlineChart 再構築なし）
                         self.active_dashboard_mut()
-                            .prepare_replay(main_window_id);
+                            .reset_charts_for_seek(main_window_id);
 
                         for stream in self.replay.active_streams.clone().iter() {
                             let klines = self.replay.event_store.klines_in(stream, 0..new_time + 1);
@@ -1665,6 +1692,7 @@ impl Flowsurface {
                 // ticker / timeframe の抽出（Ready → Waiting の順にフォールバック）
                 let (ticker, timeframe) = extract_pane_ticker_timeframe(&state.streams);
 
+                let streams_ready = matches!(&state.streams, connector::ResolvedStream::Ready(_));
                 serde_json::json!({
                     "id": state.unique_id().to_string(),
                     "window_id": format!("{window_id:?}"),
@@ -1672,6 +1700,7 @@ impl Flowsurface {
                     "ticker": ticker,
                     "timeframe": timeframe,
                     "link_group": state.link_group.map(|g| format!("{g:?}")),
+                    "streams_ready": streams_ready,
                 })
             })
             .collect();

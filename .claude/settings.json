@@ -98,7 +98,10 @@
       "Bash(bash C:/tmp/e2e_phase4_fix.sh)",
       "Bash(node -e \"const d=JSON.parse\\(require\\('fs'\\).readFileSync\\('C:/Users/sasai/AppData/Roaming/flowsurface/saved-state.json','utf8'\\)\\); console.log\\('mode:', d.replay?.mode, 'timezone:', d.timezone, 'stream:', d.layout_manager?.layouts?.[0]?.dashboard?.pane?.KlineChart?.stream_type?.[0]?.Kline?.ticker\\);\")",
       "Bash(bash C:/tmp/e2e_tac_tokyo.sh)",
-      "Bash(tasklist //fi \"imagename eq flowsurface.exe\")"
+      "Bash(tasklist //fi \"imagename eq flowsurface.exe\")",
+      "Bash(find /c/Users/sasai/Documents/flowsurface -name \"*.rs\" -type f -exec grep -l \"pub enum StreamKind\\\\|pub struct StreamKind\" {} \\\\;)",
+      "Bash(echo \"Started PID: $!\" sleep 15)",
+      "Bash(echo \"PID=$!\")"
     ],
     "additionalDirectories": [
       "C:\\Users\\sasai\\Documents\\marimo\\.claude\\plans",

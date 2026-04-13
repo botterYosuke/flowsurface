@@ -1,5 +1,5 @@
 ---
-name: e2e
+name: e2e-test
 description: "flowsurface 全機能の E2E テストスキル。HTTP API 経由でアプリを操作・検証し、不足 API があれば新規追加する。"
 allowed-tools: Read Grep Glob Bash Write Edit
 ---
@@ -162,9 +162,21 @@ stop_app
 
 常に **現在時刻より過去 24〜48h 以内** の範囲を使う。現在の UTC 時刻確認: `date -u +"%Y-%m-%d %H:%M"`
 
-### StepForward / StepBackward は 60000ms 固定（StepClock）
+### StepForward / StepBackward のステップ幅は「最小 timeframe」
 
-Play→Pause 後に StepForward すれば 1 回目から 60000ms になる（clock.now_ms はバー境界値のみ保持）。
+StepForward/StepBackward の 1 ステップは、**ペインに存在する kline streams の最小 timeframe** になる。
+
+| 構成 | step_size |
+|------|-----------|
+| M1 のみ / M1+M5 / M1+H1 混在 | 60000ms |
+| M5 のみ | 300000ms |
+| H1 のみ | 3600000ms |
+
+- EventStore の実データ境界ではなく **決定論的に `current_time + step_size`** で前進する
+- `common_helpers.sh` の定数: `STEP_M1=60000`, `STEP_M5=300000`, `STEP_H1=3600000`
+- テストで diff を検証する際は `bigt_sub "$POST" "$PRE"` で差分を取り期待値と比較する
+
+**以前の記述「60000ms 固定」は M1 のみ構成での値**。M5 単独ペインでは 300000ms になる。
 
 ### current_time は range_start 以上であることを確認する
 
@@ -194,6 +206,78 @@ curl -s -X POST "$API/app/screenshot"
 `POST /api/replay/toggle` で Live に切り替えると `range_start` / `range_end` が空文字列にリセットされる。
 永続化テストでは **必ず Play 実行後（range_input が設定された状態）に保存**すること。
 
+### Live mode 起動後は `streams_ready` でストリーム準備完了を待つ
+
+Live fixture で起動してから `POST /replay/toggle` + `POST /replay/play` する場合、
+**Binance 等のメタデータ取得（3〜10 秒）が完了するまで streams は Waiting 状態**。
+Waiting 中に Play を発火すると `prepare_replay()` が空の `active_streams` を返し、
+StepForward / StepBackward が no-op になる。
+
+`GET /api/pane/list` レスポンスの `streams_ready` フィールドで確認すること:
+
+```bash
+# 全ペインの streams_ready が true になるまで待つ（最大 30s）
+for i in $(seq 1 30); do
+  PLIST=$(curl -s "$API/pane/list" 2>/dev/null || echo '{}')
+  READY=$(node -e "
+    try {
+      const d = JSON.parse(process.argv[1]);
+      const ps = d.panes || [];
+      const ok = ps.length > 0 && ps.every(p => p.streams_ready === true);
+      process.stdout.write(ok ? 'true' : 'false');
+    } catch(e) { process.stdout.write('false'); }
+  " "$PLIST")
+  [ "$READY" = "true" ] && echo "  all streams ready (${i}s)" && break
+  sleep 1
+done
+# ← ここで toggle + play を呼ぶ
+```
+
+**ticker フィールドの有無で判断してはいけない**: ticker は saved-state.json から読まれるため
+起動直後から常に存在する。`streams_ready === true` のみが実際の準備完了を示す。
+
+**Replay fixture（`replay.mode = "replay"` + range あり）で起動した場合は不要**:
+auto-play が streams_ready を確認してから自動発火するため、`wait_playing` を呼ぶだけでよい。
+
+### 終端到達後の Resume は十分なバッファを確保してから
+
+終端到達で auto-Paused になった後、StepBackward を **1 バーだけ** 戻して Resume すると、
+高速再生（10x = 100ms/bar）では 100ms 以内に再び終端に到達して Paused になる。
+Resume 直後の status チェックが Paused を拾ってしまう。
+
+`wait_playing` で確認する場合はチェック間隔が 1s のため間に合わない。
+
+**対策**: Resume 前に `speed × チェック余裕時間` 分のバー数を確保する。
+例: 10x（100ms/bar）で 0.5s 後にチェックしたい場合 → 最低 `0.5s / 0.1s = 5 バー` + α が必要。
+
+```bash
+# 終端から 15 バー後退してから Resume（10x で 1.5s の余裕）
+for _ in $(seq 1 15); do curl -s -X POST "$API/replay/step-backward" > /dev/null; done
+sleep 0.2
+curl -s -X POST "$API/replay/resume" > /dev/null
+sleep 0.4  # 0.4s 後にチェック（10x なら終端まで 1.5s - 0.4s = 1.1s 余裕あり）
+ST=$(jqn "$(curl -s "$API/replay/status")" "d.status")
+```
+
+### トースト `has_notification` の検索文字列は大文字小文字を区別する
+
+`has_notification` は `includes()` で部分一致するが、**大文字小文字は区別される**。
+トーストのメッセージ文字列をそのまま使うこと。
+
+| NG | OK |
+|----|-----|
+| `has_notification("start")` | `has_notification("Start time")` |
+| `has_notification("invalid")` | `has_notification("Invalid range")` |
+
+不明な場合は `list_notifications` で全トーストを dump してメッセージを確認する:
+
+```bash
+curl -s "$API/notification/list" | node -e "
+  const d = JSON.parse(require('fs').readFileSync('/dev/stdin', 'utf8'));
+  (d.notifications || []).forEach(n => console.log(JSON.stringify(n)));
+"
+```
+
 ---
 
 ## 検証チートシート
@@ -203,8 +287,11 @@ curl -s -X POST "$API/app/screenshot"
 | モード遷移 | `jqn "$STATUS" "d.mode"` | "Live" or "Replay" |
 | current_time 前進 | 2回取得して差分 > 0 | BigInt 比較推奨 |
 | current_time 初期値 | `>= range_start` かつ `<= range_end` | auto-play 後は既に数 tick 進んでいる場合あり |
-| step-forward | pause 後に step → diff = 60000 | StepClock は常に 60000ms 固定 |
+| step-forward (M1) | pause 後に step → diff = 60000 | min timeframe が M1 のとき |
+| step-forward (M5 単独) | pause 後に step → diff = 300000 | min timeframe が M5 のとき |
+| step-forward (M1+M5 混在) | pause 後に step → diff = 60000 | min timeframe は M1 |
 | speed | cycle 後に期待値一致 | "1x","2x","5x","10x" の順 |
+| streams_ready | `pane/list` の各ペインの `streams_ready === true` | Live 起動後 toggle 前に確認必須 |
 | auto-play 完了 (Binance) | ポーリング（最大 30s） | 数秒で Playing になる |
 | auto-play 完了 (Tachibana) | ポーリング（最大 120s） | master download 完了まで待機 |
 | auto-play 放棄確認 | ログに "auto-play deferred" | Tachibana セッションなし時の期待動作 |
@@ -212,6 +299,7 @@ curl -s -X POST "$API/app/screenshot"
 | 永続化復元 | fixture 配置→起動→status 確認 | playback は常に null（clock は保存されない） |
 | 永続化保存 | `POST /api/app/save` → kill → JSON 確認 | taskkill だけでは保存されない |
 | BigInt 比較 | `node -e "console.log(BigInt('$A')>BigInt('$B'))"` | current_time は大きな数値 |
+| トースト検索 | `has_notification("Start time")` など | 大文字小文字を区別する、実文字列を使うこと |
 
 
 ---

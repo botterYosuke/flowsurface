@@ -246,6 +246,10 @@ impl ReplayState {
         if clock.status() != ClockStatus::Waiting {
             return;
         }
+        // (A) active_streams が空 = ロード待ち対象なし → 再生不可（vacuous truth ガード）
+        if self.active_streams.is_empty() {
+            return;
+        }
         let full_range = clock.full_range();
         let all_loaded = self
             .active_streams
@@ -739,5 +743,87 @@ mod tests {
     #[test]
     fn cycle_speed_value_10_wraps_to_1() {
         assert!((cycle_speed_value(10.0) - 1.0).abs() < 0.01);
+    }
+
+    // ── try_resume_from_waiting ───────────────────────────────────────────
+
+    #[test]
+    fn try_resume_does_not_auto_play_when_active_streams_empty() {
+        use exchange::adapter::{Exchange, StreamKind};
+        use exchange::{Ticker, TickerInfo, Timeframe};
+
+        let mut state = ReplayState::default();
+        // start() sets clock to Waiting and clears active_streams
+        state.start(0, 3_600_000, 60_000);
+
+        assert!(
+            state.active_streams.is_empty(),
+            "active_streams must be empty after start()"
+        );
+        assert!(state.is_loading(), "clock must be Waiting after start()");
+
+        // Deliver a klines-loaded event for some stream that is NOT in active_streams.
+        // With the vacuous-truth bug, active_streams.iter().all(...) returns true on
+        // an empty set, so try_resume_from_waiting wrongly transitions → Playing.
+        let stream = StreamKind::Kline {
+            ticker_info: TickerInfo::new(
+                Ticker::new("BTCUSDT", Exchange::BinanceLinear),
+                0.01,
+                0.001,
+                Some(1.0),
+            ),
+            timeframe: Timeframe::M1,
+        };
+        state.on_klines_loaded(stream, 0..3_600_000, vec![], Instant::now());
+
+        assert!(
+            state.is_loading(),
+            "clock must remain Waiting (loading) when active_streams is empty — \
+             vacuous-truth must not trigger resume_from_waiting"
+        );
+    }
+
+    #[test]
+    fn active_streams_only_contains_kline_streams_after_insert() {
+        use exchange::adapter::{Exchange, StreamKind};
+        use exchange::{Ticker, TickerInfo, Timeframe};
+
+        let mut state = ReplayState::default();
+        state.start(0, 100_000, 60_000);
+
+        let kline_stream = StreamKind::Kline {
+            ticker_info: TickerInfo::new(
+                Ticker::new("BTCUSDT", Exchange::BinanceLinear),
+                0.01,
+                0.001,
+                Some(1.0),
+            ),
+            timeframe: Timeframe::M1,
+        };
+        let trades_stream = StreamKind::Trades {
+            ticker_info: TickerInfo::new(
+                Ticker::new("BTCUSDT", Exchange::BinanceLinear),
+                0.01,
+                0.001,
+                Some(1.0),
+            ),
+        };
+
+        // OLD behaviour (no filter): insert everything into active_streams — BUG
+        let kline_targets = vec![
+            (uuid::Uuid::new_v4(), kline_stream),
+            (uuid::Uuid::new_v4(), trades_stream),
+        ];
+        for (_, stream) in &kline_targets {
+            if matches!(stream, StreamKind::Kline { .. }) {
+                state.active_streams.insert(*stream);
+            }
+        }
+
+        // Only Kline should be present; Trades must be excluded by the filter
+        assert!(
+            !state.active_streams.contains(&trades_stream),
+            "active_streams must not contain non-Kline streams, but Trades was found"
+        );
     }
 }

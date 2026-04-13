@@ -700,6 +700,7 @@ impl KlineChart {
     }
 
     /// リプレイ seek 時にチャートデータをリセットする。
+    /// ビューポート（translation, scaling, bounds）は保持し、データのみクリアする。
     pub fn reset_for_seek(&mut self) {
         match self.data_source {
             PlotData::TimeBased(ref mut timeseries) => {
@@ -714,6 +715,11 @@ impl KlineChart {
             }
         }
         self.chart.last_price = None;
+        self.request_handler = RequestHandler::default();
+        // インジケータも空の data_source からリビルドしてスタレデータを除去する
+        for indi in self.indicators.values_mut().filter_map(Option::as_mut) {
+            indi.rebuild_from_source(&self.data_source);
+        }
         self.invalidate(None);
     }
 
@@ -2016,4 +2022,43 @@ mod tests {
         }
         assert!(chart.chart.last_price.is_none());
     }
+
+    #[test]
+    fn reset_for_seek_resets_request_handler() {
+        use crate::connector::fetcher::FetchRange;
+
+        let mut chart = build_test_kline_chart(Basis::Time(exchange::Timeframe::M1));
+
+        // Submit a request and mark it completed to activate the cooldown.
+        let uuid = chart
+            .request_handler
+            .add_request(FetchRange::Kline(0, 1000))
+            .expect("first add_request should not error")
+            .expect("first add_request should return Some(uuid)");
+        chart.request_handler.mark_completed(uuid);
+
+        // Confirm cooldown is active: same range returns Ok(None).
+        let during_cooldown = chart
+            .request_handler
+            .add_request(FetchRange::Kline(0, 1000))
+            .expect("cooldown check should not error");
+        assert!(
+            during_cooldown.is_none(),
+            "expected Ok(None) during cooldown, got Ok(Some(...))"
+        );
+
+        // After reset_for_seek, the handler should be cleared so the same
+        // range can be re-requested (returns Ok(Some(_))).
+        chart.reset_for_seek();
+
+        let after_reset = chart
+            .request_handler
+            .add_request(FetchRange::Kline(0, 1000))
+            .expect("post-reset add_request should not error");
+        assert!(
+            after_reset.is_some(),
+            "expected Ok(Some(_)) after reset_for_seek, but got Ok(None) — request_handler was not reset"
+        );
+    }
+
 }
