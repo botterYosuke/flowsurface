@@ -213,15 +213,24 @@ impl Flowsurface {
                     "replay" => replay::ReplayMode::Replay,
                     _ => replay::ReplayMode::Live,
                 };
+                let range_start = saved_state.replay_config.range_start;
+                let range_end = saved_state.replay_config.range_end;
+                let has_valid_range =
+                    replay::parse_replay_range(&range_start, &range_end).is_ok();
+                let pending_auto_play =
+                    replay_mode == replay::ReplayMode::Replay && has_valid_range;
                 ReplayState {
                     mode: replay_mode,
                     range_input: replay::ReplayRangeInput {
-                        start: saved_state.replay_config.range_start,
-                        end: saved_state.replay_config.range_end,
+                        start: range_start,
+                        end: range_end,
                     },
                     clock: None,
                     event_store: replay::store::EventStore::new(),
                     active_streams: std::collections::HashSet::new(),
+                    pending_auto_play,
+                    pending_auto_play_deadline: pending_auto_play
+                        .then(|| std::time::Instant::now() + std::time::Duration::from_secs(30)),
                 }
             },
         };
@@ -347,6 +356,20 @@ impl Flowsurface {
             Message::Tick(now) => {
                 let main_window_id = self.main_window.id;
                 let mut all_tasks: Vec<Task<Message>> = Vec::new();
+
+                // auto-play タイムアウト: streams が 30 秒以内に解決しなければ諦める
+                if self.replay.pending_auto_play {
+                    if let Some(deadline) = self.replay.pending_auto_play_deadline {
+                        if now >= deadline {
+                            log::warn!("[auto-play] Timed out waiting for streams to resolve");
+                            self.replay.pending_auto_play = false;
+                            self.replay.pending_auto_play_deadline = None;
+                            self.notifications.push(Toast::error(
+                                "Replay auto-play timed out: streams did not resolve within 30s",
+                            ));
+                        }
+                    }
+                }
 
                 // リプレイ再生中: dispatch_tick でイベントを抽出してチャートに注入する
                 if self.replay.is_replay() {
@@ -526,15 +549,36 @@ impl Flowsurface {
                                 Ok(resolved) => {
                                     log::info!("[e2e-live] Streams resolved: {} streams for pane={pane_id}", resolved.len());
                                     if resolved.is_empty() {
-                                        Task::none()
-                                    } else {
+                                        return Task::none();
+                                    }
+
+                                    // (1) pane を Ready に昇格させる（別スコープで借用解放）
+                                    let resolve_task = {
+                                        let dashboard = self.active_dashboard_mut();
                                         dashboard
                                             .resolve_streams(main_window.id, pane_id, resolved)
                                             .map(move |msg| Message::Dashboard {
                                                 layout_id: None,
                                                 event: msg,
                                             })
+                                    };
+
+                                    // (2) 全ペイン Ready かつ pending_auto_play が立っているか判定
+                                    if self.replay.pending_auto_play
+                                        && self.replay.is_replay()
+                                        && self
+                                            .active_dashboard()
+                                            .all_panes_have_ready_streams(main_window.id)
+                                    {
+                                        log::info!("[auto-play] All panes ready — firing ReplayMessage::Play");
+                                        self.replay.pending_auto_play = false;
+                                        self.replay.pending_auto_play_deadline = None;
+                                        let play_task =
+                                            Task::done(Message::Replay(ReplayMessage::Play));
+                                        return Task::batch([resolve_task, play_task]);
                                     }
+
+                                    resolve_task
                                 }
                                 Err(err) => {
                                     // This is typically a transient state (e.g. partial metadata, stale symbol)

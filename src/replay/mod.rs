@@ -71,6 +71,11 @@ pub struct ReplayState {
     pub event_store: EventStore,
     /// 現在アクティブなストリーム集合（dispatch_tick に渡す）。
     pub active_streams: HashSet<StreamKind>,
+    /// 起動時 fixture 復元の結果として次の「全ペイン Ready」で Play を発火する。
+    /// 一度発火したら false に戻す。永続化しない。
+    pub pending_auto_play: bool,
+    /// auto-play の発火期限。超過したらタイムアウトとして flag を下ろす。
+    pub pending_auto_play_deadline: Option<Instant>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,6 +126,8 @@ impl Default for ReplayState {
             clock: None,
             event_store: EventStore::new(),
             active_streams: HashSet::new(),
+            pending_auto_play: false,
+            pending_auto_play_deadline: None,
         }
     }
 }
@@ -138,6 +145,8 @@ impl ReplayState {
                 self.event_store = EventStore::new();
                 self.active_streams = HashSet::new();
                 self.range_input = ReplayRangeInput::default();
+                self.pending_auto_play = false;
+                self.pending_auto_play_deadline = None;
             }
         }
     }
@@ -563,9 +572,7 @@ mod tests {
                 start: "2026-04-10 09:00".to_string(),
                 end: "2026-04-10 15:00".to_string(),
             },
-            clock: None,
-            event_store: EventStore::new(),
-            active_streams: HashSet::new(),
+            ..Default::default()
         };
         let status = state.to_status();
         assert_eq!(status.mode, "Replay");
@@ -600,6 +607,28 @@ mod tests {
         assert!(json.contains(r#""status":"Playing""#));
         assert!(json.contains(r#""current_time":1500"#));
         assert!(json.contains(r#""speed":"1x""#));
+    }
+
+    // ── pending_auto_play ─────────────────────────────────────────────────
+
+    #[test]
+    fn default_state_has_no_pending_auto_play() {
+        let state = ReplayState::default();
+        assert!(!state.pending_auto_play);
+        assert!(state.pending_auto_play_deadline.is_none());
+    }
+
+    #[test]
+    fn toggle_replay_to_live_clears_pending_auto_play() {
+        let mut state = ReplayState::default();
+        state.mode = ReplayMode::Replay;
+        state.pending_auto_play = true;
+        state.pending_auto_play_deadline = Some(Instant::now() + Duration::from_secs(30));
+
+        state.toggle_mode(); // Replay → Live
+
+        assert!(!state.pending_auto_play);
+        assert!(state.pending_auto_play_deadline.is_none());
     }
 
     // ── parse_replay_range ────────────────────────────────────────────────

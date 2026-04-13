@@ -589,6 +589,16 @@ impl Dashboard {
             }))
     }
 
+    /// 全ペインの streams が解決済み（Ready）かどうかを返す。
+    /// `Waiting { streams: [] }` のペインは stream 未設定として Ready 扱いにする。
+    pub fn all_panes_have_ready_streams(&self, main_window: window::Id) -> bool {
+        self.iter_all_panes(main_window)
+            .all(|(_, _, state)| match &state.streams {
+                ResolvedStream::Waiting { streams, .. } => streams.is_empty(),
+                ResolvedStream::Ready(_) => true,
+            })
+    }
+
     pub fn iter_all_panes_mut(
         &mut self,
         main_window: window::Id,
@@ -1376,3 +1386,35 @@ impl From<fetcher::FetchUpdate> for Message {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use iced::window;
+
+    #[test]
+    fn all_panes_have_ready_streams_true_for_default_dashboard() {
+        let dashboard = Dashboard::default();
+        let main_window = window::Id::unique();
+        // Default panes have Waiting { streams: [] } — treated as Ready
+        assert!(dashboard.all_panes_have_ready_streams(main_window));
+    }
+
+    #[test]
+    fn all_panes_have_ready_streams_false_when_pane_has_non_empty_waiting_streams() {
+        use data::stream::PersistStreamKind;
+        let main_window = window::Id::unique();
+        let mut dashboard = Dashboard::default();
+        // Grab first pane and set its streams to a non-empty Waiting
+        let pane = *dashboard.panes.iter().next().map(|(p, _)| p).unwrap();
+        let state = dashboard.panes.get_mut(pane).unwrap();
+        // Use a placeholder PersistStreamKind — just needs to be non-empty
+        state.streams = ResolvedStream::waiting(vec![PersistStreamKind::Kline {
+            ticker: exchange::Ticker::new(
+                "BTCUSDT",
+                exchange::adapter::Exchange::BinanceLinear,
+            ),
+            timeframe: exchange::Timeframe::M1,
+        }]);
+        assert!(!dashboard.all_panes_have_ready_streams(main_window));
+    }
+}

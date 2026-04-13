@@ -157,3 +157,70 @@ ST=$(jqn "$(curl -s "$API/replay/status")" "d.status")
 | Loading→Playing 高速遷移 | 15秒タイムアウト付きポーリング | **マルチペイン構成必須**。単一ペインでは trades 影響が小さく検出不能 |
 | trades バックグラウンド | Playing 遷移後 10s 経過しても Playing 継続 | 直接 API なし。間接検証 |
 | BigInt 比較 | `node -e "console.log(BigInt(a)>BigInt(b))"` | current_time は大きい数値。JS Number で精度不足の場合あり |
+
+---
+
+## カテゴリ 4: Replay fixture 直接起動（auto-play）
+
+**概要**: `saved-state.json` に `replay.mode = "replay"` + 有効な `range_start` / `range_end` を含めて起動すると、
+全ペインの streams が Ready になった瞬間に自動で `ReplayMessage::Play` が発火する。
+
+**Fixture**: fixtures.md #2「最小構成 + リプレイ復元テスト」（または #5 マルチペイン + リプレイ）に
+過去 24-48h 以内の range を設定して配置。
+
+```bash
+# 1. Replay fixture 配置 & 起動
+START=$(date -u -d "2 hours ago" +"%Y-%m-%d %H:%M" 2>/dev/null || date -u -v-2H +"%Y-%m-%d %H:%M")
+END=$(date -u -d "1 hour ago" +"%Y-%m-%d %H:%M" 2>/dev/null || date -u -v-1H +"%Y-%m-%d %H:%M")
+
+cat > C:/tmp/replay-direct-boot.json <<EOF
+{
+  "layout_manager": { "layouts": [{ "name": "E2E-DirectBoot", "dashboard": {
+    "pane": { "KlineChart": {
+      "layout": { "splits": [0.78], "autoscale": "FitToVisible" }, "kind": "Candles",
+      "stream_type": [{ "Kline": { "ticker": "BinanceLinear:BTCUSDT", "timeframe": "M1" } }],
+      "settings": { "tick_multiply": null, "visual_config": null, "selected_basis": { "Time": "M1" } },
+      "indicators": ["Volume"], "link_group": "A"
+    } }, "popout": []
+  } }], "active_layout": "E2E-DirectBoot" },
+  "timezone": "UTC", "trade_fetch_enabled": false, "size_in_quote_ccy": "Base",
+  "replay": { "mode": "replay", "range_start": "$START", "range_end": "$END" }
+}
+EOF
+
+cp C:/tmp/replay-direct-boot.json "$DATA_DIR/saved-state.json"
+start_app
+
+# 2. auto-play で Playing になるまでポーリング（最大 30s）— sleep 15 は不要
+STATUS=""
+for i in $(seq 1 30); do
+  STATUS=$(curl -s "$API/replay/status")
+  ST=$(jqn "$STATUS" "d.status")
+  [ "$ST" = "Playing" ] && break
+  sleep 1
+done
+[ "$(jqn "$STATUS" "d.status")" = "Playing" ] && pass "auto-play: status=Playing" || fail "auto-play" "Expected Playing, got $(jqn "$STATUS" "d.status")"
+
+# 3. current_time が range_start 以上であることを確認
+#    （auto-play 後、Playing 検知時点で既に数 tick 進んでいる場合があるため >= で比較）
+CT=$(jqn "$STATUS" "d.current_time")
+START_MS=$(node -e "const d=new Date('$START:00Z'); console.log(d.getTime())")
+END_MS=$(node -e "const d=new Date('$END:00Z'); console.log(d.getTime())")
+IN_RANGE=$(node -e "console.log(BigInt('$CT') >= BigInt('$START_MS') && BigInt('$CT') <= BigInt('$END_MS'))")
+[ "$IN_RANGE" = "true" ] && pass "auto-play: current_time in range [$CT]" || \
+  fail "auto-play: current_time" "Expected [$START_MS,$END_MS], got $CT"
+
+# 4. StepForward で 60000ms 進む
+curl -s -X POST "$API/replay/pause" > /dev/null
+PRE=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
+curl -s -X POST "$API/replay/step-forward" > /dev/null
+POST=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
+DIFF=$(node -e "console.log(BigInt('$POST') - BigInt('$PRE'))")
+[ "$DIFF" = "60000" ] && pass "auto-play: StepForward +60000ms" || \
+  fail "auto-play: StepForward" "Expected diff=60000, got $DIFF"
+```
+
+**検証ポイント**:
+- `start_app` 後に `sleep 15` が**不要**（auto-play が streams 解決を自動検知して Play）
+- `POST /replay/toggle` も `POST /replay/play` も**不要**
+- タイムアウト 30s を超えると toast 通知が出て auto-play は発火しない（symbol ミス等のエラー検知）

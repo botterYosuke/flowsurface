@@ -82,7 +82,8 @@
       "Bash(node -e \"console.log\\(new Date\\(\\).toISOString\\(\\)\\)\")",
       "Edit(/.claude/skills/e2e-test/**)",
       "Bash(bash C:/tmp/e2e-tachibana-live-mode.sh)",
-      "Bash(bash /c/tmp/e2e-tachibana-live-mode.sh)"
+      "Bash(bash /c/tmp/e2e-tachibana-live-mode.sh)",
+      "Edit(/.claude/skills/tdd/**)"
     ],
     "additionalDirectories": [
       "C:\\Users\\sasai\\Documents\\marimo\\.claude\\plans",
