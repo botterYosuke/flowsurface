@@ -645,11 +645,14 @@ ET_T=$(jqn "$ST" "d.end_time")
 EXPECT_ST=$(node -e "console.log(new Date('${START}:00Z').getTime())")
 EXPECT_ET=$(node -e "console.log(new Date('${END}:00Z').getTime())")
 if [ "$ST_T" = "null" ]; then
-  echo "  INFO: clock 未起動のため start_time=null（auto-play 前なら正常）"
+  pend "TC-S2-02d" "clock 未起動のため start_time=null（auto-play 前で計測不可）"
+  pend "TC-S2-02e" "clock 未起動のため end_time=null"
 else
-  [ "$ST_T" = "$EXPECT_ST" ] && pass "TC-S2-02d: start_time ms 整合" || \
+  EQ_ST=$(bigt_eq "$ST_T" "$EXPECT_ST")
+  EQ_ET=$(bigt_eq "$ET_T" "$EXPECT_ET")
+  [ "$EQ_ST" = "true" ] && pass "TC-S2-02d: start_time ms 整合" || \
     fail "TC-S2-02d" "got=$ST_T expected=$EXPECT_ST"
-  [ "$ET_T" = "$EXPECT_ET" ] && pass "TC-S2-02e: end_time ms 整合" || \
+  [ "$EQ_ET" = "true" ] && pass "TC-S2-02e: end_time ms 整合" || \
     fail "TC-S2-02e" "got=$ET_T expected=$EXPECT_ET"
 fi
 stop_app
@@ -1354,8 +1357,14 @@ PRE6=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
 curl -s -X POST "$API/replay/step-forward" > /dev/null
 sleep 1
 POST6=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
-[ "$PRE6" = "$POST6" ] && pass "TC-S8-06c: 空 EventStore → Step 無効" || \
-  fail "TC-S8-06c" "想定外の前進 pre=$PRE6 post=$POST6"
+# null 同士または整数同士のいずれもありうるので両方に対応
+if [ "$PRE6" = "null" ] && [ "$POST6" = "null" ]; then
+  pass "TC-S8-06c: clock 未起動のまま Step 無効"
+else
+  EQ6=$(bigt_eq "$PRE6" "$POST6")
+  [ "$EQ6" = "true" ] && pass "TC-S8-06c: 空 EventStore → Step 無効" || \
+    fail "TC-S8-06c" "想定外の前進 pre=$PRE6 post=$POST6"
+fi
 
 # --- TC-S8-07: 不正なフォーマット → 400 ---
 # 仕様確定: parse_replay_range は NaiveDateTime::parse_from_str("YYYY-MM-DD HH:MM") を使うため、
@@ -1563,8 +1572,10 @@ echo "  10x 速度で終端まで待機（最大 300s）..."
 
 REACHED_END="false"
 for i in $(seq 1 300); do
-  CT=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
-  ST=$(jqn "$(curl -s "$API/replay/status")" "d.status")
+  # 1 ループ = 1 API コール（status / current_time の同時取得で競合状態を排除）
+  STATUS=$(curl -s "$API/replay/status")
+  CT=$(jqn "$STATUS" "d.current_time")
+  ST=$(jqn "$STATUS" "d.status")
   if [ "$ST" = "Paused" ]; then
     # current_time が end_ms 付近か確認
     NEAR_END=$(node -e "console.log(BigInt('$CT') >= BigInt('$END_MS') - BigInt('120000'))")
@@ -1632,8 +1643,11 @@ start_app
 if wait_playing 30; then
   pass "TC-S10-05: 2 分 range でも Playing 開始"
   # 終端到達を待つ
-  wait_paused 60 && pass "TC-S10-05b: 小 range で終端到達 → Paused" || \
+  if wait_paused 60; then
+    pass "TC-S10-05b: 小 range で終端到達 → Paused"
+  else
     fail "TC-S10-05b" "終端到達しなかった"
+  fi
 else
   fail "TC-S10-05" "2 分 range で Playing にならなかった"
 fi
@@ -1842,11 +1856,13 @@ BACK=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
 
 # --- TC-X2-03: ⏮ start 端での StepBackward は no-op ---
 # 目的:     range_start を超えて巻き戻らない
-# 手段:     start_time までひたすら StepBackward → 1 回追加で叩く
+# 手段:     start_time に到達するまで StepBackward → 1 回追加で叩く
+# 注意:     大整数の比較は bigt_eq を使用（bash の = は文字列比較で誤判定の恐れ）
 ST_T=$(jqn "$(curl -s "$API/replay/status")" "d.start_time")
 for i in $(seq 1 200); do
   CT=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
-  [ "$CT" = "$ST_T" ] && break
+  EQ=$(bigt_eq "$CT" "$ST_T")
+  [ "$EQ" = "true" ] && break
   curl -s -X POST "$API/replay/step-backward" > /dev/null
   sleep 0.05
 done
@@ -1854,7 +1870,8 @@ AT_START=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
 curl -s -X POST "$API/replay/step-backward" > /dev/null
 sleep 0.5
 BEYOND=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
-[ "$AT_START" = "$BEYOND" ] && pass "TC-X2-03: start 端 StepBackward は no-op" || \
+EQ2=$(bigt_eq "$AT_START" "$BEYOND")
+[ "$EQ2" = "true" ] && pass "TC-X2-03: start 端 StepBackward は no-op" || \
   fail "TC-X2-03" "AT_START=$AT_START BEYOND=$BEYOND"
 
 # --- TC-X2-04: ▶/⏸ Pause 冪等性 ---
@@ -1865,7 +1882,8 @@ CT1=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
 curl -s -X POST "$API/replay/pause" > /dev/null
 ST2=$(jqn "$(curl -s "$API/replay/status")" "d.status")
 CT2=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
-[ "$ST1" = "$ST2" ] && [ "$CT1" = "$CT2" ] && pass "TC-X2-04: Pause 冪等" || \
+CT_EQ=$(bigt_eq "$CT1" "$CT2")
+[ "$ST1" = "$ST2" ] && [ "$CT_EQ" = "true" ] && pass "TC-X2-04: Pause 冪等" || \
   fail "TC-X2-04" "ST=$ST1→$ST2 CT=$CT1→$CT2"
 
 # --- TC-X2-05: Resume → Pause → Resume の往復で current_time の継続性 ---
@@ -1905,10 +1923,14 @@ done
 
 # --- TC-X2-07: Speed 変更で current_time は変化しない ---
 # 目的:     CycleSpeed は時計をリセットしない
+# 注意:     Paused 状態で実施する。Playing 中は tick 進行のため不変条件にならない
+curl -s -X POST "$API/replay/pause" > /dev/null
+wait_paused 5 || true
 PRE_SP=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
 curl -s -X POST "$API/replay/speed" > /dev/null
 POST_SP=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
-[ "$PRE_SP" = "$POST_SP" ] && pass "TC-X2-07: Speed 切替で current_time 不変" || \
+EQ_SP=$(bigt_eq "$PRE_SP" "$POST_SP")
+[ "$EQ_SP" = "true" ] && pass "TC-X2-07: Speed 切替で current_time 不変" || \
   fail "TC-X2-07" "pre=$PRE_SP post=$POST_SP"
 
 # --- TC-X2-08: Live 中はボタンが意味を持たない（API は受理するが状態不変）---
@@ -1923,7 +1945,8 @@ B_MODE=$(jqn "$LIVE_BEFORE" "d.mode")
 A_MODE=$(jqn "$LIVE_AFTER" "d.mode")
 B_CT=$(jqn "$LIVE_BEFORE" "d.current_time")
 A_CT=$(jqn "$LIVE_AFTER" "d.current_time")
-[ "$A_MODE" = "Live" ] && [ "$B_MODE" = "Live" ] && [ "$B_CT" = "$A_CT" ] && \
+# Live 時は current_time が "null" 文字列で返るので文字列比較で OK
+[ "$A_MODE" = "Live" ] && [ "$B_MODE" = "Live" ] && [ "$B_CT" = "null" ] && [ "$A_CT" = "null" ] && \
   pass "TC-X2-08: Live 中ボタン操作は no-op" || \
   fail "TC-X2-08" "mode=$B_MODE→$A_MODE ct=$B_CT→$A_CT"
 
