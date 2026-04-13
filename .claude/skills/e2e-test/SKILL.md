@@ -130,8 +130,17 @@ for i in $(seq 1 30); do
 done
 ```
 
-**タイムアウト**: 30 秒以内に streams が解決しない場合は auto-play を諦めて toast 通知する。
-ticker metadata が揃わない（symbol 名ミス等）エラーはこれで検知できる。
+**タイムアウトは廃止**（2026-04-13, replay_auto_play_no_timeout）: auto-play は **イベント駆動**に変更された。
+streams が解決しない原因に応じて以下のパスをたどる:
+
+| 状況 | 挙動 |
+|------|------|
+| Binance 等 — metadata がすぐ揃う | streams Ready → 即座に Play 発火（数秒） |
+| Tachibana — 有効なセッションあり | session 復元 → master download → `UpdateMetadata` → `refresh_waiting_panes` → Play 発火 |
+| Tachibana — セッションなし（未ログイン） | `SessionRestoreResult(None)` → `pending_auto_play = false` + info toast「Replay auto-play was deferred: please log in to resume」→ ログイン画面表示 |
+
+Tachibana セッションなし時はアプリログ（`$DATA_DIR/flowsurface-current.log`）に
+`[auto-play] session unavailable — auto-play deferred` が記録される。
 
 **auto-play させたくない場合**: `range_start` / `range_end` を空文字にする。
 `pending_auto_play` の起動時ガードが `!range_start.is_empty() && !range_end.is_empty()` なので、
@@ -196,31 +205,46 @@ curl -s -X POST "$API/app/screenshot"
 | current_time 初期値 | `>= range_start` かつ `<= range_end` | auto-play 後は既に数 tick 進んでいる場合あり |
 | step-forward | pause 後に step → diff = 60000 | StepClock は常に 60000ms 固定 |
 | speed | cycle 後に期待値一致 | "1x","2x","5x","10x" の順 |
-| auto-play 完了 | ポーリング（最大 30s） | streams が解決しないと toast でタイムアウト |
+| auto-play 完了 (Binance) | ポーリング（最大 30s） | 数秒で Playing になる |
+| auto-play 完了 (Tachibana) | ポーリング（最大 120s） | master download 完了まで待機 |
+| auto-play 放棄確認 | ログに "auto-play deferred" | Tachibana セッションなし時の期待動作 |
 | HTTP ステータス | `-o /dev/null -w "%{http_code}"` | 200/400/404 |
 | 永続化復元 | fixture 配置→起動→status 確認 | playback は常に null（clock は保存されない） |
 | 永続化保存 | `POST /api/app/save` → kill → JSON 確認 | taskkill だけでは保存されない |
 | BigInt 比較 | `node -e "console.log(BigInt('$A')>BigInt('$B'))"` | current_time は大きな数値 |
 
----
-
-## 計画書運用（複数セッション作業）
-
-`docs/plan/<feature>.md` を作成し、セッション間のコンテキストを保持する:
-
-- **目的**: 何を達成するか（1〜3行）
-- **実装ステップ (Phase 分割)**: 完了したものに `✅` をつける
-- **Tips**: Phase 中に発見したエッジケース・落とし穴をその場で追記
-- **撤回した旧仕様**: 前のセッションで変更した内容を明示的に記録
-
-参考実例: [docs/plan/replay_bar_step_loop.md](../../docs/plan/replay_bar_step_loop.md)
 
 ---
 
 ## ログ駆動デバッグ
 
-確認したい箇所に `eprintln!("[E2E DEBUG] field={:?}", value);` を追加して検証する。
-stderr に出るため API の JSON レスポンスと混ざらない。
+### アプリログの場所
+
+**アプリの `log::info!` / `log::error!` は stderr ではなく `$DATA_DIR/flowsurface-current.log` に書かれる。**
+`"$EXE" 2>C:/tmp/e2e_debug.log` で取れるのは stderr のみ（通常は空）。
+ログチェックは必ずファイルから読むこと:
+
+```bash
+LOG_FILE="$APPDATA/flowsurface/flowsurface-current.log"
+
+# 起動前にロール（古いログを消す）
+> "$LOG_FILE"
+
+# 起動後
+tail -20 "$LOG_FILE"
+grep "auto-play deferred" "$LOG_FILE"
+```
+
+`cat C:/tmp/e2e_debug.log` で条件分岐を書くとログが常に空のため else 分岐に落ち、
+テストがすり抜ける。過去に Phase 4 E2E で踏んだ罠。
+
+### eprintln! で stderr を使うケース
+
+API の JSON レスポンスと混ざらない値を確認したい時のみ:
+
+```rust
+eprintln!("[E2E DEBUG] field={:?}", value);
+```
 
 ```bash
 "$EXE" 2>C:/tmp/debug.log &

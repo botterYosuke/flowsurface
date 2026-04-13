@@ -9,7 +9,7 @@
 |------|--------|------|
 | ティッカー | `BinanceLinear:BTCUSDT` | データ豊富。`fetch_trades_batched()` は Binance のみ対応 |
 | タイムフレーム | `M1` | 本数が多いが fetch_klines は自動ページングで取得 |
-| `timezone` | `"UTC"` | API の unix ms との照合が容易 |
+| `timezone` | `"UTC"` または `"Local"` | **"Asia/Tokyo" 等は parse エラー** → `saved-state_old.json` に rename されてデフォルト Live 起動になる |
 | `trade_fetch_enabled` | `false` | ライブ trades フェッチを止めてノイズ削減 |
 | ペイン数 | 最小限 | フェッチ対象減でテスト高速化 |
 | リプレイ日時 | 過去 24-48h 以内 | Binance API からデータ取得可能な範囲 |
@@ -251,3 +251,39 @@ kline/trades 分離修正の回帰確認用（BTCUSDT KlineChart + ETHUSDT Kline
 ```
 
 **注意**: `range_start` / `range_end` は過去 24-48h 以内、12 時間レンジを推奨。
+
+## 6. Tachibana 構成 + リプレイ（auto-play イベント駆動テスト用）
+
+Tachibana セッション有り → session 復元 → master download → auto-play 検証用:
+
+```json
+{
+  "layout_manager": {
+    "layouts": [{ "name": "E2E-Tachibana", "dashboard": {
+      "pane": { "KlineChart": {
+        "layout": { "splits": [0.78], "autoscale": "FitToVisible" },
+        "kind": "Candles",
+        "stream_type": [{ "Kline": { "ticker": "TachibanaSpot:7203|TOYOTA", "timeframe": "D1" } }],
+        "settings": { "tick_multiply": null, "visual_config": null, "selected_basis": { "Time": "D1" } },
+        "indicators": [],
+        "link_group": "A"
+      } },
+      "popout": []
+    } }],
+    "active_layout": "E2E-Tachibana"
+  },
+  "timezone": "UTC",
+  "trade_fetch_enabled": false,
+  "size_in_quote_ccy": "Base",
+  "replay": {
+    "mode": "replay",
+    "range_start": "2026-04-09 00:00",
+    "range_end": "2026-04-09 15:00"
+  }
+}
+```
+
+**注意**:
+- `timezone` は必ず `"UTC"` または `"Local"` を使うこと（`"Asia/Tokyo"` は parse エラーになる）
+- セッションあり: auto-play が master download 後に発火（最大 120s でポーリング）
+- セッションなし: ログに `auto-play deferred`、mode=Replay のまま、Playing にならない

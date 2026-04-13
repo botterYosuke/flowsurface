@@ -74,8 +74,6 @@ pub struct ReplayState {
     /// 起動時 fixture 復元の結果として次の「全ペイン Ready」で Play を発火する。
     /// 一度発火したら false に戻す。永続化しない。
     pub pending_auto_play: bool,
-    /// auto-play の発火期限。超過したらタイムアウトとして flag を下ろす。
-    pub pending_auto_play_deadline: Option<Instant>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,7 +125,6 @@ impl Default for ReplayState {
             event_store: EventStore::new(),
             active_streams: HashSet::new(),
             pending_auto_play: false,
-            pending_auto_play_deadline: None,
         }
     }
 }
@@ -146,7 +143,6 @@ impl ReplayState {
                 self.active_streams = HashSet::new();
                 self.range_input = ReplayRangeInput::default();
                 self.pending_auto_play = false;
-                self.pending_auto_play_deadline = None;
             }
         }
     }
@@ -180,6 +176,16 @@ impl ReplayState {
     /// 現在の仮想時刻（ms）。クロックが存在しない場合は 0。
     pub fn current_time(&self) -> u64 {
         self.clock.as_ref().map_or(0, |c| c.now_ms())
+    }
+
+    /// 手動再生が要求されたとき、pending_auto_play フラグをクリアする。
+    pub fn on_manual_play_requested(&mut self) {
+        self.pending_auto_play = false;
+    }
+
+    /// セッションが利用不可のとき、pending_auto_play フラグをクリアする。
+    pub fn on_session_unavailable(&mut self) {
+        self.pending_auto_play = false;
     }
 
     /// 速度を次の段階にサイクルする (1x → 2x → 5x → 10x → 1x)。
@@ -615,7 +621,6 @@ mod tests {
     fn default_state_has_no_pending_auto_play() {
         let state = ReplayState::default();
         assert!(!state.pending_auto_play);
-        assert!(state.pending_auto_play_deadline.is_none());
     }
 
     #[test]
@@ -623,12 +628,26 @@ mod tests {
         let mut state = ReplayState::default();
         state.mode = ReplayMode::Replay;
         state.pending_auto_play = true;
-        state.pending_auto_play_deadline = Some(Instant::now() + Duration::from_secs(30));
 
         state.toggle_mode(); // Replay → Live
 
         assert!(!state.pending_auto_play);
-        assert!(state.pending_auto_play_deadline.is_none());
+    }
+
+    #[test]
+    fn replay_play_message_clears_pending_auto_play() {
+        let mut state = ReplayState::default();
+        state.pending_auto_play = true;
+        state.on_manual_play_requested();
+        assert!(!state.pending_auto_play);
+    }
+
+    #[test]
+    fn session_restore_failure_clears_pending_auto_play() {
+        let mut state = ReplayState::default();
+        state.pending_auto_play = true;
+        state.on_session_unavailable();
+        assert!(!state.pending_auto_play);
     }
 
     // ── parse_replay_range ────────────────────────────────────────────────

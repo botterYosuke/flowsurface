@@ -1,11 +1,12 @@
 # リプレイ機能 仕様書
 
 **最終更新**: 2026-04-13
-**対象バージョン**: `sasa/step` ブランチ (Phase 1〜8 + Tachibana Phase 1〜3 + R3 アーキテクチャ刷新 + Fixture 直接起動 完了)
+**対象バージョン**: `sasa/step` ブランチ (Phase 1〜8 + Tachibana Phase 1〜3 + R3 アーキテクチャ刷新 + Fixture 直接起動 + Auto-play タイムアウト廃止 完了)
 **関連ドキュメント**:
 - [docs/plan/replay_redesign.md](plan/replay_redesign.md) — R1〜R3 リファクタ計画と実装ログ
 - [docs/plan/replay_bar_step_loop.md](plan/replay_bar_step_loop.md) — StepClock / EventStore / dispatch_tick 設計
 - [docs/plan/replay_fixture_direct_boot.md](plan/replay_fixture_direct_boot.md) — Fixture 直接起動 (auto-play) 設計
+- [docs/plan/replay_auto_play_no_timeout.md](plan/replay_auto_play_no_timeout.md) — Auto-play タイムアウト廃止（イベント駆動化）
 - [docs/plan/archive/tachibana_replay.md](plan/archive/tachibana_replay.md) — 立花証券 D1 対応の実装経緯（完了、アーカイブ）
 - [docs/plan/archive/replay_unified_step.md](plan/archive/replay_unified_step.md) — 統一 Tick ハンドラ設計メモ（完了、アーカイブ）
 - [docs/tachibana_spec.md §8](tachibana_spec.md#8-リプレイ対応の設計判断) — 立花証券リプレイ設計の「なぜ」
@@ -152,8 +153,6 @@ pub struct ReplayState {
     /// 起動時 fixture 復元の結果として次の「全ペイン Ready」で Play を自動発火する。
     /// 一度発火したら false に戻す。永続化しない。
     pub pending_auto_play: bool,
-    /// auto-play の発火期限。超過したらタイムアウトとして flag を下ろす。
-    pub pending_auto_play_deadline: Option<Instant>,
 }
 
 pub enum ReplayMode { Live, Replay }
@@ -167,8 +166,8 @@ pub struct ReplayRangeInput {
 - `clock` は `Play` 押下で `Some` になり、`Live` 復帰で `None` に戻る
 - `event_store` は stream ごとにロード済みの kline / trades を保持する（play 開始時に初期化）
 - `active_streams` は再生中の全 `StreamKind` の集合
-- `toggle_mode()` で Replay → Live に戻す際は `clock = None`, `event_store = EventStore::new()`, `active_streams = HashSet::new()`, `range_input = default`, `pending_auto_play = false`, `pending_auto_play_deadline = None` にリセット
-- `pending_auto_play` / `pending_auto_play_deadline` は **永続化しない**（再起動のたびに起動時ロジックで再評価する）
+- `toggle_mode()` で Replay → Live に戻す際は `clock = None`, `event_store = EventStore::new()`, `active_streams = HashSet::new()`, `range_input = default`, `pending_auto_play = false` にリセット
+- `pending_auto_play` は **永続化しない**（再起動のたびに起動時ロジックで再評価する）
 
 ### 4.2 StepClock ([src/replay/clock.rs](../src/replay/clock.rs))
 
@@ -313,7 +312,6 @@ enum Message {
 
 ```
 [Message::Tick(now)]
-  ├─ auto-play タイムアウトチェック（pending_auto_play && deadline 超過 → flag リセット + Toast）
   └─ replay.clock が Some && is_replay() の場合:
        dispatch = dispatch_tick(clock, &event_store, &active_streams, now)
 
@@ -337,23 +335,36 @@ enum Message {
 [アプリ起動 (src/main.rs ReplayState 初期化)]
   ├─ replay_config.mode == "replay" && parse_replay_range() が Ok
   │     → pending_auto_play = true
-  │        pending_auto_play_deadline = Instant::now() + 30s
   └─ それ以外 → pending_auto_play = false（通常起動）
+
+[SessionRestoreResult(None) — Tachibana ペインあり]
+  ├─ has_tachibana_stream_pane() == true && pending_auto_play
+  │     → on_session_unavailable() で pending_auto_play = false
+  │        log::info!("[auto-play] session unavailable — auto-play deferred")
+  │        Toast::info("Replay auto-play was deferred: please log in to resume")
+  └─ Tachibana ペインなし（Binance 等）→ pending_auto_play はそのまま維持
+
+[Sidebar::TickersTable::UpdateMetadata 受信]
+  └─ pending_auto_play が true
+       → Dashboard::refresh_waiting_panes() で全 Waiting ペインの mark_resolution_due() を呼び出し
+          log::info!("[auto-play] metadata updated — refreshed waiting panes")
+          （次の ResolveStreams で即座に Ready 昇格を試みる）
 
 [Dashboard::Event::ResolveStreams 処理 (Ok(resolved) 分岐)]
   ├─ (1) dashboard.resolve_streams() で当該ペインを Ready に昇格（同期）
   └─ (2) pending_auto_play が true かつ is_replay() かつ
          all_panes_have_ready_streams() == true
-           → pending_auto_play = false, deadline = None
+           → pending_auto_play = false
               Task::done(Message::Replay(ReplayMessage::Play)) を batch dispatch
 
-[Message::Tick(now) — タイムアウト監視]
-  └─ pending_auto_play && now >= deadline
-       → pending_auto_play = false, deadline = None
-          Toast::error("Replay auto-play timed out: streams did not resolve within 30s")
+[ReplayMessage::Play 受信]
+  └─ on_manual_play_requested() で pending_auto_play = false
+     （ユーザーが手動で Play を押した場合でも auto-play と二重発火しないようにする）
 ```
 
 **ゲート判定の詳細**: `all_panes_have_ready_streams(window_id)` は `iter_all_panes()` を使い、全ペインの `streams` フィールドを検査する。`Waiting { streams: [] }` は stream 未設定（空ペイン）として Ready 扱いにする（[src/screen/dashboard.rs](../src/screen/dashboard.rs)）。
+
+**タイムアウトなし**: auto-play はイベント駆動で発火する。タイマーは存在しない。Tachibana ペインが含まれる場合は session restore 失敗時に明示的に flag を落とし、ユーザーへ info トーストで通知する。
 
 **pending_auto_play は永続化しない**: `Play` 実行後に `POST /api/app/save` で保存した state の `replay_config` に mode/range が残るため、次回起動でも同じ自動再生が発動する。これはユーザが「リプレイ状態を保存した＝次回も同じ区間を再生したい」という意図と一致する。
 
@@ -395,7 +406,7 @@ enum Message {
 [ReplayMessage::ToggleMode (Replay → Live)]
   ├─ clock = None, event_store = EventStore::new(), active_streams = {}
   ├─ range_input = default
-  ├─ pending_auto_play = false, pending_auto_play_deadline = None
+  ├─ pending_auto_play = false
   ├─ Dashboard::rebuild_for_live() で content リビルド
   └─ subscription() 次評価で exchange_streams 復帰 → WS 自動再購読
 ```
@@ -762,7 +773,6 @@ curl -X POST http://127.0.0.1:9876/api/app/save
 | API port (default) | `9876` | [src/replay_api.rs](../src/replay_api.rs) | `FLOWSURFACE_API_PORT` で上書き |
 | HTTP buffer size | `8192` | [src/replay_api.rs](../src/replay_api.rs) | リクエスト読み取りバッファ |
 | mpsc channel bound | `32` | [src/replay_api.rs](../src/replay_api.rs) | API → iced キュー |
-| auto-play timeout | `30s` | [src/main.rs](../src/main.rs) | pending_auto_play の発火待機上限 |
 
 ### 12.2 時間範囲
 

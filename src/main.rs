@@ -229,8 +229,6 @@ impl Flowsurface {
                     event_store: replay::store::EventStore::new(),
                     active_streams: std::collections::HashSet::new(),
                     pending_auto_play,
-                    pending_auto_play_deadline: pending_auto_play
-                        .then(|| std::time::Instant::now() + std::time::Duration::from_secs(30)),
                 }
             },
         };
@@ -298,6 +296,16 @@ impl Flowsurface {
                     return Task::batch([dashboard_task, master_task]);
                 }
                 // 再ログイン失敗 → ログイン画面を表示
+                let main_window_id = self.main_window.id;
+                if self.replay.pending_auto_play
+                    && self.active_dashboard().has_tachibana_stream_pane(main_window_id)
+                {
+                    self.replay.on_session_unavailable();
+                    log::info!("[auto-play] session unavailable — auto-play deferred (Tachibana login required)");
+                    self.notifications.push(Toast::info(
+                        "Replay auto-play was deferred: please log in to resume",
+                    ));
+                }
                 let (login_window_id, open_login_window) = window::open(window::Settings {
                     size: iced::Size::new(900.0, 560.0),
                     position: window::Position::Centered,
@@ -356,20 +364,6 @@ impl Flowsurface {
             Message::Tick(now) => {
                 let main_window_id = self.main_window.id;
                 let mut all_tasks: Vec<Task<Message>> = Vec::new();
-
-                // auto-play タイムアウト: streams が 30 秒以内に解決しなければ諦める
-                if self.replay.pending_auto_play {
-                    if let Some(deadline) = self.replay.pending_auto_play_deadline {
-                        if now >= deadline {
-                            log::warn!("[auto-play] Timed out waiting for streams to resolve");
-                            self.replay.pending_auto_play = false;
-                            self.replay.pending_auto_play_deadline = None;
-                            self.notifications.push(Toast::error(
-                                "Replay auto-play timed out: streams did not resolve within 30s",
-                            ));
-                        }
-                    }
-                }
 
                 // リプレイ再生中: dispatch_tick でイベントを抽出してチャートに注入する
                 if self.replay.is_replay() {
@@ -572,7 +566,6 @@ impl Flowsurface {
                                     {
                                         log::info!("[auto-play] All panes ready — firing ReplayMessage::Play");
                                         self.replay.pending_auto_play = false;
-                                        self.replay.pending_auto_play_deadline = None;
                                         let play_task =
                                             Task::done(Message::Replay(ReplayMessage::Play));
                                         return Task::batch([resolve_task, play_task]);
@@ -785,6 +778,13 @@ impl Flowsurface {
                 }
             }
             Message::Sidebar(message) => {
+                let is_metadata_update = matches!(
+                    &message,
+                    dashboard::sidebar::Message::TickersTable(
+                        dashboard::tickers_table::Message::UpdateMetadata(..)
+                    )
+                );
+
                 let (task, action) = self.sidebar.update(message);
 
                 match action {
@@ -823,6 +823,12 @@ impl Flowsurface {
                     None => {}
                 }
 
+                if is_metadata_update && self.replay.pending_auto_play {
+                    let main_window_id = self.main_window.id;
+                    self.active_dashboard_mut().refresh_waiting_panes(main_window_id);
+                    log::info!("[auto-play] metadata updated — refreshed waiting panes for stream resolution");
+                }
+
                 return task.map(Message::Sidebar);
             }
             Message::ApplyVolumeSizeUnit(pref) => {
@@ -857,6 +863,7 @@ impl Flowsurface {
                         self.replay.range_input.end = s;
                     }
                     ReplayMessage::Play => {
+                        self.replay.on_manual_play_requested();
                         // 日時パース
                         let (start_ms, end_ms) = match replay::parse_replay_range(
                             &self.replay.range_input.start,

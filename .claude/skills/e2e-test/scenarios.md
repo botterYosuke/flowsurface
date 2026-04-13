@@ -223,4 +223,7 @@ DIFF=$(node -e "console.log(BigInt('$POST') - BigInt('$PRE'))")
 **検証ポイント**:
 - `start_app` 後に `sleep 15` が**不要**（auto-play が streams 解決を自動検知して Play）
 - `POST /replay/toggle` も `POST /replay/play` も**不要**
-- タイムアウト 30s を超えると toast 通知が出て auto-play は発火しない（symbol ミス等のエラー検知）
+- **タイムアウト廃止**（2026-04-13）: 旧 30s timeout は削除済み。auto-play はイベント駆動。
+  - Binance: streams が即座に Ready → 数秒で Play
+  - Tachibana（セッションあり）: master download 完了 → UpdateMetadata → Play（最大 120s でポーリング）
+  - Tachibana（セッションなし）: `SessionRestoreResult(None)` → `pending_auto_play = false` + info toast → ログに "auto-play deferred"

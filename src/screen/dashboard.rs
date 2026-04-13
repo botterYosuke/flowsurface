@@ -599,6 +599,38 @@ impl Dashboard {
             })
     }
 
+    /// いずれかのペインが Tachibana 取引所の Waiting ストリームを持つかを返す。
+    /// `SessionRestoreResult(None)` 時に auto-play を破棄するかどうかを判断するために使う。
+    pub fn has_tachibana_stream_pane(&self, main_window: window::Id) -> bool {
+        self.iter_all_panes(main_window).any(|(_, _, state)| {
+            if let ResolvedStream::Waiting { streams, .. } = &state.streams {
+                streams.iter().any(|s| {
+                    let ticker = match s {
+                        PersistStreamKind::Kline { ticker, .. } => ticker,
+                        PersistStreamKind::Depth(d) => &d.ticker,
+                        PersistStreamKind::Trades { ticker } => ticker,
+                        PersistStreamKind::DepthAndTrades(d) => &d.ticker,
+                    };
+                    ticker.exchange == exchange::adapter::Exchange::Tachibana
+                })
+            } else {
+                false
+            }
+        })
+    }
+
+    /// metadata 到着時など、Waiting ペインの stream 解決を即時トリガするために
+    /// 各ペインの last_attempt をリセットする。
+    pub fn refresh_waiting_panes(&mut self, main_window: window::Id) {
+        for (_, _, state) in self.iter_all_panes_mut(main_window) {
+            if let ResolvedStream::Waiting { streams, .. } = &state.streams {
+                if !streams.is_empty() {
+                    state.streams.mark_resolution_due();
+                }
+            }
+        }
+    }
+
     pub fn iter_all_panes_mut(
         &mut self,
         main_window: window::Id,
@@ -1416,5 +1448,65 @@ mod tests {
             timeframe: exchange::Timeframe::M1,
         }]);
         assert!(!dashboard.all_panes_have_ready_streams(main_window));
+    }
+
+    #[test]
+    fn refresh_waiting_panes_marks_resolution_due_for_waiting_panes() {
+        use data::stream::PersistStreamKind;
+        use std::time::{Duration, Instant};
+
+        let main_window = window::Id::unique();
+        let mut dashboard = Dashboard::default();
+
+        // Set the first pane to Waiting with a non-empty stream list and recent last_attempt
+        let pane = *dashboard.panes.iter().next().map(|(p, _)| p).unwrap();
+        let state = dashboard.panes.get_mut(pane).unwrap();
+        state.streams = ResolvedStream::waiting(vec![PersistStreamKind::Kline {
+            ticker: exchange::Ticker::new(
+                "BTCUSDT",
+                exchange::adapter::Exchange::BinanceLinear,
+            ),
+            timeframe: exchange::Timeframe::M1,
+        }]);
+        // Simulate a recent attempt so due_streams_to_resolve would normally return None
+        if let ResolvedStream::Waiting { last_attempt, .. } = &mut state.streams {
+            *last_attempt = Some(Instant::now() - Duration::from_millis(100));
+        }
+
+        // Before: due_streams_to_resolve returns None (retry interval not elapsed)
+        assert!(state.streams.due_streams_to_resolve(Instant::now()).is_none());
+
+        // Call refresh_waiting_panes
+        dashboard.refresh_waiting_panes(main_window);
+
+        // After: due_streams_to_resolve returns Some (forced due)
+        let pane_state = dashboard.panes.get_mut(pane).unwrap();
+        assert!(pane_state.streams.due_streams_to_resolve(Instant::now()).is_some());
+    }
+
+    #[test]
+    fn has_tachibana_stream_pane_returns_true_for_tachibana_ticker() {
+        use data::stream::PersistStreamKind;
+        use exchange::adapter::Exchange;
+
+        let main_window = window::Id::unique();
+        let mut dashboard = Dashboard::default();
+
+        let pane = *dashboard.panes.iter().next().map(|(p, _)| p).unwrap();
+        let state = dashboard.panes.get_mut(pane).unwrap();
+        state.streams = ResolvedStream::waiting(vec![PersistStreamKind::Kline {
+            ticker: exchange::Ticker::new("7203", Exchange::Tachibana),
+            timeframe: exchange::Timeframe::D1,
+        }]);
+
+        assert!(dashboard.has_tachibana_stream_pane(main_window));
+    }
+
+    #[test]
+    fn has_tachibana_stream_pane_returns_false_for_binance_ticker() {
+        let main_window = window::Id::unique();
+        let dashboard = Dashboard::default();
+        // Default dashboard has no streams
+        assert!(!dashboard.has_tachibana_stream_pane(main_window));
     }
 }
