@@ -17,6 +17,13 @@
             "if": "Edit(*.rs)|Write(*.rs)|Edit(*Cargo.toml)|Write(*Cargo.toml)",
             "statusMessage": "Checking compilation...",
             "async": true
+          },
+          {
+            "type": "command",
+            "command": "cargo clippy --workspace -- -D warnings 2>/dev/null || true",
+            "if": "Edit(*.rs)|Write(*.rs)",
+            "statusMessage": "Running clippy...",
+            "async": true
           }
         ]
       }

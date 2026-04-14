@@ -82,6 +82,9 @@ pub enum PaneCommand {
     },
     /// 現在の通知（Toast）一覧を取得する。§6.2 #10 backfill 失敗検証用。
     ListNotifications,
+    /// 指定ペインのチャートスナップショット（バー数・タイムスタンプ範囲）を返す。
+    /// クエリパラメータ: `?pane_id=<uuid>`
+    GetChartSnapshot { pane_id: uuid::Uuid },
 }
 
 /// oneshot::Sender を Clone 可能にするラッパー（iced の Message は Clone が必要）
@@ -306,6 +309,9 @@ fn route(method: &str, path: &str, body: &str) -> Result<ApiCommand, RouteError>
         ("GET", "/api/pane/list") => {
             Ok(ApiCommand::Pane(PaneCommand::ListPanes))
         }
+        ("GET", p) if p.starts_with("/api/pane/chart-snapshot") => {
+            parse_chart_snapshot_command(p)
+        }
         ("POST", "/api/pane/split") => parse_split_command(body),
         ("POST", "/api/pane/close") => {
             let pane_id = body_uuid_field(body, "pane_id")?;
@@ -365,6 +371,27 @@ fn route(method: &str, path: &str, body: &str) -> Result<ApiCommand, RouteError>
 
         _ => Err(RouteError::NotFound),
     }
+}
+
+/// URL パスのクエリ文字列から指定キーの値を取り出す。
+/// 例: `/api/pane/chart-snapshot?pane_id=xxx` → `Some("xxx")`
+fn query_param(path: &str, key: &str) -> Option<String> {
+    let query = path.split('?').nth(1)?;
+    query.split('&').find_map(|pair| {
+        let mut kv = pair.splitn(2, '=');
+        if kv.next() == Some(key) {
+            kv.next().map(|s| s.to_string())
+        } else {
+            None
+        }
+    })
+}
+
+/// `GET /api/pane/chart-snapshot?pane_id=<uuid>` をパースして ApiCommand を返す。
+fn parse_chart_snapshot_command(path: &str) -> Result<ApiCommand, RouteError> {
+    let id_str = query_param(path, "pane_id").ok_or(RouteError::BadRequest)?;
+    let pane_id = uuid::Uuid::parse_str(&id_str).map_err(|_| RouteError::BadRequest)?;
+    Ok(ApiCommand::Pane(PaneCommand::GetChartSnapshot { pane_id }))
 }
 
 /// `POST /api/replay/play` のボディをパースして ApiCommand を返す。
@@ -801,6 +828,69 @@ mod tests {
     fn route_get_notification_list() {
         let cmd = route("GET", "/api/notification/list", "").unwrap();
         assert!(matches!(unwrap_pane(cmd), PaneCommand::ListNotifications));
+    }
+
+    // ── route tests: chart-snapshot ──
+
+    #[test]
+    fn route_get_chart_snapshot_valid_uuid() {
+        let path = "/api/pane/chart-snapshot?pane_id=00000000-0000-0000-0000-000000000010";
+        let cmd = route("GET", path, "").unwrap();
+        match unwrap_pane(cmd) {
+            PaneCommand::GetChartSnapshot { pane_id } => {
+                assert_eq!(
+                    pane_id,
+                    uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000010").unwrap()
+                );
+            }
+            _ => panic!("Expected GetChartSnapshot command"),
+        }
+    }
+
+    #[test]
+    fn route_get_chart_snapshot_missing_pane_id_returns_bad_request() {
+        let result = route("GET", "/api/pane/chart-snapshot", "");
+        assert!(matches!(result, Err(RouteError::BadRequest)));
+    }
+
+    #[test]
+    fn route_get_chart_snapshot_invalid_uuid_returns_bad_request() {
+        let result = route("GET", "/api/pane/chart-snapshot?pane_id=not-a-uuid", "");
+        assert!(matches!(result, Err(RouteError::BadRequest)));
+    }
+
+    #[test]
+    fn route_post_chart_snapshot_not_found() {
+        let result = route("POST", "/api/pane/chart-snapshot?pane_id=00000000-0000-0000-0000-000000000010", "");
+        assert!(matches!(result, Err(RouteError::NotFound)));
+    }
+
+    // ── query_param ──
+
+    #[test]
+    fn query_param_extracts_single_value() {
+        assert_eq!(
+            query_param("/api/pane/chart-snapshot?pane_id=abc-123", "pane_id"),
+            Some("abc-123".to_string())
+        );
+    }
+
+    #[test]
+    fn query_param_extracts_from_multiple_params() {
+        assert_eq!(
+            query_param("/api/foo?a=1&pane_id=xyz&b=2", "pane_id"),
+            Some("xyz".to_string())
+        );
+    }
+
+    #[test]
+    fn query_param_returns_none_when_key_absent() {
+        assert_eq!(query_param("/api/foo?other=val", "pane_id"), None);
+    }
+
+    #[test]
+    fn query_param_returns_none_when_no_query() {
+        assert_eq!(query_param("/api/foo", "pane_id"), None);
     }
 
     #[test]

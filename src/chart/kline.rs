@@ -472,6 +472,30 @@ impl KlineChart {
         &self.study_configurator
     }
 
+    /// チャートに保持されているバー数を返す。
+    pub fn bar_count(&self) -> usize {
+        match &self.data_source {
+            PlotData::TimeBased(ts) => ts.datapoints.len(),
+            PlotData::TickBased(ta) => ta.datapoints.len(),
+        }
+    }
+
+    /// 最も古いバーのタイムスタンプ（ミリ秒）を返す。TickBased の場合は None。
+    pub fn oldest_timestamp(&self) -> Option<u64> {
+        match &self.data_source {
+            PlotData::TimeBased(ts) => ts.datapoints.keys().next().copied(),
+            PlotData::TickBased(_) => None,
+        }
+    }
+
+    /// 最も新しいバーのタイムスタンプ（ミリ秒）を返す。TickBased の場合は None。
+    pub fn newest_timestamp(&self) -> Option<u64> {
+        match &self.data_source {
+            PlotData::TimeBased(ts) => ts.datapoints.keys().last().copied(),
+            PlotData::TickBased(_) => None,
+        }
+    }
+
     pub fn update_study_configurator(&mut self, message: study::Message<FootprintStudy>) {
         let KlineChartKind::Footprint {
             ref mut studies, ..

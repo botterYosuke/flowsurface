@@ -937,7 +937,7 @@ bash docs/plan/e2e_scripts/s14_autoplay_event_driven.sh
 
 | # | 内容 | 依存 | 状態 |
 |---|------|------|------|
-| 1 | `GET /api/pane/chart-snapshot` 実装後に S12-TC-S12-04 を追加（バー本数 1〜300 の直接検証） | API 実装待ち（優先度: 高） | PEND |
+| 1 | `GET /api/pane/chart-snapshot` 実装後に S12-TC-S12-04 を追加（バー本数 1〜300 の直接検証） | ✅ API 実装済み（2026-04-14） S12-TC-S12-04 スクリプト追加が次のステップ | 実装済み・スクリプト未追加 |
 | 2 | S11-TC-S11-04（H1）は Binance H1 データが 24h 以内にある前提 | 実行タイミング依存 | ✅ 実行時 PASS 確認済み |
 | 3 | `api_post_code`（HTTP ステータスコードのみ返すヘルパー）を `common_helpers.sh` に追加 | S7-TC-S7-07 で必要 | ✅ `common_helpers.sh` に追加済み |
 | 4 | TC-S14-04 の「空 master → master 未解決」動作はモック実装依存 | e2e-mock 実装確認 | ✅ PASS 確認済み（空リストでは stream 解決不可） |

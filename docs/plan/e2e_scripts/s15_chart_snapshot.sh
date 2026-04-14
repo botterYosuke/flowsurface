@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+# s15_chart_snapshot.sh — スイート S15: chart-snapshot API テスト
+# GET /api/pane/chart-snapshot?pane_id=<uuid> の動作確認
+set -euo pipefail
+source "$(dirname "$0")/common_helpers.sh"
+
+echo "=== S15: chart-snapshot API テスト ==="
+backup_state
+trap 'stop_app; restore_state' EXIT ERR
+
+START=$(utc_offset -3)
+END=$(utc_offset -1)
+setup_single_pane "BinanceLinear:BTCUSDT" "M1" "$START" "$END"
+start_app
+
+if ! wait_playing 30; then
+  fail "TC-S15-precond" "Playing 到達せず"
+  exit 1
+fi
+
+# 前提確認: chart-snapshot API が実装済みか確認（未実装なら全 TC PENDING）
+PROBE=$(curl -s -o /dev/null -w "%{http_code}" "$API/pane/chart-snapshot?pane_id=00000000-0000-0000-0000-000000000000" || echo "000")
+if [ "$PROBE" = "404" ]; then
+  pend "TC-S15-*" "GET /api/pane/chart-snapshot 未実装 → S15 全 TC を PENDING"
+  print_summary
+  exit 0
+fi
+echo "  chart-snapshot API 確認 (probe=$PROBE)"
+
+# Pause してからペイン ID を取得
+curl -s -X POST "$API/replay/pause" > /dev/null
+if ! wait_status Paused 10; then
+  fail "TC-S15-precond" "Paused に遷移せず"
+  exit 1
+fi
+
+PANES=$(curl -s "$API/pane/list")
+PANE_ID=$(node -e "const ps=(JSON.parse(process.argv[1]).panes||[]); console.log(ps[0]?ps[0].id:'');" "$PANES")
+if [ -z "$PANE_ID" ]; then
+  fail "TC-S15-precond" "ペイン ID 取得失敗"
+  exit 1
+fi
+echo "  PANE_ID=$PANE_ID"
+
+# TC-S15-01: Replay Play 直後（Pause 直後）のバー本数が 1 ≤ bar_count ≤ 300
+# PRE_START_HISTORY_BARS=300 の検証 — start 時刻以前の履歴バーが最大 300 本ロードされる
+SNAP=$(curl -s "$API/pane/chart-snapshot?pane_id=$PANE_ID")
+echo "  snapshot response: $SNAP"
+BAR_COUNT=$(node -e "const d=JSON.parse(process.argv[1]); console.log(d.bar_count !== undefined ? String(d.bar_count) : 'null');" "$SNAP")
+echo "  bar_count=$BAR_COUNT"
+if node -e "
+  const n = Number(process.argv[1]);
+  process.exit((Number.isFinite(n) && n >= 1 && n <= 300) ? 0 : 1);
+" "$BAR_COUNT" 2>/dev/null; then
+  pass "TC-S15-01: Play 後 bar_count=$BAR_COUNT (1 ≤ N ≤ 300, PRE_START_HISTORY_BARS 確認)"
+else
+  fail "TC-S15-01" "bar_count=$BAR_COUNT (想定: 1..300)"
+fi
+
+# TC-S15-02: StepForward 後 bar_count が増加または同数（リグレッションなし）
+BAR_BEFORE="$BAR_COUNT"
+curl -s -X POST "$API/replay/step-forward" > /dev/null
+wait_status Paused 10
+sleep 0.5
+SNAP2=$(curl -s "$API/pane/chart-snapshot?pane_id=$PANE_ID")
+BAR_AFTER=$(node -e "const d=JSON.parse(process.argv[1]); console.log(d.bar_count !== undefined ? String(d.bar_count) : 'null');" "$SNAP2")
+echo "  bar_count after StepForward: $BAR_BEFORE → $BAR_AFTER"
+if node -e "process.exit(Number(process.argv[1]) >= Number(process.argv[2]) ? 0 : 1);" \
+     "$BAR_AFTER" "$BAR_BEFORE" 2>/dev/null; then
+  pass "TC-S15-02: StepForward 後 bar_count=$BAR_AFTER >= before=$BAR_BEFORE"
+else
+  fail "TC-S15-02" "bar_count=$BAR_AFTER < before=$BAR_BEFORE（バー減少の異常）"
+fi
+
+# TC-S15-03: StepBackward 後も snapshot 取得可能（クラッシュしない）
+# 少し前進してから StepBackward（start 境界クランプを避けるため）
+for i in $(seq 1 5); do
+  curl -s -X POST "$API/replay/step-forward" > /dev/null
+  sleep 0.3
+done
+wait_status Paused 10 || true
+curl -s -X POST "$API/replay/step-backward" > /dev/null
+wait_status Paused 10
+sleep 0.3
+SNAP3=$(curl -s "$API/pane/chart-snapshot?pane_id=$PANE_ID")
+HAS_BAR=$(node -e "
+  const d=JSON.parse(process.argv[1]);
+  console.log(d.bar_count !== undefined && !d.error ? 'true' : 'false');
+" "$SNAP3")
+BAR3=$(node -e "const d=JSON.parse(process.argv[1]); console.log(d.bar_count);" "$SNAP3")
+[ "$HAS_BAR" = "true" ] \
+  && pass "TC-S15-03: StepBackward 後 snapshot 取得成功 (bar_count=$BAR3)" \
+  || fail "TC-S15-03" "snapshot 異常レスポンス: $SNAP3"
+
+# TC-S15-04: 存在しないペイン ID に対する snapshot → {"error":"..."} かつクラッシュなし
+FAKE_ID="00000000-0000-0000-0000-deadbeef0000"
+SNAP_FAKE=$(curl -s "$API/pane/chart-snapshot?pane_id=$FAKE_ID")
+HAS_ERROR=$(node -e "
+  const d=JSON.parse(process.argv[1]);
+  console.log(d.error ? 'true' : 'false');
+" "$SNAP_FAKE")
+ALIVE=$(curl -s "$API/replay/status" > /dev/null 2>&1 && echo "true" || echo "false")
+[ "$HAS_ERROR" = "true" ] && [ "$ALIVE" = "true" ] \
+  && pass "TC-S15-04: 不正 pane_id → error 応答 & アプリ生存確認 (resp=$SNAP_FAKE)" \
+  || fail "TC-S15-04" "has_error=$HAS_ERROR alive=$ALIVE resp=$SNAP_FAKE"
+
+# TC-S15-05: Live モードで snapshot を取得してもクラッシュしない
+curl -s -X POST "$API/replay/toggle" > /dev/null
+sleep 3
+SNAP_LIVE=$(curl -s "$API/pane/chart-snapshot?pane_id=$PANE_ID")
+echo "  Live mode snapshot: $SNAP_LIVE"
+# アプリがまだ応答しているかを確認（クラッシュ検出）
+if curl -s "$API/replay/status" > /dev/null 2>&1; then
+  pass "TC-S15-05: Live モード中の snapshot 取得後もアプリ応答あり"
+else
+  fail "TC-S15-05" "Live モード中の snapshot 取得後にアプリが応答しなくなった"
+fi
+# Replay モードに戻す
+curl -s -X POST "$API/replay/toggle" > /dev/null
+sleep 2
+
+print_summary
+[ $FAIL -eq 0 ]

@@ -1455,6 +1455,10 @@ impl Flowsurface {
                 let json = self.build_notification_list_json();
                 (json, Task::none())
             }
+            PaneCommand::GetChartSnapshot { pane_id } => {
+                let json = self.build_chart_snapshot_json(pane_id);
+                (json, Task::none())
+            }
         }
     }
 
@@ -1527,6 +1531,47 @@ impl Flowsurface {
         serde_json::to_string(&body).unwrap_or_else(|_| {
             r#"{"error":"failed to serialize pane list"}"#.to_string()
         })
+    }
+
+    /// 指定ペインのチャートスナップショットを JSON シリアライズする。
+    ///
+    /// レスポンス例（Kline ペイン）:
+    /// ```json
+    /// {"pane_id":"...","type":"Kline","bar_count":123,"oldest_ts":1700000000000,"newest_ts":1700003600000}
+    /// ```
+    /// ペインが存在しない場合: `{"error":"pane not found: <uuid>"}`
+    fn build_chart_snapshot_json(&self, pane_id: uuid::Uuid) -> String {
+        use screen::dashboard::pane::Content;
+
+        let main_window_id = self.main_window.id;
+        let Some((_, _, state)) = self
+            .active_dashboard()
+            .iter_all_panes(main_window_id)
+            .find(|(_, _, s)| s.unique_id() == pane_id)
+        else {
+            return format!(r#"{{"error":"pane not found: {pane_id}"}}"#);
+        };
+
+        let kind = state.content.kind().to_string();
+
+        let (bar_count, oldest_ts, newest_ts) = match &state.content {
+            Content::Kline { chart: Some(c), .. } => (
+                Some(c.bar_count()),
+                c.oldest_timestamp(),
+                c.newest_timestamp(),
+            ),
+            _ => (None, None, None),
+        };
+
+        let body = serde_json::json!({
+            "pane_id": pane_id.to_string(),
+            "type": kind,
+            "bar_count": bar_count,
+            "oldest_ts": oldest_ts,
+            "newest_ts": newest_ts,
+        });
+        serde_json::to_string(&body)
+            .unwrap_or_else(|_| r#"{"error":"failed to serialize chart snapshot"}"#.to_string())
     }
 
     /// uuid から (window_id, pane_grid::Pane) を検索する。
