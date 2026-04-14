@@ -48,6 +48,9 @@ cargo build --features e2e-mock
 | `coding-standards` | コードレビュー、新モジュール追加時、規約確認時 | `/coding-standards` |
 | `tdd-workflow` | 新機能実装、バグ修正、リファクタリング | `/tdd-workflow` |
 | `e2e-testing` | E2E テスト作成・実行（HTTP API ポート 9876 経由） | `/e2e-testing` |
+| `rust-testing` | Rust テスト作成、property-based testing、カバレッジ計測 | `/rust-testing` |
+| `benchmark` | PR 前後のパフォーマンス計測、criterion ベンチマーク作成 | `/benchmark` |
+| `architecture-decision-records` | 重要な技術的意思決定（フレームワーク・設計パターン・ライブラリ選定）を記録 | `/architecture-decision-records` または `ADR this` |
 
 ## コーディングルール
 

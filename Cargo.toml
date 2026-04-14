@@ -32,6 +32,7 @@ rustc-hash = "2.1.1"
 enum-map = "2.7.3"
 url = "2.5.8"
 uuid = { version = "1.11.0", features = ["v4"] }
+rstest = "0.25"
 exchange = { version = "0.8.7", path = "exchange", package = "flowsurface-exchange" }
 data = { version = "0.8.7", path = "data", package = "flowsurface-data" }
 
@@ -79,7 +80,15 @@ features = ["net", "io-util", "sync"]
 
 [dev-dependencies]
 mockito = "1.5"
+rstest.workspace = true
 tokio = { version = "1.43", features = ["rt", "macros", "rt-multi-thread"] }
+proptest = "1"
+mockall = "0.13"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "flowsurface"
+harness = false
 
 [features]
 debug = ["iced/hot"]
