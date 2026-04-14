@@ -4,13 +4,20 @@
 
 set -e
 
+# リポジトリルートを動的に解決（tests/e2e_scripts/../../ = repo root）
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
 DATA_DIR="$APPDATA/flowsurface"
 API="http://127.0.0.1:9876/api"
 API_BASE="http://127.0.0.1:9876"
 PASS=0
 FAIL=0
 PEND=0
-EXE="C:/Users/sasai/Documents/flowsurface/target/release/flowsurface.exe"
+# FLOWSURFACE_EXE 環境変数でオーバーライド可能（CI・他環境用）
+EXE="${FLOWSURFACE_EXE:-$REPO_ROOT/target/release/flowsurface.exe}"
+
+# テスト実行前にデータディレクトリを確保（CI 環境では $APPDATA/flowsurface が存在しない場合がある）
+mkdir -p "$DATA_DIR"
 
 jqn() {
   node -e "const d=JSON.parse(process.argv[1]); const v=$2; console.log(v === null || v === undefined ? 'null' : v);" "$1"
@@ -23,7 +30,10 @@ pend() { echo "  PEND: $1 — $2 (API 拡張待ち)"; PEND=$((PEND + 1)); }
 start_app() {
   echo "  Starting app..."
   > "$APPDATA/flowsurface/flowsurface-current.log" 2>/dev/null || true
-  "$EXE" 2>C:/tmp/e2e_debug.log &
+  # ログ出力先: CI では $RUNNER_TEMP、ローカルでは /tmp を使用
+  local _log_dir="${RUNNER_TEMP:-/tmp}"
+  mkdir -p "$_log_dir" 2>/dev/null || true
+  "$EXE" 2>"$_log_dir/e2e_debug.log" &
   APP_PID=$!
   for i in $(seq 1 30); do
     if curl -s "$API/replay/status" > /dev/null 2>&1; then
@@ -202,6 +212,24 @@ wait_for_streams_ready() {
       console.log(p && p.streams_ready ? 'true' : 'false');
     " "$panes")
     [ "$ready" = "true" ] && return 0
+    sleep 1
+  done
+  return 1
+}
+
+# Tachibana セッションが確立されるまでポーリング（最大 timeout 秒）
+# GET /api/auth/tachibana/status → {"session":"present"|"none"}
+wait_tachibana_session() {
+  local timeout=${1:-120}
+  local end=$((SECONDS + timeout))
+  while [ $SECONDS -lt $end ]; do
+    local resp session
+    resp=$(curl -s "$API/auth/tachibana/status" 2>/dev/null || echo '{}')
+    session=$(node -e "
+      try { const d=JSON.parse(process.argv[1]); console.log(d.session||'none'); }
+      catch(e) { console.log('none'); }
+    " "$resp")
+    [ "$session" = "present" ] && return 0
     sleep 1
   done
   return 1

@@ -1,42 +1,24 @@
 #!/usr/bin/env bash
 # s22_tachibana_endurance.sh — スイート S22: 耐久テスト（TachibanaSpot）
 # TachibanaSpot:7203 D1 での長時間再生・高速操作でメモリリークやデッドロックがないことを確認する
-# ビルド要件: cargo build --release --features e2e-mock
+# ビルド要件: cargo build（デバッグビルド）
+# 前提条件: DEV_USER_ID / DEV_PASSWORD 環境変数が設定済みであること
 # 警告: このスクリプトは完走に 15〜30 分かかる
 set -euo pipefail
 source "$(dirname "$0")/common_helpers.sh"
+
+# 本番データモードでは debug ビルドを使用
+EXE="${FLOWSURFACE_EXE_DEBUG:-$REPO_ROOT/target/debug/flowsurface.exe}"
+
+# 環境変数チェック
+if [ -z "${DEV_USER_ID:-}" ] || [ -z "${DEV_PASSWORD:-}" ]; then
+  echo "ERROR: DEV_USER_ID/DEV_PASSWORD not set" && exit 1
+fi
 
 echo "=== S22: 耐久テスト（TachibanaSpot:7203 D1）==="
 echo "  警告: このスクリプトは完走に 15〜30 分かかる"
 backup_state
 trap 'stop_app; restore_state' EXIT ERR
-
-MASTER='{"records":[{"sIssueCode":"7203","sIssueNameEizi":"Toyota Motor","sCLMID":"CLMIssueMstKabu"}]}'
-
-inject_daily_history() {
-  local start=$1 end=$2
-  # 大量 kline の場合 shell 引数長制限を超えるため一時ファイル経由で送信する
-  local tmpfile
-  tmpfile=$(mktemp /tmp/klines_XXXX.json)
-  node -e "
-    const startMs = new Date(process.argv[1].replace(' ', 'T') + ':00Z').getTime();
-    const endMs   = new Date(process.argv[2].replace(' ', 'T') + ':00Z').getTime();
-    const day = 86400000;
-    const first = Math.ceil(startMs / day) * day;
-    const klines = [];
-    for (let t = first; t <= endMs; t += day) {
-      klines.push({time: t, open: 3000, high: 3100, low: 2900, close: 3050, volume: 500000});
-    }
-    if (klines.length === 0) {
-      klines.push({time: first - day, open: 3000, high: 3100, low: 2900, close: 3050, volume: 500000});
-      klines.push({time: first,       open: 3050, high: 3150, low: 2950, close: 3100, volume: 600000});
-    }
-    console.log(JSON.stringify({issue_code: '7203', klines}));
-  " "$start" "$end" > "$tmpfile"
-  curl -s -X POST -H "Content-Type: application/json" --data-binary "@$tmpfile" \
-    "$API/test/tachibana/inject-daily-history" > /dev/null
-  rm -f "$tmpfile"
-}
 
 tachibana_replay_setup() {
   local start=$1 end=$2
@@ -54,11 +36,21 @@ tachibana_replay_setup() {
 }
 HEREDOC
   start_app
-  curl -s -X POST "$API/test/tachibana/inject-session" > /dev/null
-  curl -s -X POST -H "Content-Type: application/json" -d "$MASTER" \
-    "$API/test/tachibana/inject-master" > /dev/null
-  inject_daily_history "$start" "$end"
-  sleep 4
+  # DEV AUTO-LOGIN で Tachibana セッションが確立されるまで待機
+  echo "  waiting for Tachibana session (DEV AUTO-LOGIN)..."
+  if ! wait_tachibana_session 120; then
+    echo "  ERROR: Tachibana session not established after 120s"
+    return 1
+  fi
+  echo "  Tachibana session established"
+  # ペインの D1 kline データがフェッチ完了するまで待機
+  local pane_id
+  pane_id=$(node -e "const ps=(JSON.parse(process.argv[1]).panes||[]); console.log(ps[0]?ps[0].id:'');" \
+    "$(curl -s "$API/pane/list")")
+  if [ -n "$pane_id" ]; then
+    echo "  waiting for D1 klines (streams_ready)..."
+    wait_for_streams_ready "$pane_id" 120 || echo "  WARN: streams_ready timeout (continuing)"
+  fi
   curl -s -X POST "$API/replay/toggle" > /dev/null
   curl -s -X POST "$API/replay/play" \
     -H "Content-Type: application/json" \
