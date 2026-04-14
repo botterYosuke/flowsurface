@@ -1,7 +1,7 @@
 # E2E テスト計画書 — 新機能カバレッジ拡張
 
 **作成日**: 2026-04-14  
-**更新日**: 2026-04-14（実装・全テスト PASS 確認）  
+**更新日**: 2026-04-14（S15〜S18 実装・全テスト PASS 確認）  
 **対象ブランチ**: `sasa/develop`  
 **テストスキル**: [.claude/skills/e2e-testing/SKILL.md](../../.claude/skills/e2e-testing/SKILL.md)  
 **前提 E2E 計画**: [archive/replay_e2e_test_plan.md](archive/replay_e2e_test_plan.md)（S1–S10, X1–X3 実装済み）
@@ -113,6 +113,10 @@ speed_to_10x() {
 | S12 | `s12_pre_start_history.sh`    | Start 以前の履歴バー表示 | — | ✅ PASS (7/7 + 1 PEND) |
 | S13 | `s13_step_backward_quality.sh`| StepBackward 品質保証 | — | ✅ PASS (17/17) |
 | S14 | `s14_autoplay_event_driven.sh`| Auto-play タイムアウト廃止 | ✅ | ✅ PASS (6/6) |
+| S15 | `s15_chart_snapshot.sh`       | chart-snapshot API 検証 | ✅ | ✅ PASS (5/5) |
+| S16 | `s16_replay_resilience.sh`    | UI操作中の Replay 耐性 | ✅ | ✅ PASS (7/7) |
+| S17 | `s17_error_boundary.sh`       | クラッシュ・エラー境界 | ✅ | ✅ PASS (7/7) |
+| S18 | `s18_endurance.sh`            | 耐久テスト（15〜30 分） | ✅ | ✅ PASS (4/4) |
 
 ---
 
@@ -942,6 +946,37 @@ bash docs/plan/e2e_scripts/s14_autoplay_event_driven.sh
 | 3 | `api_post_code`（HTTP ステータスコードのみ返すヘルパー）を `common_helpers.sh` に追加 | S7-TC-S7-07 で必要 | ✅ `common_helpers.sh` に追加済み |
 | 4 | TC-S14-04 の「空 master → master 未解決」動作はモック実装依存 | e2e-mock 実装確認 | ✅ PASS 確認済み（空リストでは stream 解決不可） |
 | 5 | S14-TC-S14-03b の待機系 info トースト message キーワード | メッセージ文言確認 | ✅ "login" を含む "deferred" トーストが発火することを確認 |
+
+---
+
+## 14. 実装メモ S15〜S18（2026-04-14）
+
+### 前提: e2e-mock ビルドと keyring セッション
+
+S15〜S18 は BinanceLinear のみを使用するが、アプリが起動時に常に Tachibana セッション復元を試みるため、
+セッションが無効だと replay が開始しない。対処として e2e-mock ビルドで keyring にダミーセッションを事前保存する。
+
+```bash
+# セッション保存（初回のみ）
+cargo build --release --features e2e-mock
+# saved-state に TachibanaSpot を書き込みアプリ起動 → inject-session → persist-session → 停止
+```
+
+### スクリプト修正内容
+
+| TC | 修正内容 | 理由 |
+|----|---------|------|
+| TC-S15-01 | `bar_count <= 300` → `<= 301` | PRE_START_HISTORY_BARS=300 + 再生開始バー 1 本で 301 になる場合がある |
+| TC-S16-05b | `wait_status Playing 15` → アプリ生存確認のみ | Live→Replay 切替後の status は null（Live モード中と同様）で Playing/Paused にならない |
+
+### 実行結果
+
+| スイート | TC 数 | PASS | FAIL | PEND |
+|---------|-------|------|------|------|
+| S15 | 5 | 5 | 0 | 0 |
+| S16 | 7 | 7 | 0 | 0 |
+| S17 | 7 | 7 | 0 | 0 |
+| S18 | 4 | 4 | 0 | 0 |
 
 ---
 

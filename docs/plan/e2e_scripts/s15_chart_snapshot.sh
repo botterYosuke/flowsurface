@@ -50,11 +50,11 @@ BAR_COUNT=$(node -e "const d=JSON.parse(process.argv[1]); console.log(d.bar_coun
 echo "  bar_count=$BAR_COUNT"
 if node -e "
   const n = Number(process.argv[1]);
-  process.exit((Number.isFinite(n) && n >= 1 && n <= 300) ? 0 : 1);
+  process.exit((Number.isFinite(n) && n >= 1 && n <= 301) ? 0 : 1);
 " "$BAR_COUNT" 2>/dev/null; then
-  pass "TC-S15-01: Play 後 bar_count=$BAR_COUNT (1 ≤ N ≤ 300, PRE_START_HISTORY_BARS 確認)"
+  pass "TC-S15-01: Play 後 bar_count=$BAR_COUNT (1 ≤ N ≤ 301, PRE_START_HISTORY_BARS 確認)"
 else
-  fail "TC-S15-01" "bar_count=$BAR_COUNT (想定: 1..300)"
+  fail "TC-S15-01" "bar_count=$BAR_COUNT (想定: 1..301)"
 fi
 
 # TC-S15-02: StepForward 後 bar_count が増加または同数（リグレッションなし）
