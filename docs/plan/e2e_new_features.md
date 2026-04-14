@@ -1,7 +1,7 @@
 # E2E テスト計画書 — 新機能カバレッジ拡張
 
 **作成日**: 2026-04-14  
-**更新日**: 2026-04-14（レビュー反映）  
+**更新日**: 2026-04-14（実装・全テスト PASS 確認）  
 **対象ブランチ**: `sasa/develop`  
 **テストスキル**: [.claude/skills/e2e-testing/SKILL.md](../../.claude/skills/e2e-testing/SKILL.md)  
 **前提 E2E 計画**: [archive/replay_e2e_test_plan.md](archive/replay_e2e_test_plan.md)（S1–S10, X1–X3 実装済み）
@@ -105,14 +105,14 @@ speed_to_10x() {
 
 ## 3. 新規スイート一覧
 
-| スイート | ファイル名 | 対象機能 | e2e-mock 必要 |
-|---------|-----------|---------|:---:|
-| S5  | `s5_tachibana_mixed.sh`       | 立花証券 + Binance 混在 Replay | ✅ |
-| S7  | `s7_mid_replay_pane.sh`       | Mid-replay ペイン CRUD | — |
-| S11 | `s11_bar_step_discrete.sh`    | バーステップ離散化 | — |
-| S12 | `s12_pre_start_history.sh`    | Start 以前の履歴バー表示 | — |
-| S13 | `s13_step_backward_quality.sh`| StepBackward 品質保証 | — |
-| S14 | `s14_autoplay_event_driven.sh`| Auto-play タイムアウト廃止 | ✅ |
+| スイート | ファイル名 | 対象機能 | e2e-mock 必要 | 結果 |
+|---------|-----------|---------|:---:|:---:|
+| S5  | `s5_tachibana_mixed.sh`       | 立花証券 + Binance 混在 Replay | ✅ | ✅ PASS (7/7) |
+| S7  | `s7_mid_replay_pane.sh`       | Mid-replay ペイン CRUD | — | ✅ PASS (8/8) |
+| S11 | `s11_bar_step_discrete.sh`    | バーステップ離散化 | — | ✅ PASS (7/7) |
+| S12 | `s12_pre_start_history.sh`    | Start 以前の履歴バー表示 | — | ✅ PASS (7/7 + 1 PEND) |
+| S13 | `s13_step_backward_quality.sh`| StepBackward 品質保証 | — | ✅ PASS (17/17) |
+| S14 | `s14_autoplay_event_driven.sh`| Auto-play タイムアウト廃止 | ✅ | ✅ PASS (6/6) |
 
 ---
 
@@ -935,10 +935,37 @@ bash docs/plan/e2e_scripts/s14_autoplay_event_driven.sh
 
 ## 12. 未解決事項（TODO）
 
-| # | 内容 | 依存 |
-|---|------|------|
-| 1 | `GET /api/pane/chart-snapshot` 実装後に S12-TC-S12-04 を追加（バー本数 1〜300 の直接検証） | API 実装待ち（優先度: 高） |
-| 2 | S11-TC-S11-04（H1）は Binance H1 データが 24h 以内にある前提 | 実行タイミング依存 |
-| 3 | `api_post_code`（HTTP ステータスコードのみ返すヘルパー）を `common_helpers.sh` に追加 | S7-TC-S7-07 で必要 |
-| 4 | TC-S14-04 の「空 master → master 未解決」動作はモック実装依存。実際の挙動を要確認 | e2e-mock 実装確認 |
-| 5 | S14-TC-S14-03b の待機系 info トースト message キーワードはアプリの実際のメッセージに合わせて更新 | メッセージ文言確認 |
+| # | 内容 | 依存 | 状態 |
+|---|------|------|------|
+| 1 | `GET /api/pane/chart-snapshot` 実装後に S12-TC-S12-04 を追加（バー本数 1〜300 の直接検証） | API 実装待ち（優先度: 高） | PEND |
+| 2 | S11-TC-S11-04（H1）は Binance H1 データが 24h 以内にある前提 | 実行タイミング依存 | ✅ 実行時 PASS 確認済み |
+| 3 | `api_post_code`（HTTP ステータスコードのみ返すヘルパー）を `common_helpers.sh` に追加 | S7-TC-S7-07 で必要 | ✅ `common_helpers.sh` に追加済み |
+| 4 | TC-S14-04 の「空 master → master 未解決」動作はモック実装依存 | e2e-mock 実装確認 | ✅ PASS 確認済み（空リストでは stream 解決不可） |
+| 5 | S14-TC-S14-03b の待機系 info トースト message キーワード | メッセージ文言確認 | ✅ "login" を含む "deferred" トーストが発火することを確認 |
+
+---
+
+## 13. 実装メモ（2026-04-14）
+
+### 計画書との差分
+
+| 項目 | 計画書 | 実装 | 理由 |
+|------|--------|------|------|
+| `/api/pane/list` レスポンス | 配列として扱う | `{"panes":[...]}` 形式 | 実際の API レスポンス確認 |
+| `/api/notification/list` フィールド | `n.message` | `n.body` / `n.title` | 実際のフィールド名 |
+| `/api/auth/tachibana/status` | `has_session=true` | `session="present"` | 実際のレスポンス確認 |
+| `inject-master` 形式 | `[{code, name}]` 配列 | `{"records":[{sIssueCode, sCLMID, ...}]}` | Tachibana API フィールド名 |
+| TC-S5-07 期待 delta | `86400000ms` (D1) | `60000ms` (M1, 最小 TF) | M1+D1 混在は M1 が最小 TF |
+| S5 auto-play | fixture から auto-play | Live 起動 → manual toggle+play | DEV AUTO-LOGIN との競合回避 |
+| S14 auto-play | 起動後 inject でトリガー | keyring 事前保存 → 起動時セッション復元 | `try_restore_session()` パス確認 |
+| range end 後ステータス | "Finished" | "Paused" | 実際の挙動確認（S10 スクリプト参照） |
+
+### common_helpers.sh 追加ヘルパー
+
+- `api_get` / `api_post` / `api_post_code`: 全パス `/api/...` 形式のラッパー
+- `wait_status`: 任意ステータス値のポーリング待機
+- `wait_for_time_advance`: current_time の前進をポーリングで待機（BigInt 安全）
+- `wait_for_pane_count`: ペイン数をポーリングで待機
+- `wait_for_streams_ready`: 指定ペインの streams_ready をポーリング
+- `speed_to_10x`: 速度を 1x→10x に変更
+- `setup_single_pane`: 単一ペイン saved-state.json 生成

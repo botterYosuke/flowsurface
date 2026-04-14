@@ -6,6 +6,7 @@ set -e
 
 DATA_DIR="$APPDATA/flowsurface"
 API="http://127.0.0.1:9876/api"
+API_BASE="http://127.0.0.1:9876"
 PASS=0
 FAIL=0
 PEND=0
@@ -125,6 +126,113 @@ has_notification() {
     const hit=items.some(t=>(t.body||'').includes(process.argv[2])||(t.title||'').includes(process.argv[2]));
     console.log(hit);
   " "$n" "$needle"
+}
+
+# ── S5〜S14 向け追加ヘルパー ──────────────────────────────────────────────
+
+# API ラッパー（フルパス /api/... を受け取る）
+api_get()      { curl -s "$API_BASE$1"; }
+api_post()     {
+  if [ -n "${2:-}" ]; then
+    curl -s -X POST -H "Content-Type: application/json" -d "$2" "$API_BASE$1"
+  else
+    curl -s -X POST "$API_BASE$1"
+  fi
+}
+# HTTP ステータスコードのみ返す POST ラッパー
+api_post_code() {
+  curl -s -o /dev/null -w "%{http_code}" \
+    -X POST -H "Content-Type: application/json" \
+    -d "${2:-{}}" "$API_BASE$1"
+}
+
+# status が want になるまでポーリング（最大 timeout 秒）
+wait_status() {
+  local want=$1 timeout=${2:-10}
+  local end=$((SECONDS + timeout))
+  while [ $SECONDS -lt $end ]; do
+    local s
+    s=$(jqn "$(curl -s "$API/replay/status")" "d.status")
+    [ "$s" = "$want" ] && return 0
+    sleep 0.5
+  done
+  return 1
+}
+
+# current_time が ref より大きくなるまでポーリング。成功時は新しい値を stdout へ出力
+wait_for_time_advance() {
+  local ref=$1 timeout=${2:-30}
+  local end=$((SECONDS + timeout))
+  while [ $SECONDS -lt $end ]; do
+    local t
+    t=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
+    if [ -n "$t" ] && [ "$t" != "null" ] && \
+       node -e "process.exit(BigInt('$t') > BigInt('$ref') ? 0 : 1)" 2>/dev/null; then
+      echo "$t"; return 0
+    fi
+    sleep 0.5
+  done
+  return 1
+}
+
+# ペイン数が want になるまでポーリング（pane/list の .panes 配列長を確認）
+wait_for_pane_count() {
+  local want=$1 timeout=${2:-10}
+  local end=$((SECONDS + timeout))
+  while [ $SECONDS -lt $end ]; do
+    local c
+    c=$(node -e "console.log((JSON.parse(process.argv[1]).panes||[]).length);" \
+      "$(curl -s "$API/pane/list")")
+    [ "$c" = "$want" ] && return 0
+    sleep 0.5
+  done
+  return 1
+}
+
+# 指定ペインの streams_ready=true になるまでポーリング
+wait_for_streams_ready() {
+  local pane_id="$1" timeout=${2:-30}
+  local end=$((SECONDS + timeout))
+  while [ $SECONDS -lt $end ]; do
+    local panes ready
+    panes=$(curl -s "$API/pane/list")
+    ready=$(node -e "
+      const ps = (JSON.parse(process.argv[1]).panes || []);
+      const p = ps.find(x => x.id === '$pane_id');
+      console.log(p && p.streams_ready ? 'true' : 'false');
+    " "$panes")
+    [ "$ready" = "true" ] && return 0
+    sleep 1
+  done
+  return 1
+}
+
+# 速度を 1x→10x に上げる（speed は 1x→2x→5x→10x→1x のサイクル）
+speed_to_10x() {
+  curl -s -X POST "$API/replay/speed" > /dev/null
+  curl -s -X POST "$API/replay/speed" > /dev/null
+  curl -s -X POST "$API/replay/speed" > /dev/null
+}
+
+# 単一ペイン saved-state.json を書き込む
+# 引数: ticker timeframe start_utc end_utc
+setup_single_pane() {
+  local ticker=$1 timeframe=$2 start=$3 end=$4
+  local name="Test-${timeframe}"
+  cat > "$DATA_DIR/saved-state.json" <<HEREDOC
+{
+  "layout_manager":{"layouts":[{"name":"$name","dashboard":{"pane":{
+    "KlineChart":{
+      "layout":{"splits":[0.78],"autoscale":"FitToVisible"},"kind":"Candles",
+      "stream_type":[{"Kline":{"ticker":"$ticker","timeframe":"$timeframe"}}],
+      "settings":{"tick_multiply":null,"visual_config":null,"selected_basis":{"Time":"$timeframe"}},
+      "indicators":["Volume"],"link_group":"A"
+    }
+  },"popout":[]}}],"active_layout":"$name"},
+  "timezone":"UTC","trade_fetch_enabled":false,"size_in_quote_ccy":"Base",
+  "replay":{"mode":"replay","range_start":"$start","range_end":"$end"}
+}
+HEREDOC
 }
 
 # ステップサイズ定数
