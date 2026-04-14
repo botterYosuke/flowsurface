@@ -573,8 +573,7 @@ mod tests {
 
     #[test]
     fn to_status_replay_playing() {
-        let mut state = ReplayState::default();
-        state.mode = ReplayMode::Replay;
+        let mut state = ReplayState { mode: ReplayMode::Replay, ..Default::default() };
         let base = Instant::now();
         // step_size=500, step_delay=BASE_STEP_DELAY_MS(100ms) → 3 steps at +300ms → now_ms = 1500
         let mut clock = StepClock::new(0, 5_000, 500);
@@ -593,8 +592,7 @@ mod tests {
 
     #[test]
     fn to_status_replay_loading() {
-        let mut state = ReplayState::default();
-        state.mode = ReplayMode::Replay;
+        let mut state = ReplayState { mode: ReplayMode::Replay, ..Default::default() };
         let base = Instant::now();
         let mut clock = StepClock::new(0, 1_000, 60_000);
         clock.play(base);
@@ -607,8 +605,7 @@ mod tests {
 
     #[test]
     fn to_status_replay_paused() {
-        let mut state = ReplayState::default();
-        state.mode = ReplayMode::Replay;
+        let mut state = ReplayState { mode: ReplayMode::Replay, ..Default::default() };
         let clock = StepClock::new(0, 1_000, 60_000);
         // clock starts Paused by default
         state.clock = Some(clock);
@@ -619,7 +616,7 @@ mod tests {
 
     #[test]
     fn to_status_includes_range_input() {
-        let mut state = ReplayState {
+        let state = ReplayState {
             mode: ReplayMode::Replay,
             range_input: ReplayRangeInput {
                 start: "2026-04-10 09:00".to_string(),
@@ -647,8 +644,7 @@ mod tests {
 
     #[test]
     fn to_status_replay_serializes_all_fields() {
-        let mut state = ReplayState::default();
-        state.mode = ReplayMode::Replay;
+        let mut state = ReplayState { mode: ReplayMode::Replay, ..Default::default() };
         let base = Instant::now();
         // step_size=500, step_delay=100ms → 3 steps at +300ms → now_ms=1500
         let mut clock = StepClock::new(0, 5_000, 500);
@@ -672,9 +668,11 @@ mod tests {
 
     #[test]
     fn toggle_replay_to_live_clears_pending_auto_play() {
-        let mut state = ReplayState::default();
-        state.mode = ReplayMode::Replay;
-        state.pending_auto_play = true;
+        let mut state = ReplayState {
+            mode: ReplayMode::Replay,
+            pending_auto_play: true,
+            ..Default::default()
+        };
 
         state.toggle_mode(); // Replay → Live
 
@@ -683,16 +681,14 @@ mod tests {
 
     #[test]
     fn replay_play_message_clears_pending_auto_play() {
-        let mut state = ReplayState::default();
-        state.pending_auto_play = true;
+        let mut state = ReplayState { pending_auto_play: true, ..Default::default() };
         state.on_manual_play_requested();
         assert!(!state.pending_auto_play);
     }
 
     #[test]
     fn session_restore_failure_clears_pending_auto_play() {
-        let mut state = ReplayState::default();
-        state.pending_auto_play = true;
+        let mut state = ReplayState { pending_auto_play: true, ..Default::default() };
         state.on_session_unavailable();
         assert!(!state.pending_auto_play);
     }
@@ -764,8 +760,7 @@ mod tests {
 
     #[test]
     fn format_current_time_uses_clock_time_in_replay() {
-        let mut state = ReplayState::default();
-        state.mode = ReplayMode::Replay;
+        let mut state = ReplayState { mode: ReplayMode::Replay, ..Default::default() };
 
         // 2025-04-01 06:00:00 UTC = 1743487200000 ms
         let target_ms = 1_743_487_200_000u64;

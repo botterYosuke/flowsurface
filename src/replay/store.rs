@@ -33,10 +33,6 @@ impl<T> SortedVec<T> {
         self.data.len()
     }
 
-    #[cfg(test)]
-    pub fn is_empty(&self) -> bool {
-        self.data.is_empty()
-    }
 }
 
 impl SortedVec<Trade> {
@@ -130,10 +126,6 @@ impl EventStore {
         self.trades.get(stream).map_or(0, |sv| sv.len())
     }
 
-    #[cfg(test)]
-    pub fn kline_count(&self, stream: &StreamKind) -> usize {
-        self.klines.get(stream).map_or(0, |sv| sv.len())
-    }
 }
 
 #[cfg(test)]

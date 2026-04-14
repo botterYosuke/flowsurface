@@ -3124,7 +3124,7 @@ mod tests {
     fn parse_sjis_stream_records_two_records_with_sjis_in_first() {
         let mut data = Vec::new();
         data.extend_from_slice(&[b'A', 0x81, 0x7d, b'}']); // 1件目: Shift-JIS 0x81 0x7D を含む
-        data.extend_from_slice(&[b'B', b'}']); // 2件目: ASCII のみ
+        data.extend_from_slice(b"B}"); // 2件目: ASCII のみ
         let records = parse_sjis_stream_records(&data);
         assert_eq!(
             records.len(),
@@ -3133,7 +3133,7 @@ mod tests {
             records.len()
         );
         assert_eq!(records[0], &[b'A', 0x81, 0x7d, b'}']);
-        assert_eq!(records[1], &[b'B', b'}']);
+        assert_eq!(records[1], b"B}");
     }
 
     /// 末尾に `}` がない残余データもそのまま返す
