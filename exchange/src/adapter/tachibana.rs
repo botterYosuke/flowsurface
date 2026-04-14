@@ -593,14 +593,13 @@ fn date_str_to_epoch_ms(date: &str) -> Option<u64> {
 
 use crate::{Exchange, Ticker, TickerInfo};
 use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 /// 全マスタダウンロードの各レコードをパースするための汎用型。
 /// sCLMID でレコード種別を判定し、CLMIssueMstKabu のみ抽出する。
 #[derive(Debug, Deserialize, Clone)]
 pub struct MasterRecord {
-    #[serde(rename = "sCLMID")]
+    #[serde(rename = "sCLMID", default)]
     pub clm_id: String,
     #[serde(rename = "sIssueCode", default)]
     pub issue_code: String,
@@ -676,6 +675,39 @@ impl MasterDownloadRequest {
     }
 }
 
+/// Shift-JIS バイトストリームを `}` (0x7D) で JSON レコードに分割する。
+///
+/// Shift-JIS の2バイト文字はリードバイト (0x81-0x9F, 0xE0-0xEF) の直後に
+/// 0x7D が来ることがある。このトレイルバイトはレコード境界ではなく文字の一部なので
+/// 誤検知を防ぐためリードバイト追跡を行う。
+/// 各エントリには末尾の `}` を含む。末尾に `}` のない残余バイトもそのまま返す。
+#[cfg(test)]
+pub(crate) fn parse_sjis_stream_records(data: &[u8]) -> Vec<Vec<u8>> {
+    let mut records = Vec::new();
+    let mut buf: Vec<u8> = Vec::new();
+    let mut in_multibyte = false;
+
+    for &byte in data {
+        buf.push(byte);
+        if in_multibyte {
+            // Shift-JIS 2バイト文字のトレイルバイト: 次のバイトは通常の1バイトとして扱う
+            in_multibyte = false;
+        } else if matches!(byte, 0x81..=0x9F | 0xE0..=0xEF) {
+            // Shift-JIS リードバイト: 次のバイトはトレイルバイトとして扱う
+            in_multibyte = true;
+        } else if byte == b'}' {
+            records.push(buf.clone());
+            buf.clear();
+        }
+    }
+
+    if !buf.is_empty() {
+        records.push(buf);
+    }
+
+    records
+}
+
 /// MASTER I/F で全マスタを一括ダウンロードする。
 /// CLMEventDownloadComplete を受信するまでストリーミングで読み取り、
 /// CLMIssueMstKabu レコードのみを抽出して返す。
@@ -696,13 +728,44 @@ pub async fn fetch_all_master(
     let mut buf = Vec::new();
     let mut records = Vec::new();
     let mut seen_kabu = false;
+    let mut chunk_count = 0usize;
+    // Shift-JIS の2バイト文字でトレイルバイトが 0x7D になる場合があるため
+    // リードバイト後の次のバイトをトレイルバイトとして扱うフラグ
+    let mut in_multibyte = false;
 
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
+        let chunk = match chunk {
+            Ok(chunk) => chunk,
+            Err(e) => {
+                if !records.is_empty() {
+                    log::warn!(
+                        "Tachibana master stream interrupted at chunk #{chunk_count} ({} records so far): {e}. \
+                         Returning partial data.",
+                        records.len()
+                    );
+                    return Ok(records);
+                } else {
+                    log::error!(
+                        "Tachibana master stream failed at chunk #{chunk_count} (no records yet): {e}"
+                    );
+                    return Err(TachibanaError::Http(e));
+                }
+            }
+        };
+        chunk_count += 1;
         for &byte in chunk.iter() {
             buf.push(byte);
+            if in_multibyte {
+                // Shift-JIS トレイルバイト: レコード境界チェックをスキップ
+                in_multibyte = false;
+                continue;
+            } else if matches!(byte, 0x81..=0x9F | 0xE0..=0xEF) {
+                // Shift-JIS リードバイト: 次のバイトはトレイルバイト
+                in_multibyte = true;
+                continue;
+            }
             if byte == b'}' {
-                // `}` でレコード境界を判定（サンプルコード準拠）
+                // `}` でレコード境界を判定（Shift-JIS 2バイト文字を考慮済み）
                 let (decoded, _, had_errors) = encoding_rs::SHIFT_JIS.decode(&buf);
                 if had_errors {
                     log::warn!(
@@ -757,7 +820,7 @@ pub async fn fetch_all_master(
 
 // ── マスタキャッシュ ─────────────────────────────────────────────────────────
 
-static ISSUE_MASTER_CACHE: RwLock<Option<Arc<Vec<MasterRecord>>>> = RwLock::const_new(None);
+static ISSUE_MASTER_CACHE: RwLock<Option<Arc<Vec<MasterRecord>>>> = RwLock::new(None);
 
 /// ログイン成功時に呼び出し、銘柄マスタをキャッシュに格納する。
 pub async fn init_issue_master(
@@ -765,13 +828,15 @@ pub async fn init_issue_master(
     session: &TachibanaSession,
 ) -> Result<(), TachibanaError> {
     let records = fetch_all_master(client, session).await?;
-    *ISSUE_MASTER_CACHE.write().await = Some(Arc::new(records));
+    if let Ok(mut guard) = ISSUE_MASTER_CACHE.write() {
+        *guard = Some(Arc::new(records));
+    }
     Ok(())
 }
 
 /// キャッシュ済みの銘柄マスタを返す。未取得なら None。
 pub async fn get_cached_issue_master() -> Option<Arc<Vec<MasterRecord>>> {
-    ISSUE_MASTER_CACHE.read().await.clone()
+    ISSUE_MASTER_CACHE.read().ok()?.clone()
 }
 
 /// バックグラウンドで銘柄マスタをダウンロードしキャッシュに格納する。
@@ -787,12 +852,22 @@ pub fn spawn_init_issue_master(session: TachibanaSession) {
 }
 
 /// キャッシュから Ticker → TickerInfo の HashMap を構築する。
+///
+/// ペイン設定は display_symbol なしで `TachibanaSpot:7203` と保存されるが、
+/// `master_record_to_ticker_info` は英語名付き Ticker をキーとして生成する。
+/// Ticker の Hash/Eq は display_bytes を含むため、両方のキーで引けるよう
+/// display なしのエントリも追加で挿入する。
 pub async fn cached_ticker_metadata() -> HashMap<Ticker, Option<TickerInfo>> {
     let mut out = HashMap::new();
     let cache = get_cached_issue_master().await;
     if let Some(records) = cache {
         for record in records.iter() {
             if let Some((ticker, info)) = master_record_to_ticker_info(record) {
+                // display なしキーも同じ TickerInfo で登録しておく。
+                // ペイン設定は display_symbol なしで保存されるため、こちらで
+                // stream resolution の resolver(&ticker) が正しくヒットする。
+                let ticker_no_display = Ticker::new(&record.issue_code, Exchange::Tachibana);
+                out.entry(ticker_no_display).or_insert(Some(info));
                 out.insert(ticker, Some(info));
             }
         }
@@ -1018,7 +1093,9 @@ pub fn connect_event_stream(
             let event_url = match get_event_http_url() {
                 Some(url) => url,
                 None => {
-                    log::warn!("Tachibana EVENT I/F URL not available, waiting...");
+                    log::warn!(
+                        "[e2e-live] Tachibana EVENT I/F URL not available (no session), waiting 3s..."
+                    );
                     tokio::time::sleep(Duration::from_secs(3)).await;
                     continue;
                 }
@@ -1027,7 +1104,11 @@ pub fn connect_event_stream(
             let (issue_code, _) = ticker_info.ticker.to_full_symbol_and_type();
             let params = build_event_params(&issue_code, "00");
             let url = format!("{}?{}", event_url, params);
-            log::info!("Tachibana EVENT I/F connecting: issue={}", issue_code);
+            log::info!(
+                "[e2e-live] Tachibana EVENT I/F connecting: issue={} url_domain={}",
+                issue_code,
+                url.split('/').nth(2).unwrap_or("unknown")
+            );
 
             let client = reqwest::Client::new();
             match client.get(&url).send().await {
@@ -2994,5 +3075,74 @@ mod tests {
         };
         let session = TachibanaSession::try_from(response).expect("空 p_errno は成功すべき");
         assert_eq!(session.url_price, "https://p.test/");
+    }
+
+    // ── Cycle XX: Shift-JIS マスタストリーム解析 ─────────────────────────────
+
+    /// ASCII のみの2件レコードが `}` で正しく分割される基本ケース
+    #[test]
+    fn parse_sjis_stream_records_splits_ascii_records_at_brace() {
+        let data = b"abc}def}";
+        let records = parse_sjis_stream_records(data);
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0], b"abc}");
+        assert_eq!(records[1], b"def}");
+    }
+
+    /// Shift-JIS リードバイト (0x81-0x9F 範囲) の直後に来る 0x7D は
+    /// トレイルバイトであり、レコード境界として扱ってはならない。
+    #[test]
+    fn parse_sjis_stream_records_does_not_split_on_sjis_trail_byte_0x7d() {
+        // Shift-JIS 2バイト文字: リードバイト 0x81 + トレイルバイト 0x7D (= ASCII `}`)
+        // このトレイル 0x7D をレコード境界と誤認するバグを再現するテスト。
+        let data: &[u8] = &[b'{', b'"', b'x', b'"', b':', b'"', 0x81, 0x7d, b'"', b'}'];
+        let records = parse_sjis_stream_records(data);
+        assert_eq!(
+            records.len(),
+            1,
+            "Shift-JIS トレイルバイト 0x7D をレコード境界としてはならない; {} 件に分割された",
+            records.len()
+        );
+        assert_eq!(records[0], data);
+    }
+
+    /// リードバイト 0xE0-0xEF 範囲でも同様にトレイル 0x7D を境界扱いしない
+    #[test]
+    fn parse_sjis_stream_records_handles_e0_range_lead_byte() {
+        let data: &[u8] = &[0xE0, 0x7d, b'}'];
+        let records = parse_sjis_stream_records(data);
+        assert_eq!(
+            records.len(),
+            1,
+            "0xE0 リードバイト後の 0x7D も境界外; {} 件に分割された",
+            records.len()
+        );
+    }
+
+    /// Shift-JIS 文字を含む1件目と ASCII のみの2件目が正しく分割される
+    #[test]
+    fn parse_sjis_stream_records_two_records_with_sjis_in_first() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&[b'A', 0x81, 0x7d, b'}']); // 1件目: Shift-JIS 0x81 0x7D を含む
+        data.extend_from_slice(&[b'B', b'}']); // 2件目: ASCII のみ
+        let records = parse_sjis_stream_records(&data);
+        assert_eq!(
+            records.len(),
+            2,
+            "正確に2件に分割されるべき; {} 件",
+            records.len()
+        );
+        assert_eq!(records[0], &[b'A', 0x81, 0x7d, b'}']);
+        assert_eq!(records[1], &[b'B', b'}']);
+    }
+
+    /// 末尾に `}` がない残余データもそのまま返す
+    #[test]
+    fn parse_sjis_stream_records_returns_trailing_incomplete_data() {
+        let data = b"abc}incomplete";
+        let records = parse_sjis_stream_records(data);
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0], b"abc}");
+        assert_eq!(records[1], b"incomplete");
     }
 }

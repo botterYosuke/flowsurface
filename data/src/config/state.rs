@@ -248,6 +248,33 @@ mod tests {
     }
 
     #[test]
+    fn state_with_invalid_timezone_falls_back_to_default() {
+        // IANA タイムゾーン名等の未対応値が入っても State 全体の deserialize は成功し、
+        // timezone は default (Utc) にフォールバックする。
+        let json = r#"{"timezone":"Asia/Tokyo"}"#;
+        let state: State = serde_json::from_str(json).unwrap();
+        assert_eq!(state.timezone, UserTimezone::default());
+    }
+
+    #[test]
+    fn state_with_invalid_timezone_preserves_other_fields() {
+        // timezone が壊れていても、replay など他フィールドが巻き添えでロストしない。
+        let json = r#"{
+            "timezone":"Asia/Tokyo",
+            "replay":{
+                "mode":"replay",
+                "range_start":"2026-04-10 09:00",
+                "range_end":"2026-04-10 15:00"
+            }
+        }"#;
+        let state: State = serde_json::from_str(json).unwrap();
+        assert_eq!(state.timezone, UserTimezone::default());
+        assert_eq!(state.replay.mode, "replay");
+        assert_eq!(state.replay.range_start, "2026-04-10 09:00");
+        assert_eq!(state.replay.range_end, "2026-04-10 15:00");
+    }
+
+    #[test]
     fn state_replay_live_with_ranges_preserved() {
         // Live モードでも range が保存されているケース（ユーザーが入力後にモードを戻した場合等）
         let json = r#"{"replay":{"mode":"live","range_start":"2026-04-10 09:00","range_end":"2026-04-10 15:00"}}"#;

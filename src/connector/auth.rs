@@ -80,6 +80,7 @@ pub async fn try_restore_session() -> Option<TachibanaSession> {
             return None;
         }
     };
+
     let client = reqwest::Client::new();
     match exchange::adapter::tachibana::validate_session(&client, &session).await {
         Ok(()) => {
@@ -92,6 +93,16 @@ pub async fn try_restore_session() -> Option<TachibanaSession> {
             None
         }
     }
+}
+
+/// E2E テスト用（Phase T3）: メモリセッションと keyring セッションを両方クリアする。
+/// テスト間のクリーンアップや「セッション未存在」状態の確認に使用。
+/// debug ビルドで有効（release ビルドには含まれない）。
+#[cfg(debug_assertions)]
+pub fn delete_all_sessions() {
+    clear_session();
+    data::config::tachibana::delete_session();
+    log::info!("Tachibana: all sessions cleared (memory + keyring)");
 }
 
 /// TachibanaError をユーザー向けメッセージに変換する。

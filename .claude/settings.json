@@ -1,4 +1,34 @@
 {
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cargo fmt 2>/dev/null || true",
+            "if": "Edit(*.rs)|Write(*.rs)",
+            "statusMessage": "Formatting Rust...",
+            "async": true
+          },
+          {
+            "type": "command",
+            "command": "cargo check 2>/dev/null || true",
+            "if": "Edit(*.rs)|Write(*.rs)|Edit(*Cargo.toml)|Write(*Cargo.toml)",
+            "statusMessage": "Checking compilation...",
+            "async": true
+          },
+          {
+            "type": "command",
+            "command": "cargo clippy --workspace -- -D warnings 2>/dev/null || true",
+            "if": "Edit(*.rs)|Write(*.rs)",
+            "statusMessage": "Running clippy...",
+            "async": true
+          }
+        ]
+      }
+    ]
+  },
   "permissions": {
     "allow": [
       "Bash(tasklist)",
@@ -64,12 +94,57 @@
       "Bash(tee /tmp/replay_dbg6.log)",
       "Bash(tee /tmp/replay_dbg7.log)",
       "Bash(node -e ':*)",
-      "Bash(bash C:/tmp/e2e-full-test.sh)"
+      "Bash(bash C:/tmp/e2e-full-test.sh)",
+      "Bash(node -e \"const now=new Date\\(\\); const end=new Date\\(now.getTime\\(\\)-6*3600*1000\\); const start=new Date\\(end.getTime\\(\\)-3*3600*1000\\); const fmt=\\(d\\)=>d.toISOString\\(\\).slice\\(0,16\\).replace\\('T',' '\\); console.log\\('START='+fmt\\(start\\)\\); console.log\\('END='+fmt\\(end\\)\\);\")",
+      "Bash(grep -n \"fn set_basis\\\\|pub fn set_basis\" src/chart.rs src/chart/*.rs)",
+      "Bash(bash C:/tmp/e2e-unified-step.sh)",
+      "Bash(ls README*)",
+      "Bash(grep -n \"refactor_tachibana_replay\\\\|pane_crud_api\" /c/Users/sasai/Documents/flowsurface/docs/plan/*.md)",
+      "Bash(find \"C:\\\\Users\\\\sasai\\\\Documents\\\\flowsurface\\\\src\" -name \"*.rs\" -exec grep -l \"ReplayConfig\" {} \\\\;)",
+      "Bash(wc -l docs/tachibana_spec.md docs/plan/archive/*.md)",
+      "Bash(ls C:/tmp/e2e-*.sh)",
+      "Bash(bash C:/tmp/e2e-tachibana-t2.sh)",
+      "Bash(\"C:/Users/sasai/Documents/flowsurface/target/release/flowsurface.exe\")",
+      "Bash(bash C:/tmp/e2e-tachibana-d1.sh)",
+      "Bash(node -e \"console.log\\(Date.now\\(\\)\\)\")",
+      "Bash(node -e \"console.log\\(new Date\\('2026-04-13T06:00:00Z'\\).getTime\\(\\)\\)\")",
+      "Bash(node -e \"console.log\\(new Date\\('2026-04-13T09:00:00Z'\\).getTime\\(\\)\\)\")",
+      "Bash(node -e \"console.log\\(new Date\\(\\).toISOString\\(\\)\\)\")",
+      "Edit(/.claude/skills/e2e-test/**)",
+      "Bash(bash C:/tmp/e2e-tachibana-live-mode.sh)",
+      "Bash(bash /c/tmp/e2e-tachibana-live-mode.sh)",
+      "Edit(/.claude/skills/tdd/**)",
+      "Bash(node -e \" const fs = require\\('fs'\\); const d = JSON.parse\\(fs.readFileSync\\('C:/Users/sasai/AppData/Roaming/flowsurface/saved-state.json', 'utf8'\\)\\); const pane = d.layout_manager?.layouts?.[0]?.dashboard?.pane; console.log\\(JSON.stringify\\(pane, null, 2\\)\\); \")",
+      "Bash(bash C:/tmp/e2e_phase4.sh)",
+      "Bash(node -e \"const d=JSON.parse\\(require\\('fs'\\).readFileSync\\('/dev/stdin','utf8'\\)\\); console.log\\('mode:', d.replay?.mode, 'start:', d.replay?.range_start\\);\")",
+      "Bash(node -e \"const d=JSON.parse\\(require\\('fs'\\).readFileSync\\('C:/tmp/e2e_fixture_ab.json','utf8'\\)\\); console.log\\('mode:', d.replay?.mode, 'start:', d.replay?.range_start\\);\")",
+      "Bash(node -e \"const d=JSON.parse\\(require\\('fs'\\).readFileSync\\('C:/Users/sasai/AppData/Roaming/flowsurface/saved-state.json','utf8'\\)\\); console.log\\('mode:', d.replay?.mode, 'start:', d.replay?.range_start, 'stream:', d.layout_manager?.layouts?.[0]?.dashboard?.pane?.KlineChart?.stream_type?.[0]?.Kline?.ticker\\);\")",
+      "Bash(node -e \"const d=JSON.parse\\(require\\('fs'\\).readFileSync\\('C:/Users/sasai/AppData/Roaming/flowsurface/saved-state.json.phase4.bak','utf8'\\)\\); console.log\\(JSON.stringify\\({replay:d.replay, stream: d.layout_manager?.layouts?.[0]?.dashboard?.pane?.KlineChart?.stream_type}, null, 2\\)\\);\")",
+      "Bash(cp \"C:/Users/sasai/AppData/Roaming/flowsurface/saved-state.json.phase4.bak\" \"C:/Users/sasai/AppData/Roaming/flowsurface/saved-state.json\")",
+      "Bash(node -e \"const d=JSON.parse\\(require\\('fs'\\).readFileSync\\('C:/Users/sasai/AppData/Roaming/flowsurface/saved-state.json','utf8'\\)\\); console.log\\('mode:', d.replay?.mode, 'range_start:', d.replay?.range_start\\);\")",
+      "Bash(node -e \"const d=JSON.parse\\(require\\('fs'\\).readFileSync\\('C:/Users/sasai/AppData/Roaming/flowsurface/saved-state.json','utf8'\\)\\); console.log\\('mode:', d.replay?.mode, 'range_start:', d.replay?.range_start, 'stream ticker:', d.layout_manager?.layouts?.[0]?.dashboard?.pane?.KlineChart?.stream_type?.[0]?.Kline?.ticker\\);\")",
+      "Bash(node -e \"const d=JSON.parse\\(require\\('fs'\\).readFileSync\\('C:/Users/sasai/AppData/Roaming/flowsurface/saved-state_old.json','utf8'\\)\\); console.log\\('mode:', d.replay?.mode, 'range_start:', d.replay?.range_start, 'stream:', JSON.stringify\\(d.layout_manager?.layouts?.[0]?.dashboard?.pane?.KlineChart?.stream_type?.[0]\\)\\);\")",
+      "Bash(node -e \"const d=JSON.parse\\(require\\('fs'\\).readFileSync\\('C:/Users/sasai/AppData/Roaming/flowsurface/saved-state.json.phase4.bak','utf8'\\)\\); console.log\\('timezone:', d.timezone\\);\")",
+      "Bash(bash C:/tmp/e2e_phase4_fix.sh)",
+      "Bash(node -e \"const d=JSON.parse\\(require\\('fs'\\).readFileSync\\('C:/Users/sasai/AppData/Roaming/flowsurface/saved-state.json','utf8'\\)\\); console.log\\('mode:', d.replay?.mode, 'timezone:', d.timezone, 'stream:', d.layout_manager?.layouts?.[0]?.dashboard?.pane?.KlineChart?.stream_type?.[0]?.Kline?.ticker\\);\")",
+      "Bash(bash C:/tmp/e2e_tac_tokyo.sh)",
+      "Bash(tasklist //fi \"imagename eq flowsurface.exe\")",
+      "Bash(find /c/Users/sasai/Documents/flowsurface -name \"*.rs\" -type f -exec grep -l \"pub enum StreamKind\\\\|pub struct StreamKind\" {} \\\\;)",
+      "Bash(echo \"Started PID: $!\" sleep 15)",
+      "Bash(echo \"PID=$!\")",
+      "Bash(start target/release/flowsurface.exe)",
+      "Bash(node -e \"process.stdin.resume\\(\\);process.stdin.setEncoding\\('utf8'\\);let d='';process.stdin.on\\('data',c=>d+=c\\);process.stdin.on\\('end',\\(\\)=>console.log\\(JSON.stringify\\(JSON.parse\\(d\\),null,2\\)\\)\\)\")",
+      "Skill(tdd)",
+      "Skill(tdd:*)",
+      "Bash(cargo run:*)"
     ],
     "additionalDirectories": [
       "C:\\Users\\sasai\\Documents\\marimo\\.claude\\plans",
       "\\tmp",
-      "c:\\Users\\sasai\\Documents\\flowsurface\\.claude\\skills"
+      "c:\\Users\\sasai\\Documents\\flowsurface\\.claude\\skills",
+      "c:\\Users\\sasai\\Documents\\flowsurface\\docs\\plan",
+      "C:\\tmp",
+      "C:\\Users\\sasai\\AppData\\Roaming\\flowsurface"
     ]
   }
 }

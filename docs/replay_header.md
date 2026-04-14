@@ -1,742 +1,936 @@
-# リプレイヘッダー機能 — 実装プラン
+# リプレイ機能 仕様書
 
-**作成日**: 2026-04-10
-**最終更新**: 2026-04-12
-**対象**: メインウィンドウにヘッダーバーを追加し、ライブ/リプレイモードの切替と再生制御を実現する
-**状態**: Phase 1-5 全て完了 ✅
+**最終更新**: 2026-04-14
+**対象バージョン**: `sasa/step` ブランチ (Phase 1〜8 + Tachibana Phase 1〜3 + R3 アーキテクチャ刷新 + Fixture 直接起動 + Auto-play タイムアウト廃止 完了)
+**関連ドキュメント**:
+- [docs/plan/replay_redesign.md](plan/replay_redesign.md) — R1〜R3 リファクタ計画と実装ログ
+- [docs/plan/replay_bar_step_loop.md](plan/replay_bar_step_loop.md) — StepClock / EventStore / dispatch_tick 設計
+- [docs/plan/replay_fixture_direct_boot.md](plan/replay_fixture_direct_boot.md) — Fixture 直接起動 (auto-play) 設計
+- [docs/plan/replay_auto_play_no_timeout.md](plan/replay_auto_play_no_timeout.md) — Auto-play タイムアウト廃止（イベント駆動化）
+- [docs/plan/archive/tachibana_replay.md](plan/archive/tachibana_replay.md) — 立花証券 D1 対応の実装経緯（完了、アーカイブ）
+- [docs/plan/archive/replay_unified_step.md](plan/archive/replay_unified_step.md) — 統一 Tick ハンドラ設計メモ（完了、アーカイブ）
+- [docs/tachibana_spec.md §8](tachibana_spec.md#8-リプレイ対応の設計判断) — 立花証券リプレイ設計の「なぜ」
+
+本書は flowsurface のリプレイ機能を、実装・API 利用・運用に十分な粒度で説明するリファレンス仕様書である。実装履歴は本文では触れず、必要に応じて §15 の付録を参照する。
 
 ---
 
-## 0. この改修の立ち位置
+## 目次
 
-本プランは、アプリコンセプト（`README.JP.md`）が掲げるゲームループ:
-
-> **観察 → 仮説 → エントリー → 結果 → 改善**
-
-のうち、**Step 1「観察」を支えるリプレイインフラ**のみをスコープとする。
-
-| ゲームループ | 本プランの対応 | 備考 |
-|---|---|---|
-| 1. 市場を観察する（リプレイ） | **対象** | 過去データ再生・時間制御 |
-| 2. 仮説を立てる | スコープ外 | |
-| 3. エントリーする（仮想売買） | スコープ外 | 別タスクで仮想売買パネルを実装 |
-| 4. 結果を見る（PnL・フィードバック） | スコープ外 | 同上 |
-| 5. 改善する（トレードログ・スコアリング） | スコープ外 | 同上 |
-
-「次の足が見えない」モード、ワンクリック売買、スコアリングといったゲーム体験層は、本インフラの上に後続タスクとして積む想定。本プランはそれらの土台となるデータ再生基盤を確立することに集中する。
+1. [概要](#1-概要)
+2. [用語](#2-用語)
+3. [UI 仕様](#3-ui-仕様)
+4. [状態モデル](#4-状態モデル)
+5. [メッセージとイベント](#5-メッセージとイベント)
+6. [データフロー](#6-データフロー)
+7. [再生エンジン](#7-再生エンジン)
+8. [mid-replay ペイン操作](#8-mid-replay-ペイン操作)
+9. [WebSocket 制御](#9-websocket-制御)
+10. [取引所別対応状況](#10-取引所別対応状況)
+11. [HTTP 制御 API](#11-http-制御-api)
+12. [定数と設計不変条件](#12-定数と設計不変条件)
+13. [スコープ外・既知の制限](#13-スコープ外既知の制限)
+14. [実装ファイルマップ](#14-実装ファイルマップ)
+15. [付録: 実装履歴と設計判断](#15-付録-実装履歴と設計判断)
 
 ---
 
 ## 1. 概要
 
-メインウィンドウ上部にヘッダーバーを新設し、以下の要素を配置する:
+flowsurface のリプレイ機能は、取引所 API から取得した過去の Kline / Trades データを時系列順に再生し、ライブチャートと同等のビュー更新を行うインフラである。ユーザーは以下のゲームループの **Step 1「観察」** を、過去の任意区間で繰り返し体験できる:
 
-```
-┌──────────────────────────────────────────────────────────────────────────────────┐
-│ 🕐 2026-04-10 14:32:05  │ [LIVE / REPLAY] │ 2026-04-01 09:00 ~ 2026-04-01 15:00 │ ⏮ ▶⏸ ⏭ 1x │
-│     現在時刻              トグルボタン        開始日時 ～ 終了日時                    再生制御      │
-└──────────────────────────────────────────────────────────────────────────────────┘
-```
+> 観察 → 仮説 → エントリー → 結果 → 改善
 
-| 要素 | ライブモード | リプレイモード |
-|------|:----------:|:----------:|
-| 現在時刻 | リアルタイム表示 | 再生中の仮想時刻を表示 |
-| トグルボタン | **LIVE** がアクティブ | **REPLAY** がアクティブ |
-| 開始日時 ～ 終了日時 | 無効（グレーアウト） | 有効（入力可能） |
-| 再生制御ボタン | 無効（グレーアウト） | 有効 |
+仮想売買・PnL・スコアリングといった後続ステップは本機能のスコープ外で、本機能はそれらの土台となる「決定論的なデータ再生基盤」を提供する。
 
----
+### 1.1 主な機能
 
-## 2. 現状のアーキテクチャ（関連箇所）
+| 機能 | 内容 |
+|---|---|
+| モード切替 | LIVE / REPLAY をヘッダーバー or F5 or HTTP API でトグル |
+| 範囲指定 | `YYYY-MM-DD HH:MM` 形式で開始・終了（UTC 解釈）|
+| 再生制御 | Play / Pause / Resume / StepForward / StepBackward / CycleSpeed |
+| 再生速度 | 1x / 2x / 5x / 10x の循環切替 |
+| EventStore ベース再生 | kline・trades を `EventStore` に一括ロードし、バーステップ単位で dispatch |
+| mid-replay ペイン操作 | リプレイ中のペイン追加・削除・timeframe / ticker 変更 |
+| HTTP 制御 API | `127.0.0.1:9876` でリプレイ・ペイン操作を外部から駆動 |
+| E2E テスト支援 | `POST /api/app/save` で状態をディスク保存 |
+| **起動時自動再生** | `saved-state.json` に replay 構成が含まれる場合、全ペイン Ready になった瞬間に自動 Play |
 
-### 2.1 メインビュー構造 (`src/main.rs`)
+### 1.2 非ゴール
 
-```rust
-let base = column![
-    header_title,                           // macOS のみ "FLOWSURFACE" テキスト
-    replay_header,                          // リプレイヘッダーバー
-    match sidebar_pos {                     // サイドバー + ダッシュボード
-        sidebar::Position::Left  => row![sidebar_view, dashboard_view,],
-        sidebar::Position::Right => row![dashboard_view, sidebar_view],
-    }
-    .spacing(4)
-    .padding(8),
-];
-```
-
-### 2.2 リアルタイムデータフロー
-
-```
-WebSocket → exchange::Event → main.rs::update()
-  ├── Event::TradesReceived  → dashboard.ingest_trades()
-  ├── Event::KlineReceived   → dashboard.update_latest_klines()
-  └── Event::DepthReceived   → dashboard.ingest_depth()
-```
-
-### 2.3 フレームティック
-
-```
-iced::window::frames() → Message::Tick(Instant) → dashboard.tick()
-```
-
-毎フレーム呼ばれるため、リプレイ時の仮想時刻の進行やデータ注入のフックとして利用可能。
-
-### 2.4 既存の過去データ取得 API
-
-| API | シグネチャ | 対応取引所 |
-|-----|----------|----------|
-| `fetch_klines()` | `async (TickerInfo, Timeframe, Option<(u64,u64)>) → Result<Vec<Kline>, AdapterError>` | Binance, Bybit, Hyperliquid, OKX, MEXC |
-| `fetch_trades_batched()` | `(TickerInfo, from_time, to_time, data_path) → impl Straw<(), Vec<Trade>, AdapterError>` | Binance のみ |
-| `fetch_open_interest()` | `async (TickerInfo, Timeframe, Option<(u64,u64)>) → Result<Vec<OpenInterest>, AdapterError>` | Binance, Bybit, OKX (Linear/Inverse のみ) |
-
-→ これらの API でリプレイ用の過去データを取得可能。
-
-> **制約**: `fetch_klines()` はページング対応済みのため範囲制限なし。リプレイ開始前450本分のヒストリカルデータもプリフェッチする。
-> `fetch_trades_batched()` は `Straw` ストリームを返し、`Vec<Trade>` をバッチごとに yield する（一括ではない）。
-> Tachibana は `fetch_klines()` 非対応（`fetch_daily_history()` で日足のみ取得可能）。
-
-### 2.5 時刻体系
-
-- アプリ全体で **Unix ミリ秒 (`u64`)** を使用
-- `Trade.time`, `Kline.time` はすべて Unix ms
-- 表示変換: `data::UserTimezone` でタイムゾーン変換（UIレイヤーのみ）
+- 板情報（Depth）の再生 — 取引所 API が過去スナップショットを提供しない
+- Comparison ペインのリプレイ — 複数銘柄同期は将来課題
+- リプレイ中の Layout 切替 — `active_dashboard()` が変わる動作は未定義
+- インジケータ再計算 / 仮想売買 — 別タスク
 
 ---
 
-## 3. 設計
+## 2. 用語
 
-### 3.1 状態管理: `ReplayState`
+| 用語 | 定義 |
+|---|---|
+| **Live モード** | WebSocket から直接ストリーム受信する通常状態 |
+| **Replay モード** | 過去データを仮想時刻で再生する状態 |
+| **仮想時刻 (`current_time`)** | Replay 中に進行する Unix ms タイムスタンプ（バー境界値） |
+| **プリフェッチ** | Play 押下後、再生開始までに行う過去データの一括取得 |
+| **バックフィル** | mid-replay でペインを追加した際の遅延フェッチ |
+| **Tick** | `iced::window::frames()` が発火するフレームイベント (~60fps) |
+| **StepClock** | 離散バーステップクロック。`now_ms` は常にバー境界値。`tick(wall_now)` で 1 ステップ進める |
+| **ClockStatus** | クロックの状態。`Playing` / `Paused` / `Waiting`（データ待ち）の 3 状態 |
+| **EventStore** | stream ごとに kline + trades を保持するストア。`is_loaded` / `klines_in` / `trades_in` で問い合わせる |
+| **dispatch_tick** | 仮想時刻スライスを EventStore から抽出するステートレスな関数 |
+| **DispatchResult** | `dispatch_tick` の戻り値。`kline_events` / `trade_events` / `reached_end` を含む |
+| **Waiting 状態** | データ未ロードのためクロックが自動停止している状態 |
+| **pending_auto_play** | 起動時 fixture 復元後、全ペイン Ready になった瞬間に Play を自動発火するための transient フラグ |
+
+時刻はすべて **Unix ミリ秒 (`u64`)** を基準とし、表示時のみ `data::UserTimezone` で変換する。
+
+---
+
+## 3. UI 仕様
+
+### 3.1 ヘッダーバー
+
+メインウィンドウ最上部（macOS では `FLOWSURFACE` テキスト直下）に配置。
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│ 🕐 2026-04-10 14:32:05  [LIVE/REPLAY]  [開始 ~ 終了]  ⏮ ▶⏸ ⏭ 1x  Loading... │
+│   現在時刻              モードトグル     範囲入力      再生制御     ローディング │
+└─────────────────────────────────────────────────────────────────────────────────┘
+```
+
+| 要素 | Live | Replay |
+|---|:-:|:-:|
+| 現在時刻 | リアルタイム (UTC or user TZ) | 仮想時刻 `current_time` |
+| モードトグル | `LIVE` アクティブ | `REPLAY` アクティブ |
+| 開始・終了日時 | read-only | 編集可 |
+| ⏮ / ⏭ (Step) | 無効 | `clock.is_some()` && `!Waiting` で有効 |
+| ▶⏸ (Play/Pause/Resume) | 無効 | 状態依存で Play/Pause/Resume |
+| 速度ボタン | 無効 | 有効、`1x → 2x → 5x → 10x → 1x` 循環 |
+| `Loading...` | 非表示 | `is_loading()` == true で表示 |
+
+日時テキストは `iced::text_input` で `on_input` を渡さないことで read-only を実現する。
+
+### 3.2 入力フォーマット
+
+```
+YYYY-MM-DD HH:MM    (UTC として解釈)
+```
+
+不正な場合は `ParseRangeError::{InvalidStartFormat, InvalidEndFormat, StartAfterEnd}` を返し、Toast 通知で中断する（[src/replay/mod.rs](../src/replay/mod.rs) `parse_replay_range`）。
+
+### 3.3 キーバインド
+
+| キー | 動作 |
+|---|---|
+| `F5` | `ReplayMessage::ToggleMode` をディスパッチ |
+| `Escape` | `Message::GoBack`（リプレイとは独立、レイヤー閉じ）|
+
+キーバインドは `subscription()` 内の `keyboard::listen().filter_map()` で処理する。
+
+### 3.4 リプレイ中の UI 制約
+
+- ペインの **位置移動 (drag / resize)** は無効化
+- ペインの **追加 / 削除 / timeframe 変更 / ticker 変更** は許容（§8 参照）
+- `Heatmap` / `ShaderHeatmap` / `Ladder` ペインには `"Replay: Depth unavailable"` オーバーレイを表示
+
+---
+
+## 4. 状態モデル
+
+### 4.1 ReplayState ([src/replay/mod.rs](../src/replay/mod.rs))
 
 ```rust
-/// リプレイモードの状態を管理する。
-/// Flowsurface 構造体に `replay: ReplayState` として追加。
 pub struct ReplayState {
-    /// ライブ / リプレイの切替
     pub mode: ReplayMode,
-    /// リプレイ範囲の設定（UI入力）
     pub range_input: ReplayRangeInput,
-    /// リプレイ実行中の状態（再生開始後に Some になる）
-    pub playback: Option<PlaybackState>,
-    /// 前回の Tick 時刻（フレーム間経過時間を計算するため）
-    pub last_tick: Option<std::time::Instant>,
+    /// バーステップクロック。Play 開始後 Some になる。
+    pub clock: Option<StepClock>,
+    pub event_store: EventStore,
+    pub active_streams: HashSet<StreamKind>,
+    /// 起動時 fixture 復元の結果として次の「全ペイン Ready」で Play を自動発火する。
+    /// 一度発火したら false に戻す。永続化しない。
+    pub pending_auto_play: bool,
 }
 
-pub enum ReplayMode {
-    Live,
-    Replay,
-}
+pub enum ReplayMode { Live, Replay }
 
 pub struct ReplayRangeInput {
-    pub start: String,   // "2026-04-01 09:00" 形式のテキスト入力
-    pub end: String,     // "2026-04-01 15:00" 形式のテキスト入力
+    pub start: String,
+    pub end: String,
+}
+```
+
+- `clock` は `Play` 押下で `Some` になり、`Live` 復帰で `None` に戻る
+- `event_store` は stream ごとにロード済みの kline / trades を保持する（play 開始時に初期化）
+- `active_streams` は再生中の全 `StreamKind` の集合
+- `toggle_mode()` で Replay → Live に戻す際は `clock = None`, `event_store = EventStore::new()`, `active_streams = HashSet::new()`, `range_input = default`, `pending_auto_play = false` にリセット
+- `pending_auto_play` は **永続化しない**（再起動のたびに起動時ロジックで再評価する）
+
+### 4.2 StepClock ([src/replay/clock.rs](../src/replay/clock.rs))
+
+```rust
+pub struct StepClock {
+    now_ms: u64,                    // 現在の仮想時刻（常にバー境界値）
+    next_step_at: Option<Instant>,  // 次のステップを発火する wall 時刻
+    step_size_ms: u64,              // 1 ステップで進む仮想時刻幅（min active timeframe ms）
+    base_step_delay_ms: u64,        // 1x speed での wall delay (= BASE_STEP_DELAY_MS = 1000ms)
+    speed: f32,                     // 1.0 | 2.0 | 5.0 | 10.0
+    status: ClockStatus,
+    range: Range<u64>,              // リプレイ範囲 (start_ms, end_ms)
 }
 
-pub struct PlaybackState {
-    /// リプレイ範囲（パース済み、Unix ms）
-    pub start_time: u64,
-    pub end_time: u64,
-    /// 現在の仮想時刻（Unix ms）
-    pub current_time: u64,
-    /// 再生状態
-    pub status: PlaybackStatus,
-    /// 再生速度倍率（1x, 2x, 5x, 10x, ...）
-    pub speed: f64,
-    /// プリフェッチ済み Trades バッファ（ストリームごと）
-    /// ※ Kline は KlineChart 内の ReplayKlineBuffer に格納し、Tick で段階挿入
-    pub trade_buffers: HashMap<StreamKind, TradeBuffer>,
-    /// DataLoaded 後に復帰するステータス（StepBackward 時は Paused にする）
-    pub resume_status: PlaybackStatus,
+pub enum ClockStatus {
+    Paused,    // 停止中
+    Playing,   // 再生中
+    Waiting,   // EventStore がデータロード中
+}
+```
+
+**StepClock の動作**（連続時刻クロックではなく **離散バーステップ** モデル）:
+
+- `new(start_ms, end_ms, step_size_ms)`: 初期状態は `Paused`、`now_ms = start_ms`
+- `play(wall_now)`: `Playing` に遷移し、`next_step_at = wall_now + step_delay_ms()` を設定
+- `pause()`: `Paused` に遷移、`next_step_at = None`
+- `set_waiting()`: `Waiting` に遷移（データロード待ち）
+- `resume_from_waiting(wall_now)`: `Waiting → Playing` に復帰
+- `seek(target_ms)`: `now_ms` を指定値（step_size 境界にスナップ）に設定し `Paused` で停止
+- `tick(wall_now) -> Range<u64>`: `wall_now >= next_step_at` のとき `now_ms` を 1 ステップ進め、emit 範囲 `[prev_ms, new_ms)` を返す。まだ発火タイミングでなければ空 Range を返す
+- `step_delay_ms()`: `base_step_delay_ms / speed` (ms)。例: 2x なら 500ms/bar
+
+**現在時刻の参照**: `clock.now_ms()` は常にバー境界値を返す（連続補間なし）。
+
+### 4.3 EventStore ([src/replay/store.rs](../src/replay/store.rs))
+
+```rust
+pub struct EventStore {
+    // stream ごとに SortedVec<Trade> + SortedVec<Kline> を保持（内部実装）
 }
 
-pub enum PlaybackStatus {
-    /// データプリフェッチ中
-    Loading,
-    Playing,
-    Paused,
+impl EventStore {
+    pub fn new() -> Self;
+    pub fn ingest_loaded(&mut self, stream: StreamKind, range: Range<u64>, data: LoadedData);
+    pub fn is_loaded(&self, stream: &StreamKind, range: Range<u64>) -> bool;
+    pub fn trades_in(&self, stream: &StreamKind, range: Range<u64>) -> &[Trade];
+    pub fn klines_in(&self, stream: &StreamKind, range: Range<u64>) -> &[Kline];
 }
 
-pub struct TradeBuffer {
+pub struct LoadedData {
+    pub klines: Vec<Kline>,
     pub trades: Vec<Trade>,
-    /// 次に注入するインデックス
-    pub cursor: usize,
 }
 ```
 
-### 3.2 メッセージ
+- `klines_in` / `trades_in` は **半開区間** `[start, end)` を返す（`time >= start && time < end`）
+- `is_loaded` は指定 stream + range に対してデータが `ingest_loaded` 済みかを返す
+- ロード前に `klines_in` を呼んでも空スライスが返るだけでパニックしない
+
+### 4.4 DispatchResult ([src/replay/dispatcher.rs](../src/replay/dispatcher.rs))
 
 ```rust
-// Message enum に追加
+pub struct DispatchResult {
+    pub current_time: u64,
+    pub kline_events: Vec<(StreamKind, Vec<Kline>)>,
+    pub trade_events: Vec<(StreamKind, Vec<Trade>)>,
+    pub reached_end: bool,
+}
+```
+
+Tick ごとに `dispatch_tick` が生成する。`current_time` は今フレームの仮想時刻（`clock.now_ms()`）。
+
+---
+
+## 5. メッセージとイベント
+
+### 5.1 ReplayMessage ([src/replay/mod.rs](../src/replay/mod.rs))
+
+| バリアント | 説明 |
+|---|---|
+| `ToggleMode` | Live / Replay 切替 |
+| `StartTimeChanged(String)` | 開始日時入力変更 |
+| `EndTimeChanged(String)` | 終了日時入力変更 |
+| `Play` | 範囲パース → プリフェッチ開始 |
+| `Resume` | 一時停止から再開 |
+| `Pause` | 一時停止 |
+| `StepForward` | 次バー境界へ離散ジャンプ |
+| `StepBackward` | 前バー境界へ離散ジャンプ |
+| `CycleSpeed` | 速度循環 |
+| `KlinesLoadCompleted(StreamKind, Range<u64>, Vec<Kline>)` | kline 一括ロード完了 |
+| `DataLoadFailed(String)` | プリフェッチ失敗 |
+| `SyncReplayBuffers` | mid-replay stream 同期（バックフィル完了後のバッファ再構成） |
+| `ReloadKlineStream { old_stream: Option<StreamKind>, new_stream: StreamKind }` | mid-replay で timeframe 変更時に旧 stream を除去し新 stream を再ロードする |
+
+### 5.2 Message::Replay / Message::ReplayApi
+
+`src/main.rs` の `Message` enum に以下が存在:
+
+```rust
 enum Message {
-    // ... 既存 ...
+    // ...
     Replay(ReplayMessage),
-}
-
-enum ReplayMessage {
-    /// ライブ/リプレイ切替
-    ToggleMode,
-    /// 開始日時の入力変更
-    StartTimeChanged(String),
-    /// 終了日時の入力変更
-    EndTimeChanged(String),
-    /// 再生ボタン押下（最初から開始）
-    Play,
-    /// 一時停止から再開
-    Resume,
-    /// 停止ボタン押下
-    Pause,
-    /// 進むボタン（1分早送り）
-    StepForward,
-    /// Trades バッチ受信（Straw ストリームから逐次到着）
-    TradesBatchReceived(StreamKind, Vec<Trade>),
-    /// 全 Trades のフェッチ完了
-    TradesFetchCompleted(StreamKind),
-    /// 再生速度変更
-    CycleSpeed,
-    /// 巻き戻し（1分前にジャンプ）
-    StepBackward,
-    /// 全データのプリフェッチ完了
-    DataLoaded,
-    /// データプリフェッチ失敗
-    DataLoadFailed(String),
+    ReplayApi((replay_api::ApiCommand, replay_api::ReplySender)),
+    // ...
 }
 ```
 
-### 3.3 ヘッダーバー UI (`src/main.rs` の view)
+- `Message::Replay` は UI / HTTP から発火する内部メッセージ
+- `Message::ReplayApi` は HTTP サーバー subscription が発火する「コマンド + 応答チャネル」のタプル
 
-挿入位置: `header_title` の直後、`row![sidebar, dashboard]` の直前。
+---
+
+## 6. データフロー
+
+### 6.1 Play 押下から再生開始まで
 
 ```
-column![
-    header_title,
-    replay_header,
-    row![sidebar_view, dashboard_view].spacing(4).padding(8),
-]
+[ReplayMessage::Play]
+  ├─ 1. parse_replay_range(start, end) → (start_ms, end_ms)
+  │     失敗時は Notification でエラー
+  ├─ 2. Dashboard::prepare_replay() で全ペイン content をリビルド
+  │     - settings / streams は保持
+  │     - kline ペインは KlineChart::new() + reset_for_seek()
+  │     - Heatmap 等はクリア
+  ├─ 3. ReplayState::start(start_ms, end_ms, step_size_ms) で
+  │     - clock = Some(StepClock { status: Waiting, now_ms: start_ms, ... })
+  │     - event_store = EventStore::new()
+  │     - active_streams = 現在の全 StreamKind
+  ├─ 4. 全 active_streams に対して Task::perform(loader::load_klines(stream, range), ...)
+  │     → Message::Replay(KlinesLoadCompleted(stream, range, klines))
+  └─ 5. subscription() の次評価で exchange_streams が外れ WS 切断
+
+[KlinesLoadCompleted(stream, range, klines) 受信]
+  ├─ klines が空の場合は "未ロード" として無視（early return）
+  ├─ ReplayState::on_klines_loaded(stream, range, klines, wall_now)
+  │     event_store.ingest_loaded(stream, range, LoadedData { klines, .. })
+  │     全 active_streams が is_loaded → clock.resume_from_waiting(wall_now) で再生開始
+  │     未完の stream あり → clock は Waiting のまま
+  └─ pre_start_history(klines, start_ms) で start 時刻前のバー（k.time < start_ms）のみ抽出し
+       dashboard.ingest_replay_klines(&stream, &history_klines, main_window) で注入
+       （start 時刻以降のバーは dispatch_tick が逐次注入するため、ここでは注入しない）
 ```
 
-ヘッダーバーのレイアウト:
+### 6.2 Tick ループ
+
+```
+[Message::Tick(now)]
+  └─ replay.clock が Some && is_replay() の場合:
+       dispatch = dispatch_tick(clock, &event_store, &active_streams, now)
+
+       for (stream, klines) in &dispatch.kline_events:
+         dashboard.ingest_replay_klines(&stream, &klines, main_window)
+
+       for (stream, trades) in &dispatch.trade_events:
+         dashboard.ingest_trades(stream, trades)
+
+       if dispatch.reached_end:
+         clock は自動的に Paused（dispatch_tick 内で処理済み）
+```
+
+`dispatch_tick` のアルゴリズムは §7.1 を参照。
+
+### 6.3 起動時 Auto-play（Fixture 直接起動）
+
+`saved-state.json` に `replay_config.mode = "replay"` と有効な `range_start` / `range_end` が含まれる場合、起動時に **自動 Play** が発火する。ワークアラウンドの「Live 起動 → toggle → play」という 3 ステップが不要になる。
+
+```
+[アプリ起動 (src/main.rs ReplayState 初期化)]
+  ├─ replay_config.mode == "replay" && parse_replay_range() が Ok
+  │     → pending_auto_play = true
+  └─ それ以外 → pending_auto_play = false（通常起動）
+
+[SessionRestoreResult(None) — Tachibana ペインあり]
+  ├─ has_tachibana_stream_pane() == true && pending_auto_play
+  │     → on_session_unavailable() で pending_auto_play = false
+  │        log::info!("[auto-play] session unavailable — auto-play deferred")
+  │        Toast::info("Replay auto-play was deferred: please log in to resume")
+  └─ Tachibana ペインなし（Binance 等）→ pending_auto_play はそのまま維持
+
+[Sidebar::TickersTable::UpdateMetadata 受信]
+  └─ pending_auto_play が true
+       → Dashboard::refresh_waiting_panes() で全 Waiting ペインの mark_resolution_due() を呼び出し
+          log::info!("[auto-play] metadata updated — refreshed waiting panes")
+          （次の ResolveStreams で即座に Ready 昇格を試みる）
+
+[Dashboard::Event::ResolveStreams 処理 (Ok(resolved) 分岐)]
+  ├─ (1) dashboard.resolve_streams() で当該ペインを Ready に昇格（同期）
+  └─ (2) pending_auto_play が true かつ is_replay() かつ
+         all_panes_have_ready_streams() == true
+           → pending_auto_play = false
+              Task::done(Message::Replay(ReplayMessage::Play)) を batch dispatch
+
+[ReplayMessage::Play 受信]
+  └─ on_manual_play_requested() で pending_auto_play = false
+     （ユーザーが手動で Play を押した場合でも auto-play と二重発火しないようにする）
+```
+
+**ゲート判定の詳細**: `all_panes_have_ready_streams(window_id)` は `iter_all_panes()` を使い、全ペインの `streams` フィールドを検査する。`Waiting { streams: [] }` は stream 未設定（空ペイン）として Ready 扱いにする（[src/screen/dashboard.rs](../src/screen/dashboard.rs)）。
+
+**タイムアウトなし**: auto-play はイベント駆動で発火する。タイマーは存在しない。Tachibana ペインが含まれる場合は session restore 失敗時に明示的に flag を落とし、ユーザーへ info トーストで通知する。
+
+**pending_auto_play は永続化しない**: `Play` 実行後に `POST /api/app/save` で保存した state の `replay_config` に mode/range が残るため、次回起動でも同じ自動再生が発動する。これはユーザが「リプレイ状態を保存した＝次回も同じ区間を再生したい」という意図と一致する。
+
+### 6.4 mid-replay バックフィル
+
+```
+[ペイン操作: Sidebar / Dashboard / Pane API]
+  ├─ streams を mutate
+  └─ active_streams に新 stream を追加 + Task::perform(load_klines(...))
+
+[KlinesLoadCompleted(new_stream, ...) 受信]
+  ├─ event_store.ingest_loaded(new_stream, ...)
+  ├─ dashboard.ingest_replay_klines(&new_stream, &klines, main_window)
+  └─ clock が Waiting && 全 streams ロード完了 → clock.resume_from_waiting(wall_now)
+     既存 streams は再生を止めない（EventStore は既ロード済み）
+```
+
+### 6.5 StepForward / StepBackward
+
+```
+[StepForward]
+  ├─ Paused 以外（Playing / Waiting）の場合は no-op
+  ├─ new_time = current_time + min_timeframe_ms(active_streams)
+  ├─ new_time > range.end の場合は no-op（範囲終端を超える）
+  ├─ clock.seek(new_time)
+  └─ inject_klines_up_to(new_time): 0..new_time+1 の klines を全 active_streams から注入
+
+[StepBackward]
+  ├─ 全 active_streams の klines_in(stream, 0..current_time) で
+  │   current_time より小さい最大の kline.time を探す
+  ├─ new_time = compute_step_backward_target(prev_time, current_time, start_ms)
+  │   （start_ms 未満には戻れないようクランプ）
+  ├─ clock.seek(new_time) + clock.pause()
+  ├─ dashboard.reset_charts_for_seek(main_window) でチャートをクリア
+  └─ inject_klines_up_to(new_time): 0..new_time+1 の klines を全 active_streams から注入
+     (kline 再フェッチは行わない — EventStore から再構成)
+```
+
+### 6.6 Live 復帰
+
+```
+[ReplayMessage::ToggleMode (Replay → Live)]
+  ├─ clock = None, event_store = EventStore::new(), active_streams = {}
+  ├─ range_input = default
+  ├─ pending_auto_play = false
+  ├─ Dashboard::rebuild_for_live() で content リビルド
+  └─ subscription() 次評価で exchange_streams 復帰 → WS 自動再購読
+```
+
+---
+
+## 7. 再生エンジン
+
+### 7.1 dispatch_tick ([src/replay/dispatcher.rs](../src/replay/dispatcher.rs))
 
 ```rust
-fn view_replay_header(&self) -> Element<'_, Message> {
-    let time_display = text(replay::format_current_time(&self.replay, self.timezone))
-        .font(style::AZERET_MONO)
-        .size(12);
-
-    let is_replay = self.replay.is_replay();
-
-    let mode_label = if is_replay { "REPLAY" } else { "LIVE" };
-    let mode_toggle = button(text(mode_label).size(11))
-        .on_press(Message::Replay(ReplayMessage::ToggleMode))
-        .style(move |theme, status| style::button::bordered_toggle(theme, status, is_replay))
-        .padding(padding::all(2).left(6).right(6));
-
-    // on_input() を呼ばなければ read-only になる
-    let mut start_input = text_input("Start", &self.replay.range_input.start).size(11);
-    let mut end_input = text_input("End", &self.replay.range_input.end).size(11);
-    if is_replay {
-        start_input = start_input.on_input(|s| Message::Replay(ReplayMessage::StartTimeChanged(s)));
-        end_input = end_input.on_input(|s| Message::Replay(ReplayMessage::EndTimeChanged(s)));
-    }
-
-    // ▶/⏸ ボタン: playback 未開始なら Play、Playing なら Pause、Paused なら Resume
-    // ⏮/⏭/速度: playback が存在し Loading 中でないとき有効
-    let controls = row![step_back_btn, play_pause_btn, step_fwd_btn, speed_btn].spacing(4);
-
-    let mut header = row![
-        time_display, mode_toggle,
-        start_input.width(140), text("~").size(11), end_input.width(140),
-        controls,
-    ];
-    if is_loading {
-        header = header.push(text("Loading...").size(11));
-    }
-
-    header
-        .spacing(8)
-        .padding(padding::all(4))
-        .align_y(Alignment::Center)
-        .into()
-}
+pub fn dispatch_tick(
+    clock: &mut StepClock,
+    store: &EventStore,
+    active_streams: &HashSet<StreamKind>,
+    wall_now: Instant,
+) -> DispatchResult;
 ```
 
-### 3.4 リプレイデータフロー
+**アルゴリズム**:
 
-```
-[ユーザー操作]
-    │
-    ▼
-ToggleMode → Replay に切替
-    │
-    ▼
-Play 押下
-    │
-    ├── 1. range_input をパース → start_time / end_time (Unix ms)
-    │      ※パース失敗時は input の border を赤くして中断
-    ├── 2. アクティブな全ペインの StreamKind を列挙
-    ├── 3. ペインの content を再構築してチャートデータをクリア
-    │      （settings / streams は保持、content のみ KlineChart::new() 等で再生成）
-    ├── 4. PlaybackState を初期化（status = Loading）、ヘッダーに "Loading..." 表示
-    ├── 5. 既存の fetcher::request_fetch() を利用して過去データを取得:
-    │       ├── FetchRange::Kline(start - 450*tf, end) → KlineChart の ReplayKlineBuffer にバッファリング
-    │       │   ※ リプレイ開始時点より前のローソク足も表示するため、450本分のヒストリカルデータを含めてフェッチ
-    │       │   ※ req_id はリプレイ用にダミー Uuid::new_v4() を生成して渡す
-    │       │   ※ insert_hist_klines() がリプレイモード検出 → バッファに格納（チャートには直接挿入しない）
-    │       └── FetchRange::Trades(start, end) → fetch_trades_batched() を Task::sip() で消費
-    │           各バッチ → TradesBatchReceived → TradeBuffer に追記
-    │           全バッチ完了 → DataLoaded → status を Playing に遷移
-    │      ※fetch_trades_batched() は現在 Binance のみ対応。
-    │       他の取引所では Kline のみの再生になる。
-    ├── 6. WebSocket 購読は subscription() の除外で自動停止
-    │      （mode が Replay になった時点で次の subscription 評価で exchange_streams を返さなくなる）
-    └── 7. リプレイ中はペインの追加/削除/ティッカー変更を無効化
+1. 全 `active_streams` について `store.is_loaded(stream, full_range)` を確認
+   - 未ロードの stream があれば `clock.set_waiting()` して空 `DispatchResult` を返す
+2. `clock.status == Waiting` → 空を返す（全 streams ロード完了後は `resume_from_waiting` を待つ）
+3. `clock.tick(wall_now)` で 1 ステップ進める → emit 範囲 `[prev_ms, new_ms)` を取得
+   - 発火タイミング未到達（空 Range）→ 空 `DispatchResult` を返す
+4. 各 `stream` in `active_streams`:
+   - `store.klines_in(stream, range)` → `kline_events` に追加
+   - `store.trades_in(stream, range)` → `trade_events` に追加
+5. `clock.status == Paused`（終端到達時に `tick()` が自動 Pause する）→ `reached_end = true`
+6. `DispatchResult { current_time: clock.now_ms(), kline_events, trade_events, reached_end }` を返す
 
-[DataLoaded 受信後]
-    │
-    ▼
-PlaybackState を初期化 (current_time = start_time, status = Playing)
+**キャッチアップ**: wall 時間が遅れていた場合（例: スリープ後）、`tick()` は `next_step_at` から経過した分だけ複数ステップを一括処理し、全時間範囲のイベントをまとめて返す。
 
-[毎フレーム: Message::Tick]
-    │
-    ▼
-リプレイモード & Playing の場合:
-    ├── current_time += elapsed_ms * speed
-    ├── dashboard.replay_advance_klines(current_time) で kline バッファから current_time 以下の kline を段階挿入
-    ├── current_time <= t の Trades を trade_buffers から取り出す
-    ├── dashboard.ingest_trades(stream, buffer, update_t, main_window) に注入
-    │   ※ update_t = バッチ内最終トレードの time
-    │   ※ ingest_trades() は ticker_info ベースでペインをマッチング（StreamKind 完全一致 OR 同一 ticker_info）
-    │   ※ Heatmap / ShaderHeatmap / Kline / TimeAndSales / Ladder に分配
-    └── current_time >= end_time なら Paused に遷移
+**状態変化の範囲**: `dispatch_tick` が書き換えるのは `StepClock` の `now_ms` / `next_step_at` / `status` のみ。`EventStore` への書き込みは行わない。
 
-[一時停止から再開]
-    │
-    ▼
-Resume → status を Playing に戻して再生を再開
+### 7.2 Pause / Resume / CycleSpeed
 
-[ライブに戻す]
-    │
-    ▼
-ToggleMode → Live に切替
-    ├── PlaybackState を破棄
-    ├── ペインの content を再構築（リプレイデータをクリア）
-    ├── ペイン操作の無効化を解除
-    └── WebSocket 購読を再開（subscription() が自動で再購読）
+- `Pause`: `clock.pause()` — `status = Paused`, `next_step_at = None`
+- `Resume`: `clock.play(wall_now)` — `status = Playing`, `next_step_at` 再設定
+- `CycleSpeed`: `SPEEDS = [1.0, 2.0, 5.0, 10.0]` を `(i+1) % 4` で循環、`clock.set_speed(next)` を呼ぶ
+- `speed_label()`: `if speed == floor(speed) { "Nx" } else { "N.Nx" }` を返す
+
+### 7.3 Waiting 状態の自動解除
+
+`ClockStatus::Waiting` はデータロード待ち中を示す。`dispatch_tick` が毎フレーム `is_loaded` チェックを行い、全 active_streams がロード済みになっていても `Waiting` のままではフレーム抽出しない。ロード完了の通知は `KlinesLoadCompleted` ハンドラ内の `on_klines_loaded()` が担い、全 streams 完了時点で `clock.resume_from_waiting(wall_now)` を呼んで `Playing` に復帰する。
+
+---
+
+## 8. mid-replay ペイン操作
+
+### 8.1 許容される操作
+
+- SplitPane / ClosePane
+- Timeframe 変更
+- Ticker 変更
+- Sidebar からの TickerSelected
+- HTTP Pane API 経由の全操作（§11.2）
+
+### 8.2 新ペインのバックフィル
+
+1. ペイン追加 → 新 `StreamKind` を `active_streams` に追加
+2. `clock` が Playing なら `Waiting` に遷移（`dispatch_tick` が自動検出）
+3. `Task::perform(load_klines(new_stream, range), KlinesLoadCompleted)` を発火
+4. `KlinesLoadCompleted` 受信 → `event_store.ingest_loaded` → 全 streams ロード完了で `clock.resume_from_waiting()`
+
+既存の streams / EventStore エントリは変更されず、再生は継続される。
+
+### 8.3 reset_for_seek / ingest_historical_klines
+
+`KlineChart` の API:
+
+```rust
+// チャートデータを全クリアしてシークの準備をする（StepBackward, ticker 変更等）
+pub fn reset_for_seek(&mut self);
+
+// EventStore から取り出した klines をチャートに挿入する
+pub fn ingest_historical_klines(&mut self, klines: &[Kline]);
 ```
 
-### 3.5 WebSocket 制御
+---
 
-リプレイモード中はリアルタイムデータの注入を無効化する必要がある。
+## 9. WebSocket 制御
 
-**方式**: `subscription()` でリプレイ中は `exchange_streams` を購読リストから除外する。F5 キーでもトグル可能。
+`subscription()` の構造:
 
 ```rust
 fn subscription(&self) -> Subscription<Message> {
     let window_events = window::events().map(Message::WindowEvent);
-    let sidebar = self.sidebar.subscription().map(Message::Sidebar);
-    let replay_api = Subscription::run(replay_api::subscription).map(Message::ReplayApi);
+    let sidebar      = self.sidebar.subscription().map(Message::Sidebar);
+    let replay_api   = Subscription::run(replay_api::subscription).map(Message::ReplayApi);
 
+    // ログイン画面中でも API は常時 ON
     if self.login_window.is_some() {
         return Subscription::batch(vec![window_events, sidebar, replay_api]);
     }
 
-    let tick = iced::window::frames().map(Message::Tick);
-    let hotkeys = keyboard::listen().filter_map(|event| {
-        let keyboard::Event::KeyPressed { key, .. } = event else { return None; };
+    let tick    = iced::window::frames().map(Message::Tick);
+    let hotkeys = keyboard::listen().filter_map(|e| {
+        let KeyPressed { key, .. } = e else { return None };
         match key {
-            keyboard::Key::Named(keyboard::key::Named::Escape) => Some(Message::GoBack),
-            keyboard::Key::Named(keyboard::key::Named::F5) => {
-                Some(Message::Replay(ReplayMessage::ToggleMode))
-            }
+            Key::Named(Escape) => Some(Message::GoBack),
+            Key::Named(F5)     => Some(Message::Replay(ReplayMessage::ToggleMode)),
             _ => None,
         }
     });
 
-    // リプレイモード中は WebSocket ストリームを購読しない
     if self.replay.is_replay() {
-        return Subscription::batch(vec![window_events, sidebar, tick, hotkeys, replay_api]);
+        // Replay 中: exchange_streams を外す
+        return Subscription::batch(vec![
+            window_events, sidebar, tick, hotkeys, replay_api
+        ]);
     }
 
     let exchange_streams = self.active_dashboard()
         .market_subscriptions()
         .map(Message::MarketWsEvent);
 
-    Subscription::batch(vec![exchange_streams, sidebar, window_events, tick, hotkeys, replay_api])
+    Subscription::batch(vec![
+        exchange_streams, sidebar, window_events, tick, hotkeys, replay_api
+    ])
 }
 ```
 
-→ Iced の `Subscription` は宣言的に動作するため、`exchange_streams` を返さなくなった時点で WebSocket 接続は自動的にドロップされる。ライブに戻した際も自動再接続される。
-→ `replay_api` は全状態（ログイン画面中含む）で常時購読。HTTP サーバーはアプリ起動と同時に `127.0.0.1:9876` で待機する。
-→ **F5 キー**でリプレイモードをトグルできる（`keyboard::listen()` の `filter_map` で `F5` → `ReplayMessage::ToggleMode` にマッピング）。
+**ポイント**:
+- iced の宣言的 subscription により、`exchange_streams` を返さなくなった時点で WebSocket は自動切断
+- Live 復帰時も次の評価で自動再購読
+- `replay_api` は全状態で常時購読（ログイン画面中でも API が動く）
+- F5 は全 replay 状態でトグル可能（Live ↔ Replay）
 
 ---
 
-## 4. 実装ステップ
+## 10. 取引所別対応状況
 
-### Phase 1: ヘッダーバー UI（見た目のみ）
+| 取引所 | Kline | Trades | Depth | リプレイ可否 |
+|---|:-:|:-:|:-:|:-:|
+| Binance (Spot / Linear / Inverse) | ✅ 全 tf | ✅ `fetch_trades_batched` | ❌ | ✅ 完全 |
+| Bybit | ✅ 全 tf | ❌ | ❌ | ⚠️ kline のみ |
+| Hyperliquid | ✅ 全 tf | ❌ | ❌ | ⚠️ kline のみ |
+| OKX | ✅ 全 tf | ❌ | ❌ | ⚠️ kline のみ |
+| MEXC | ✅ 全 tf | ❌ | ❌ | ⚠️ kline のみ |
+| **Tachibana (立花証券)** | ✅ **D1 のみ** | ❌ | ❌ | ⚠️ D1 kline のみ |
 
-リプレイ機能のロジックは含めず、UIの枠組みだけを構築する。
+### 10.1 Tachibana D1 の特記事項
 
-| Step | 内容 | ファイル | 状態 |
-|------|------|---------|------|
-| 1-1 | `ReplayState`, `ReplayMode`, `ReplayRangeInput` 型定義 | `src/replay.rs` (新規) | ✅ |
-| 1-2 | `Flowsurface` に `replay: ReplayState` フィールド追加 | `src/main.rs` | ✅ |
-| 1-3 | `Message::Replay(ReplayMessage)` バリアント追加（Phase 1 で使うバリアントのみ） | `src/main.rs` | ✅ |
-| 1-4 | `view_replay_header()` メソッド実装（現在時刻 + トグル + 日時入力 + ▶/⏸ + ⏭） | `src/main.rs` | ✅ |
-| 1-5 | `view()` の `column!` にヘッダーバーを挿入 | `src/main.rs` | ✅ |
-| 1-6 | トグルボタンでモード切替（UI状態のみ。入力欄・ボタンの有効/無効切替） | `src/main.rs` | ✅ |
-| 1-7 | Live に戻す際の UI 状態リセット（ReplayRangeInput のクリア、ボタン無効化に復帰） | `src/main.rs` | ✅ |
+立花証券は日足のみ API 提供のため、以下の特別処理が入る:
 
-> NOTE: `header_title` は macOS 以外では空の `column![]` のため、Windows ではリプレイヘッダーがウィンドウ最上部に配置される。
+1. **range フィルタ**: `fetch_tachibana_daily_klines(issue_code, range)` が全履歴取得後に `range` でフィルタする（API 自体は range 引数を受け付けない）
+2. **離散ステップ**: StepForward / StepBackward が EventStore から次/前 kline timestamp を検索し、休場日（土日祝）を自動スキップ
+3. **Play 時の挙動**: `dispatch_tick` が各 Tick で kline スライスを返すため、D1 リプレイも同一経路で動作
 
-**検証**: ビルドしてメインウィンドウ上部にヘッダーバーが表示されること。トグルで入力欄・ボタンの有効/無効が切り替わること。Live に戻した際に UI 状態がリセットされること。
-
-**Phase 1 実装メモ (2026-04-10)**:
-- `src/replay.rs` を新規作成。`ReplayState`, `ReplayMode`, `ReplayRangeInput`, `PlaybackState`, `PlaybackStatus`, `TradeBuffer`, `ReplayMessage` を定義
-- `format_current_time()` は `UserTimezone::format_with_kind()` を利用（引数 `i64`, 戻り値 `Option<String>`）
-- `view_replay_header()` は `Flowsurface` のメソッドとして実装。iced の `text_input` に `on_input()` を呼ばなければ read-only になる仕様を活用
-- ボタンアイコンはカスタムフォントに play/pause がないため Unicode 文字（▶ `\u{25B6}`, ⏸ `\u{23F8}`, ⏭ `\u{23ED}`）を使用
-- `style::button::bordered_toggle` でモードトグルのスタイリング。`is_replay` をキャプチャして active 状態を表現
-- テスト 5 件: default_state, toggle_live_to_replay, toggle_replay_to_live_and_resets, format_current_time_replay, format_current_time_live
-
-### Phase 2: リプレイデータのプリフェッチ
-
-| Step | 内容 | ファイル | 状態 |
-|------|------|---------|------|
-| 2-1 | `PlaybackState`, `PlaybackStatus`, `TradeBuffer` 型定義 | `src/replay.rs` | ✅ (Phase 1 で定義済み) |
-| 2-2 | 再生ボタン押下時に日時文字列をパース → `(u64, u64)`。`chrono::NaiveDateTime::parse_from_str` で変換。パース失敗時は Notification エラー | `src/replay.rs` | ✅ |
-| 2-3 | ペインの content を再構築してチャートデータをクリア（settings/streams は保持） | `src/screen/dashboard.rs`, `src/screen/dashboard/pane.rs` | ✅ |
-| 2-4 | Kline 取得: `fetcher::kline_fetch_task()` → 既存 `distribute_fetched_data` → `insert_hist_klines()` で一括挿入。フェッチ範囲は `(start - 450*tf, end)` でリプレイ前のローソク足も含める | `src/main.rs` | ✅ |
-| 2-5 | Trades 取得: `fetch_trades_batched()` の Straw ストリームを `Task::sip()` で購読 → `TradesBatchReceived` で TradeBuffer に逐次追記 → `TradesFetchCompleted` → `.chain(DataLoaded)` | `src/main.rs` | ✅ |
-| 2-6 | ローディング状態の表示（ヘッダーに "Loading..." テキスト） | `src/main.rs` | ✅ |
-| 2-7 | リプレイ中はペインの drag/resize を無効化 | `src/screen/dashboard.rs` | ✅ |
-
-**検証**: 再生ボタン押下でAPIコールが発行され、Kline がチャートに一括挿入、Trades がバッファに格納されること。全データ到着後に PlaybackState が初期化されること。
-
-**Phase 2 実装メモ (2026-04-10)**:
-- `parse_replay_range()`: `NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M")` で UTC として解釈
-- `Dashboard::prepare_replay()`: 全ペインの content をクリア。`pane::State::rebuild_content_for_replay()` が `KlineChart::new()` で空チャートを再生成（ticker_info は `stream_pair()` から取得、借用競合回避のため先に取得）
-- Kline フェッチは `kline_fetch_task()` を直接呼び出し、`Message::Dashboard` に変換して既存パイプライン (`distribute_fetched_data → insert_hist_klines`) で処理。フェッチ範囲は `(start_ms - 450 * tf.to_milliseconds(), end_ms)` でリプレイ開始前のローソク足もプリフェッチする
-- Trades フェッチは `Task::sip(fetch_trades_batched(...))` → `ReplayMessage::TradesBatchReceived` → `TradeBuffer` に追記。Binance のみ対応
-- 全 kline fetch + trades fetch を `Task::batch()` にまとめ、`.chain(DataLoaded)` で完了通知
-- ペイン操作無効化: `Dashboard::view()` に `is_replay` パラメータ追加、`on_drag`/`on_resize` を条件付きで呼び出し
-- テスト追加: `parse_replay_range` の正常系/異常系 6 件（計 11 件）
-
-### Phase 3: リプレイ再生エンジン
-
-| Step | 内容 | ファイル | 状態 |
-|------|------|---------|------|
-| 3-1 | `Message::Tick` ハンドラでリプレイモード分岐を追加 | `src/main.rs` | ✅ |
-| 3-2 | フレームごとに `current_time` を進め、該当範囲の Trades を `ingest_trades()` に注入 | `src/main.rs`, `src/replay.rs` | ✅ |
-| 3-3 | `subscription()` でリプレイ中は `exchange_streams` を除外 | `src/main.rs` | ✅ |
-| 3-4 | 一時停止/再開の制御 | `src/main.rs` | ✅ |
-| 3-5 | StepForward で `current_time` を1分先にジャンプ（該当区間の Trades を一括注入） | `src/main.rs` | ✅ |
-| 3-6 | `current_time >= end_time` で自動停止 | `src/main.rs` | ✅ |
-| 3-7 | Heatmap / ShaderHeatmap / Ladder ペインに「Replay: Depth unavailable」テキスト表示 | `src/screen/dashboard/pane.rs` | ✅ |
-| 3-8 | TimeAndSales ペインはリプレイ Trades を `ingest_trades()` 経由で自動的に受信 | — | ✅ |
-| 3-9 | Comparison ペインはリプレイ対象外 | — | ✅ |
-
-**検証**: 再生ボタンでチャートが過去データに基づいて動的に更新されること。一時停止・再開・早送りが機能すること。TimeAndSales にリプレイ中の約定が表示されること。
-
-**Phase 3 実装メモ (2026-04-10)**:
-- Tick ハンドラ: `replay_trades` を先に収集（`Vec<(StreamKind, Vec<Trade>, u64)>`）してから `ingest_trades()` を呼ぶことで借用競合を回避
-- `advance_time(elapsed_ms)`: `elapsed_ms * speed` で仮想時刻を進め、`end_time` でクランプ
-- `TradeBuffer::drain_until(current_time)`: cursor ベースで O(1) 前進。スライス参照を返すが、Tick ハンドラでは `.to_vec()` でコピーして借用を解放
-- WS 除外: `subscription()` で `self.replay.is_replay()` チェック → `exchange_streams` を購読リストから除外
-- Depth unavailable: `pane::State::view()` に `is_replay: bool` パラメータ追加、`top_left_buttons` に条件付きテキスト追加
-- テスト追加: drain_trades (3件), advance_time (1件), cycle_speed (1件) → 計 16 件
-
-**Phase 3 追加修正 (2026-04-12) — チャート段階更新対応**:
-- **問題**: Kline を再生開始時に一括挿入していたため、チャートが最初から完成状態で表示され、リプレイ進行に合わせた更新が行われなかった
-- **原因（3つ）**:
-  1. 全 kline が `insert_hist_klines()` で一括ロード → チャートが即座に全ローソク足を表示
-  2. `ingest_trades()` の `matches_stream()` が `StreamKind` の完全一致のみ → Kline ペインは `StreamKind::Trades` を持たないため trades が届かない
-  3. TimeBased パスの `insert_trades()` で `invalidate()` / `last_price` 更新が欠落 → チャートが再描画されない
-- **修正**:
-  1. `KlineChart` に `ReplayKlineBuffer` 追加。`enable_replay_mode()` で有効化し、`insert_hist_klines()` はバッファに格納。Tick ループで `replay_advance(current_time)` により段階挿入。バッファは `dedup_by_key` で重複除去し、`partition_point` でカーソル位置を復元
-  2. `ingest_trades()` で `matches_stream()` に加え `stream_pair()` の `ticker_info` 一致でもマッチするよう変更
-  3. TimeBased `insert_trades()` に `invalidate(None)` と `last_price` 更新を追加
-- **変更ファイル**: `src/chart/kline.rs`, `src/screen/dashboard.rs`, `src/screen/dashboard/pane.rs`, `src/main.rs`
-
-### Phase 4: ライブ復帰・巻き戻し・クリーンアップ
-
-| Step | 内容 | ファイル | 状態 |
-|------|------|---------|------|
-| 4-1 | LIVE に戻す時: PlaybackState を破棄、ペインの content を再構築、ペイン操作の無効化を解除 | `src/main.rs` | ✅ |
-| 4-2 | 再生速度の変更 UI: 速度テキスト（「1x」）をクリックで 1x → 2x → 5x → 10x サイクル切替 + `CycleSpeed` メッセージ追加 | `src/main.rs`, `src/replay.rs` | ✅ |
-| 4-3 | ⏮ ボタンを UI に追加 + StepBackward の実装: `rebuild_for_step_backward()` でバッファ保持版リビルド → `replay_advance_klines(new_time)` で kline 再挿入（再フェッチ不要）→ TradeBuffer カーソルリセット＋ `drain_until(new_time)` で早送り → Paused で停止 | `src/main.rs`, `src/replay.rs`, `src/screen/dashboard.rs`, `src/screen/dashboard/pane.rs` | ✅ |
-
-**検証**:
-- リプレイ→ライブ切替でリアルタイムデータが再び表示されること（WebSocket は subscription() の自動再購読で復帰）
-- 巻き戻しでチャートが正しく再描画されること
-- 速度切替で再生速度が変わること
-
-**Phase 4 実装メモ (2026-04-10)**:
-- Live 復帰: `toggle_mode()` 内で playback/range_input をクリア + `prepare_replay()` でペイン content リビルド。WS は `subscription()` 再評価で自動復帰
-- 速度変更: `SPEEDS = [1.0, 2.0, 5.0, 10.0]` の循環。`speed_label()` で "Nx" 表示
-- StepBackward: `current_time -= 60s`（min: start_time）→ TradeBuffer 全カーソルリセット → `drain_until(new_time)` で早送り → `rebuild_for_step_backward()` でバッファ保持版リビルド（再フェッチ不要）→ `replay_advance_klines(new_time)` で kline 再挿入 → Paused で停止
-- ヘッダーレイアウト: `[⏮] [▶/⏸] [⏭] [Nx]` の 4 ボタン構成
-
-**Phase 4 バグ修正 (2026-04-12) — Play時にリプレイ前のローソク足が非表示**:
-- **問題**: ▶ 押下後チャートにリプレイ期間内のローソク足しか表示されない。⏮ 後は期間前のローソク足も正しく表示される
-- **原因**: Play 時の kline フェッチ範囲が `(start_ms, end_ms)` のみで、リプレイ開始前のヒストリカルデータがフェッチされていなかった。⏮ で正しく表示されたのは、再生中に `fetch_missing_data` がビューポート左端の不足分を自動フェッチしてバッファに蓄積し、⏮ が cursor を 0 にリセットして全データを再挿入するため
-- **修正**: `kline_fetch_task()` のフェッチ範囲を `(start_ms - 450 * tf.to_milliseconds(), end_ms)` に拡張。各ストリームのタイムフレームから450本分のヒストリカルデータを含めてフェッチする
-- **変更ファイル**: `src/main.rs`
+設計判断の背景（なぜこの実装か）は [docs/tachibana_spec.md §8](tachibana_spec.md#8-リプレイ対応の設計判断) を参照。実装経緯（Phase 1〜3 作業ログ）は [docs/plan/archive/tachibana_replay.md](plan/archive/tachibana_replay.md) に保存。
 
 ---
 
-## 5. 変更対象ファイル
+## 11. HTTP 制御 API
 
-| ファイル | 変更内容 | Phase |
-|---------|---------|-------|
-| `src/replay.rs` | **新規**: ReplayState, PlaybackState, TradeBuffer, ReplayMessage, 再生エンジン, ReplayCommand/ReplayStatus (API型) | 1-5 |
-| `src/replay_api.rs` | **新規**: ローカル HTTP サーバー（`tokio::net::TcpListener`）、ReplySender ラッパー、ルーティング | 5 |
-| `src/main.rs` | Flowsurface に replay フィールド追加、Message::Replay/ReplayApi 追加、view_replay_header(), update() でのリプレイ制御・API ハンドラ, subscription() の分岐、Tick ループで kline 段階挿入 | 1-5 |
-| `src/screen/dashboard.rs` | `prepare_replay()`, `rebuild_for_step_backward()`, `rebuild_for_live()`, `collect_trade_streams()`, リプレイ中のペイン操作無効化、`replay_advance_klines()`, `ingest_trades()` の ticker_info マッチング | 2-4 |
-| `src/screen/dashboard/pane.rs` | `rebuild_content_for_replay()`, `rebuild_content_for_step_backward()`（バッファ保持版）, `rebuild_content_for_live()`, Heatmap の「Depth unavailable」オーバーレイ表示、`replay_advance_klines()` | 3-4 |
-| `src/chart/kline.rs` | `ReplayKlineBuffer` 追加、`enable_replay_mode()` / `replay_advance()` 実装、TimeBased `insert_trades()` の invalidate/last_price 修正 | 3 |
-| `src/connector/fetcher.rs` | (軽微) リプレイ用のフェッチリクエスト分岐（既存 `request_fetch()` を再利用） | 2 |
-| `Cargo.toml` | `tokio` (net, io-util, sync) + `futures` 依存追加 | 5 |
+ローカル HTTP サーバーが `127.0.0.1:9876` で常時待機し、外部プロセスからリプレイとペイン操作を駆動できる。E2E テスト・自動化ツール・スクリプト制御を想定。
 
----
+### 11.1 ベース仕様
 
-## 6. 設計判断とトレードオフ
+| 項目 | 値 |
+|---|---|
+| Bind | `127.0.0.1` （外部アクセス不可）|
+| Port | 環境変数 `FLOWSURFACE_API_PORT` or デフォルト `9876` |
+| Protocol | HTTP/1.1, `Connection: close`, `Access-Control-Allow-Origin: *` |
+| Content-Type | `application/json` (レスポンス・リクエスト) |
+| Keep-alive | 非対応（1 リクエスト / 接続）|
+| 最大リクエストサイズ | 8192 バイト |
 
-### 6.1 データ注入方式: Kline 段階挿入 + Trades フレーム注入
+**ステータスコード**:
 
-**採用（2026-04-12 改訂）**: Kline は `ReplayKlineBuffer` にバッファリングし `current_time` に合わせて段階的に挿入。Trades は `ingest_trades()` でフレーム毎に注入
+| コード | 意味 |
+|---|---|
+| 200 | 成功 |
+| 400 | Bad Request — 不正 JSON、必須フィールド欠落、不正 UUID、不正 axis |
+| 404 | Not Found — 未定義のパスまたは method |
+| 500 | Internal Server Error — アプリチャネル切断、応答タイムアウト |
 
-- 初期方式では Kline を再生開始時に一括挿入していたが、リプレイ進行に合わせてチャートが更新されない問題が発生したため、Kline もバッファリング＋段階挿入に変更
-- **KlineChart に `ReplayKlineBuffer` を追加**: `enable_replay_mode()` で有効化。`insert_hist_klines()` はバッファに格納し、Tick ループで `replay_advance(current_time)` を呼んで `current_time` 以下の kline を段階的にチャートに挿入
-- **`ingest_trades()` の ticker_info マッチング**: Kline ペインは `StreamKind::Trades` をストリームに持たないため、`ticker_info` ベースでマッチングするよう修正
-- **TimeBased `insert_trades` の invalidate 修正**: TimeBased パスに `invalidate()` と `last_price` 更新が欠落していたため追加
-- チャートリセット方式: ペインの `settings` / `streams` は保持したまま `content` のみ再生成する
+### 11.2 エンドポイント一覧
 
-### 6.2 WebSocket 停止方式: subscription 除外 vs フラグ制御
+#### リプレイ制御 (`/api/replay/*`)
 
-**採用**: `subscription()` から `exchange_streams` を除外
+| メソッド | パス | リクエストボディ | レスポンス | 対応コマンド |
+|---|---|---|---|---|
+| GET | `/api/replay/status` | — | `ReplayStatus` | `GetStatus` |
+| POST | `/api/replay/toggle` | — | `ReplayStatus` | `Toggle` |
+| POST | `/api/replay/play` | `{"start": "YYYY-MM-DD HH:MM", "end": "YYYY-MM-DD HH:MM"}` | `ReplayStatus` | `Play` |
+| POST | `/api/replay/pause` | — | `ReplayStatus` | `Pause` |
+| POST | `/api/replay/resume` | — | `ReplayStatus` | `Resume` |
+| POST | `/api/replay/step-forward` | — | `ReplayStatus` | `StepForward` |
+| POST | `/api/replay/step-backward` | — | `ReplayStatus` | `StepBackward` |
+| POST | `/api/replay/speed` | — | `ReplayStatus` | `CycleSpeed` |
 
-- Iced の宣言的購読モデルに沿っている
-- WebSocket 接続は自動的にドロップ/再接続される
-- `update()` 側のデータ受信ハンドラに分岐を入れる必要がない
+#### 認証確認 (`/api/auth/*`)
 
-### 6.3 データプリフェッチ: 既存 fetcher 再利用
+| メソッド | パス | リクエストボディ | レスポンス | 対応コマンド |
+|---|---|---|---|---|
+| GET | `/api/auth/tachibana/status` | — | `{"session":"present"\|"none"}` | `TachibanaSessionStatus` |
 
-**採用**: 再生開始前に全範囲をプリフェッチ。既存の `fetcher::request_fetch()` を再利用する
+#### アプリ制御 (`/api/app/*`)
 
-- メリット: 再生中のネットワーク遅延がない。フェッチロジックのコード重複を避けられる
-- デメリット: 長時間範囲では大量メモリを消費する可能性
-- 緩和策: fetch_klines はページング対応済みのため範囲制限なし
-- Kline フェッチ範囲は `(start_ms - 450 * tf_ms, end_ms)` に拡張し、リプレイ開始前のローソク足450本分もプリフェッチする。これによりリプレイ開始直後からチャートに過去のコンテキストが表示される
-- `fetch_trades_batched()` は Straw ストリームなので、全バッチ到着を待ってから再生を開始する
+| メソッド | パス | 用途 |
+|---|---|---|
+| POST | `/api/app/save` | アプリ状態をディスクに保存 (E2E テスト用)|
+| POST | `/api/app/screenshot` | デスクトップ全体を `C:/tmp/screenshot.png` に保存（レスポンス: `{"ok":true}` or `{"ok":false,"error":"..."}`）|
 
-### 6.4 Depth データの扱い
+#### ペイン CRUD (`/api/pane/*`)
 
-**スコープ外とする**。
+| メソッド | パス | リクエストボディ | 用途 |
+|---|---|---|---|
+| GET | `/api/pane/list` | — | 全ペイン + EventStore ロード状態を返す |
+| POST | `/api/pane/split` | `{"pane_id": "<uuid>", "axis": "Vertical"\|"Horizontal"}` | ペイン分割 |
+| POST | `/api/pane/close` | `{"pane_id": "<uuid>"}` | ペイン削除 |
+| POST | `/api/pane/set-ticker` | `{"pane_id": "<uuid>", "ticker": "BinanceLinear:BTCUSDT"}` | ticker 差し替え |
+| POST | `/api/pane/set-timeframe` | `{"pane_id": "<uuid>", "timeframe": "M1"\|...\|"D1"}` | timeframe 変更 |
 
-- 過去の板情報（Depth）は取引所 API で取得できない
-- リプレイ中の Heatmap / ShaderHeatmap ペインは Trades のフットプリントのみ表示（ヒートマップ部分は空）
-- **Phase 3 で Heatmap / ShaderHeatmap / Ladder ペインに「Replay: Depth unavailable」オーバーレイを表示**し、ユーザーの混乱を防ぐ
+#### Sidebar 経由 (`/api/sidebar/*`)
 
-### 6.5 リプレイ中のペイン操作
+| メソッド | パス | リクエストボディ | 用途 |
+|---|---|---|---|
+| POST | `/api/sidebar/select-ticker` | `{"pane_id": "<uuid>", "ticker": "...", "kind": "..." or null}` | Sidebar::TickerSelected 経路の再現（E2E テスト用）|
 
-**リプレイ中はペインの追加/削除/ティッカー変更を無効化する**。
+#### 通知 (`/api/notification/*`)
 
-- 新しいペインのデータは未取得であり、追加フェッチのハンドリングが複雑になる
-- UI 側でペイン操作ボタンをグレーアウトすることで実装コストを最小化
+| メソッド | パス | リクエストボディ | 用途 |
+|---|---|---|---|
+| GET | `/api/notification/list` | — | 現在の Toast 通知一覧を返す（E2E テスト検証用）|
 
----
+### 11.3 レスポンススキーマ
 
-## 7. スコープ外（後続タスク）
+#### `ReplayStatus` ([src/replay/mod.rs](../src/replay/mod.rs))
 
-| 項目 | 理由 |
-|------|------|
-| Depth（板情報）のリプレイ | 過去の板スナップショットは取引所 API で取得不可 |
-| リプレイ範囲の永続化 | UI 状態のみ。設定保存は UX 検証後 |
-| リプレイ中のインジケータ再計算 | まずは Kline + Trades の再生に集中 |
-| Tachibana（立花証券）のリプレイ対応 | `fetch_klines` は非対応（`fetch_daily_history()` で日足のみ取得可）、`fetch_trades` は未実装 |
-| リプレイデータのローカルキャッシュ | 毎回 API 取得。頻繁に使うなら後でキャッシュ検討 |
-| 日時ピッカーウィジェット | Phase 1 はテキスト入力。カレンダーUI は別タスク |
-| リプレイ中のペイン追加/削除 | 未取得データのハンドリングが複雑。リプレイ中は操作無効化で対応 |
-| Comparison ペインのリプレイ | 複数銘柄の同期フェッチが必要。まずは単一銘柄ペインに集中 |
+```rust
+pub struct ReplayStatus {
+    pub mode: String,                    // "Live" | "Replay"
 
----
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,          // "Playing" | "Paused" | "Loading"
 
-## 8. リスクと未確定事項
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_time: Option<u64>,       // Unix ms
 
-1. **チャートのリセット/再初期化**
-   - リプレイ開始時・ライブ復帰時にペインの content を再構築する
-   - 方式: `settings` / `streams` を保持したまま `content` のみ `KlineChart::new()` 等で再生成
-   - ライブ復帰時は WebSocket 再購読による自動バックフィルが必要
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub speed: Option<String>,           // "1x" | "2x" | "5x" | "10x"
 
-2. **大量データのメモリ消費**
-   - 6時間制限は撤廃済み（fetch_klines ページング対応済み）。長時間範囲では Trades メモリに注意
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_time: Option<u64>,
 
-3. **Trades フェッチの取引所制限**
-   - `fetch_trades_batched()` は現在 **Binance のみ**対応
-   - 他の取引所ではリプレイ時に Kline のみの再生になる
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_time: Option<u64>,
 
-4. **フレームレートと再生精度**
-   - `Tick` は `iced::window::frames()` で発火（≒60fps）
-   - 1フレーム ≒ 16ms 間隔。1x 速度なら十分な精度
-   - 高速再生（10x 以上）ではデータの粒度が粗くなる可能性
+    pub range_start: String,             // UI 入力テキスト（常に含まれる）
+    pub range_end: String,
+}
+```
 
-5. **~~ペインの動的変更~~** → **解決済み**
-   - リプレイ中はペインの追加/削除/ティッカー変更を無効化する（設計判断 6.5）
+`status` は `ClockStatus` を文字列化したもの。`Waiting` は `"Loading"` として返す（`to_status()` で変換）。
 
-6. **~~StepBackward（巻き戻し）の複雑性~~** → **解決済み (Phase 4)**
-   - `current_time` を戻すだけではチャートに既に注入済みのデータは消えない
-   - `rebuild_for_step_backward()` で ReplayKlineBuffer を保持したままチャートをリビルド → `replay_advance_klines(new_time)` で kline 再挿入（再フェッチ不要）→ TradeBuffer カーソルリセット + `drain_until(new_time)` で早送り → Paused で停止する方式で解決
+**Live モード レスポンス例**（clock 未開始時は省略フィールドが消える）:
 
-7. **~~StreamKind の Hash 実装~~** → **解決済み**
-   - `StreamKind` は `Hash + Eq` を既に derive 済み → `HashMap<StreamKind, TradeBuffer>` で問題なし
-
----
-
-## 9. Phase 5: リプレイ制御 API（ローカル HTTP サーバー）
-
-### 9.1 目的
-
-外部プロセス（テストスクリプト、自動化ツール）からリプレイ機能を操作・検証できるように、ローカル HTTP API を公開する。これにより、手動操作なしで全リプレイ機能の E2E テストが可能になる。
-
-### 9.2 API 仕様
-
-**ベース**: `http://127.0.0.1:9876/api/replay`
-
-| メソッド | パス | リクエスト | レスポンス | 対応 ReplayMessage |
-|---------|------|----------|-----------|-------------------|
-| GET | `/api/replay/status` | — | `ReplayStatus` JSON | （読み取りのみ） |
-| POST | `/api/replay/toggle` | — | `ReplayStatus` JSON | `ToggleMode` |
-| POST | `/api/replay/play` | `{ "start": "2026-04-10 00:00", "end": "2026-04-10 01:00" }` | `ReplayStatus` JSON | `StartTimeChanged` + `EndTimeChanged` + `Play` |
-| POST | `/api/replay/pause` | — | `ReplayStatus` JSON | `Pause` |
-| POST | `/api/replay/resume` | — | `ReplayStatus` JSON | `Resume` |
-| POST | `/api/replay/step-forward` | — | `ReplayStatus` JSON | `StepForward` |
-| POST | `/api/replay/step-backward` | — | `ReplayStatus` JSON | `StepBackward` |
-| POST | `/api/replay/speed` | — | `ReplayStatus` JSON | `CycleSpeed` |
-| POST | `/api/app/save` | — | `ReplayStatus` JSON | （E2E テスト用: 状態をディスクに保存） |
-
-`ReplayStatus` JSON レスポンス:
 ```json
 {
-  "mode": "Live" | "Replay",
-  "status": "Loading" | "Playing" | "Paused",  // playback 時のみ
-  "current_time": 1234567890,                   // playback 時のみ
-  "speed": "1x",                                // playback 時のみ
-  "start_time": 1234567890,                     // playback 時のみ
-  "end_time": 1234567890,                       // playback 時のみ
-  "range_start": "2026-04-10 00:00",            // UI 入力テキスト
-  "range_end": "2026-04-10 01:00"               // UI 入力テキスト
+  "mode": "Live",
+  "range_start": "",
+  "range_end": ""
 }
 ```
-※ `status`, `current_time`, `speed`, `start_time`, `end_time` は `skip_serializing_if = None` で playback 未開始時は省略される
 
-### 9.3 アーキテクチャ
+**Replay Playing レスポンス例**:
+
+```json
+{
+  "mode": "Replay",
+  "status": "Playing",
+  "current_time": 1743492600000,
+  "speed": "2x",
+  "start_time": 1743487200000,
+  "end_time": 1743508800000,
+  "range_start": "2026-04-01 09:00",
+  "range_end": "2026-04-01 15:00"
+}
+```
+
+#### ペインリスト (`GET /api/pane/list`)
+
+```json
+{
+  "panes": [
+    {
+      "id": "<uuid>",
+      "window_id": "MainWindow",
+      "type": "Kline" | "Heatmap" | "ShaderHeatmap" | "TimeAndSales" | "Ladder" | "Starter",
+      "ticker": "BinanceLinear:BTCUSDT" | null,
+      "timeframe": "M1" | ... | "D1" | null,
+      "link_group": "A" | null
+    }
+  ]
+}
+```
+
+### 11.4 エラーレスポンス
+
+```json
+{"error": "Not Found"}
+{"error": "Bad Request"}
+{"error": "Bad Request: invalid JSON body"}
+{"error": "invalid axis: <value> (expected Vertical or Horizontal)"}
+{"error": "pane not found: <uuid>"}
+{"error": "App channel closed"}
+{"error": "No response from app"}
+{"error": "failed to serialize pane list"}
+```
+
+### 11.5 アーキテクチャ
 
 ```
-┌────────────────────┐       mpsc::channel        ┌───────────────────┐
-│  HTTP Server       │  ───(ReplayCommand)───►     │  iced app         │
-│  (tokio task)      │                             │  subscription()   │
-│  127.0.0.1:9876    │  ◄───(ReplayStatus)────     │  update()         │
-│                    │       oneshot::channel       │                   │
-└────────────────────┘                             └───────────────────┘
+┌────────────────────┐   mpsc (ApiMessage)   ┌───────────────────┐
+│  HTTP Server       │  ─────────────────►  │  iced app         │
+│  (tokio::spawn)    │                       │  subscription()   │
+│  127.0.0.1:9876    │  ◄─────────────────  │  update()         │
+│                    │   oneshot<String>     │                   │
+└────────────────────┘                       └───────────────────┘
 ```
 
-**データフロー**:
-1. HTTP リクエスト受信 → `ReplayCommand` を mpsc sender で送信 + oneshot で応答待ち
-2. iced `subscription()` で mpsc receiver を `Stream` として購読 → `Message::ReplayApi(cmd, reply_tx)` に変換
-3. `update()` で `ReplayApi` を処理 → 既存の `ReplayMessage` と同等の状態変更を実行
-4. 結果を `oneshot` で HTTP ハンドラに返送 → JSON レスポンス
+1. HTTP リクエスト到着 → `parse_request` → `route(method, path, body)` → `ApiCommand`
+2. `mpsc::send((cmd, ReplySender::new(reply_tx)))` で iced 側へ投入
+3. iced `Message::ReplayApi((cmd, reply_tx))` ハンドラが:
+   - `ApiCommand::Replay(cmd)` → `self.update(Message::Replay(...))` に委譲 + `to_status()` JSON 応答
+   - `ApiCommand::Pane(cmd)` → `handle_pane_api(cmd)` → `(json, task)` 応答
+4. `reply_tx.send(json)` → HTTP ハンドラが `write_response(200, json)` で返送
 
-### 9.4 実装ステップ
+**ReplySender の Clone 戦略**: iced の `Message: Clone` 制約のため、`oneshot::Sender` を `Arc<Mutex<Option<Sender>>>` でラップし、`take()` で一度だけ送信する（二重送信防止）。
 
-| Step | 内容 | ファイル | 状態 |
-|------|------|---------|------|
-| 5-1 | `ReplayCommand`（9 バリアント、SaveState 含む）, `ReplayStatus` 型定義 | `src/replay.rs` | ✅ |
-| 5-2 | `ReplayState` に status 取得メソッド追加（`to_status()` メソッド） | `src/replay.rs` | ✅ |
-| 5-3 | HTTP サーバー本体（`tokio::net::TcpListener` + 手動 HTTP パース） | `src/replay_api.rs`（新規）| ✅ |
-| 5-4 | `Message::ReplayApi` バリアント追加 | `src/main.rs` | ✅ |
-| 5-5 | `subscription()` に API サーバーの `Subscription` を追加（`exchange::connect::channel` パターン利用） | `src/main.rs` | ✅ |
-| 5-6 | `update()` に `ReplayApi` ハンドラ追加 → 既存 ReplayMessage へ委譲 + oneshot で応答 | `src/main.rs` | ✅ |
-
-### 9.5 設計判断
-
-- **HTTP サーバーライブラリ**: `tokio::net::TcpListener` + 手動パースを推奨。外部依存を増やさず、tokio は既に利用可能。リクエスト数が少ないので手動パースで十分。`tiny_http` でも可（Cargo.toml に追加が必要）
-- **Subscription パターン**: `exchange::connect::channel()` (`exchange/src/connect.rs:111-122`) を再利用。mpsc channel で外部 → iced のメッセージ送信を実現
-- **応答方式**: `tokio::sync::oneshot` で同期的にレスポンスを返す。update() 内で状態変更後に reply_tx.send() する
-- **ポート**: デフォルト `9876`。環境変数 `FLOWSURFACE_API_PORT` でオーバーライド可能にする
-- **セキュリティ**: `127.0.0.1` のみバインド。外部アクセス不可
-
-### 9.6 検証手順
+### 11.6 利用例
 
 ```bash
-# 1. アプリ起動
-cargo run --release
-
-# 2. ステータス確認
+# モード確認
 curl http://127.0.0.1:9876/api/replay/status
 
-# 3. REPLAY モードに切替
+# Replay に切替
 curl -X POST http://127.0.0.1:9876/api/replay/toggle
 
-# 4. 再生開始
+# 再生開始
 curl -X POST http://127.0.0.1:9876/api/replay/play \
-  -d '{"start":"2026-04-10 00:00","end":"2026-04-10 01:00"}'
+  -d '{"start":"2026-04-01 09:00","end":"2026-04-01 15:00"}'
 
-# 5. ステータス確認（current_time が進行していること）
-curl http://127.0.0.1:9876/api/replay/status
-
-# 6. 一時停止
+# 一時停止
 curl -X POST http://127.0.0.1:9876/api/replay/pause
 
-# 7. 早送り
-curl -X POST http://127.0.0.1:9876/api/replay/step-forward
+# ペイン一覧
+curl http://127.0.0.1:9876/api/pane/list
 
-# 8. 巻き戻し
-curl -X POST http://127.0.0.1:9876/api/replay/step-backward
+# ペインを分割
+curl -X POST http://127.0.0.1:9876/api/pane/split \
+  -d '{"pane_id":"<uuid>","axis":"Vertical"}'
 
-# 9. 速度切替
-curl -X POST http://127.0.0.1:9876/api/replay/speed
+# ティッカーを差し替え（mid-replay 可）
+curl -X POST http://127.0.0.1:9876/api/pane/set-ticker \
+  -d '{"pane_id":"<uuid>","ticker":"BinanceLinear:ETHUSDT"}'
 
-# 10. LIVE 復帰
-curl -X POST http://127.0.0.1:9876/api/replay/toggle
+# 状態をディスクに保存
+curl -X POST http://127.0.0.1:9876/api/app/save
 ```
 
-**Phase 5 実装メモ (2026-04-11)**:
-- `ReplayCommand`（9 バリアント: GetStatus, Toggle, Play, Pause, Resume, StepForward, StepBackward, CycleSpeed, SaveState）+ `ReplayStatus`（serde::Serialize 付き JSON レスポンス型、`range_start`/`range_end` フィールド含む）を `src/replay.rs` に追加
-- `ReplayState::to_status()` で現在の状態を API レスポンス用 struct に変換
-- `src/replay_api.rs` 新規作成: `tokio::net::TcpListener` + 手動 HTTP パース。`exchange::connect::channel()` パターンで `mpsc` ストリームを返す
-- iced の `Message` は `Clone` が必要なため、`oneshot::Sender` を `Arc<Mutex<Option<oneshot::Sender>>>` でラップした `ReplySender` 型を導入
-- `Message::ReplayApi` ハンドラは `self.update(Message::Replay(...))` を再帰呼び出しして既存ロジックに委譲
-- `Subscription::run(replay_api::subscription)` でログイン画面中も含め常時 API サーバーを起動
-- 依存追加: `tokio` (net, io-util, sync) + `futures` を `Cargo.toml` に追加（tokio は iced 経由で利用可能だが直接参照が必要）
-- エラーハンドリング: `route()` を `Result<ReplayCommand, RouteError>` に変更し、パス不一致(404) と不正 JSON(400) を区別
-- 既存テスト 16 件全てパス
-- E2E テスト全 18 ケースパス（正常系 15 + エラー系 3）:
-  - `GET /status` → `{"mode":"Live"}` ✅
-  - `POST /toggle` → Live↔Replay 切替 ✅
-  - `POST /play` (JSON body) → Loading 状態に遷移 ✅
-  - `POST /pause` → Paused ✅
-  - `POST /resume` → Playing 再開 ✅
-  - `POST /step-forward` → current_time +60s ✅
-  - `POST /step-backward` → current_time -60s (start にクランプ) ✅
-  - `POST /speed` x4 → 1x→2x→5x→10x→1x サイクル ✅
-  - `POST /toggle` → Live 復帰 ✅
-  - 存在しないパス → 404 `{"error":"Not Found"}` ✅
-  - 不正 JSON body → 400 `{"error":"Bad Request: invalid JSON body"}` ✅
-  - フィールド不足 JSON → 400 `{"error":"Bad Request: invalid JSON body"}` ✅
+---
 
-### 9.7 参照すべき既存コード
+## 12. 定数と設計不変条件
 
-| 参照先 | 内容 |
-|--------|------|
-| `exchange/src/connect.rs:111-122` | `channel()` ヘルパー — mpsc + tokio::spawn で Stream を作る再利用パターン |
-| `exchange/src/adapter/binance.rs:356-422` | `channel()` の実用例（WS接続 → Event ストリーム） |
-| `src/main.rs` の `subscription()` | 複数 Subscription の `batch` 結合パターン |
-| `src/main.rs` の `Message::Replay` ハンドラ | 各 ReplayMessage の処理ロジック（そのまま委譲可能） |
-| `src/replay.rs` | ReplayState / PlaybackState / ReplayMessage / ReplayCommand / ReplayStatus の全型定義 |
-| `src/replay_api.rs` | HTTP サーバー本体、ReplySender、ルーティング（`/api/replay/*` + `/api/app/save`） |
+### 12.1 定数一覧
 
-### 9.8 設計上の知見・Tips
+| 定数 | 値 | 定義箇所 | 意味 |
+|---|---|---|---|
+| `SPEEDS` | `[1.0, 2.0, 5.0, 10.0]` | [src/replay/mod.rs](../src/replay/mod.rs) | 再生速度テーブル |
+| `BASE_STEP_DELAY_MS` | `1_000` | [src/replay/clock.rs](../src/replay/clock.rs) | 1x speed での wall delay (ms/bar) |
+| `PRE_START_HISTORY_BARS` | `300` | [src/replay/mod.rs](../src/replay/mod.rs) | リプレイ開始前のコンテキスト用 kline 本数 |
+| API port (default) | `9876` | [src/replay_api.rs](../src/replay_api.rs) | `FLOWSURFACE_API_PORT` で上書き |
+| HTTP buffer size | `8192` | [src/replay_api.rs](../src/replay_api.rs) | リクエスト読み取りバッファ |
+| mpsc channel bound | `32` | [src/replay_api.rs](../src/replay_api.rs) | API → iced キュー |
 
-- **iced の `Message: Clone` 制約**: `tokio::sync::oneshot::Sender` は `Clone` を実装しないため、`Arc<Mutex<Option<Sender>>>` でラップする `ReplySender` パターンが必要。`take()` で一度だけ送信し、Clone された複製からの二重送信を防ぐ
-- **`self.update()` 再帰呼び出し**: `Message::ReplayApi` ハンドラから `self.update(Message::Replay(...))` を呼ぶことで、既存の全 ReplayMessage ロジックをそのまま委譲できる。新しい ReplayMessage が追加されても API 側の変更は最小限
-- **HTTP パースの簡易実装**: `\r\n\r\n` でヘッダー/ボディを分割する最小限のパーサーで十分。keep-alive は不要（`Connection: close`）
-- **`Subscription::run` vs `Subscription::run_with`**: 引数なしのストリーム生成には `run`、設定値を渡す場合は `run_with` を使う。API サーバーは設定不要なので `run` を使用
+### 12.2 時間範囲
+
+- **Kline フェッチ範囲**: `(start_ms - PRE_START_HISTORY_BARS * step_size_ms, end_ms)` = `(start_ms - 300 * tf_ms, end_ms)` — リプレイ開始前のコンテキストも 300 本含める
+- **EventStore クエリ範囲**: 全て **半開区間** `[start, end)` — `time >= start && time < end`
+- **StepClock の emit 範囲**: `[prev_now_ms, new_now_ms)` — 1 ステップで `step_size_ms` 進む
+
+### 12.3 設計上の不変条件
+
+| # | 不変条件 | 破壊したときの症状 |
+|:-:|---|---|
+| 1 | `dispatch_tick` は `EventStore` に書き込まない。読み取り専用 | 同一スライスが二重 dispatch される、またはデータが消える |
+| 2 | `klines_in` / `trades_in` は半開区間 `[start, end)` で返す | 境界 kline が重複挿入されるか、スキップされる |
+| 3 | `KlinesLoadCompleted` 受信時は必ず `event_store.ingest_loaded` の後に `ingest_replay_klines` を呼ぶ | チャートに kline が届かない（EventStore にはあるが UI に反映されない）|
+| 4 | `reset_for_seek()` は StepBackward と ticker/timeframe 変更時に必ず呼ぶ | 古い kline が残ったまま新データが重なる |
+| 5 | `pending_auto_play` は永続化しない。`toggle_mode()` の Replay→Live 経路でも必ずリセットする | Live に切り替えた後でも auto-play が残留し、次回 ResolveStreams で誤発火する |
+| 6 | `resolve_streams()` で dashboard の借用を解放した後に `all_panes_have_ready_streams()` を呼ぶ | Rust borrow checker エラー（&mut self と &self の競合）|
+
+### 12.4 時刻の取扱い
+
+- 全レイヤーで **Unix ms (`u64`)** を使用
+- 表示変換のみ `data::UserTimezone::format_with_kind(ms: i64, TimeLabelKind)` を使う
+- 入力パースは UTC として解釈 (`NaiveDateTime::parse_from_str` + `and_utc().timestamp_millis()`)
+
+---
+
+## 13. スコープ外・既知の制限
+
+### 13.1 スコープ外
+
+| 項目 | 理由 |
+|---|---|
+| Depth（板情報）のリプレイ | 取引所 API で過去スナップショット取得不可 |
+| Comparison ペインのリプレイ | 複数銘柄同期フェッチが必要 |
+| Layout 切替中のリプレイ | `active_dashboard()` が変わる動作が未定義 |
+| インジケータ再計算 | まずは Kline + Trades に集中 |
+| リプレイデータのローカルキャッシュ | 毎回 API 取得 |
+| 日時ピッカー UI | 現状はテキスト入力 |
+| Tachibana の M1 / 時間足 | API 非対応 |
+| Trades の EventStore 統合（R4） | 現在 Trades は旧 fetch_batched 経路のまま（将来対応）|
+| auto-play の無効化設定 | 「Replay 構成で保存＝次回も再生する」が現仕様。設定化は将来課題 |
+
+### 13.2 既知の制限
+
+| # | 制限 | 影響 |
+|---|---|---|
+| 1 | Trades の EventStore 未統合 | `trade_events` は現時点では空。kline のみ dispatch される |
+| 2 | fetch タスクの abort 経路不在 | バックフィル中にペインを削除しても fetch タスクは自然完了まで稼働 |
+| 3 | Binance 以外の trades 未対応 | Bybit / Hyperliquid / OKX / MEXC / Tachibana では Kline のみの再生 |
+
+---
+
+## 14. 実装ファイルマップ
+
+### 14.1 主要ファイル
+
+| ファイル | 責務 |
+|---|---|
+| [src/replay/mod.rs](../src/replay/mod.rs) | `ReplayState` / `ReplayMessage` / `ReplayMode` / `ReplayStatus` / `parse_replay_range` / `format_current_time` / `SPEEDS` / `pending_auto_play` 管理 |
+| [src/replay/clock.rs](../src/replay/clock.rs) | `StepClock` / `ClockStatus` / `play` / `pause` / `seek` / `tick` / `set_waiting` / `resume_from_waiting` / `BASE_STEP_DELAY_MS` |
+| [src/replay/store.rs](../src/replay/store.rs) | `EventStore` / `LoadedData` / `ingest_loaded` / `is_loaded` / `klines_in` / `trades_in` |
+| [src/replay/controller.rs](../src/replay/controller.rs) | `ReplayController` / `TickOutcome` / `handle_message` / `tick` — `ReplayMessage` ハンドラと Tick ループを main.rs から分離 |
+| [src/replay/dispatcher.rs](../src/replay/dispatcher.rs) | `dispatch_tick` / `DispatchResult` |
+| [src/replay/loader.rs](../src/replay/loader.rs) | `load_klines` / `KlineLoadResult` / `fetch_all_klines` |
+| [src/replay_api.rs](../src/replay_api.rs) | HTTP サーバー (`tokio::net::TcpListener` + 手動パース) / `ApiCommand` / `PaneCommand` / `ReplySender` / ルーティング |
+| [src/main.rs](../src/main.rs) | `Flowsurface` への `replay` フィールド、起動時 `pending_auto_play` 初期化、`Message::Replay` / `Message::ReplayApi` ハンドラ、auto-play ゲート（`ResolveStreams` + `Tick`）、`view_replay_header()`、`subscription()`、`handle_pane_api()` |
+| [src/screen/dashboard.rs](../src/screen/dashboard.rs) | `prepare_replay()` / `rebuild_for_live()` / `collect_trade_streams()` / `ingest_replay_klines()` / `ingest_trades()` / `all_panes_have_ready_streams()` |
+| [src/screen/dashboard/pane.rs](../src/screen/dashboard/pane.rs) | `rebuild_content_for_replay()` / `rebuild_content_for_live()` / `ingest_replay_klines()` / `reset_for_seek()` / `insert_hist_klines()` / Heatmap の Depth unavailable オーバーレイ |
+| [src/chart/kline.rs](../src/chart/kline.rs) | `ingest_historical_klines()` / `reset_for_seek()` |
+| [src/connector/fetcher.rs](../src/connector/fetcher.rs) | Tachibana D1 range フィルタ分岐 |
+
+### 14.2 テスト
+
+- `src/replay/mod.rs`: `parse_replay_range` / `to_status` / `pending_auto_play` / `toggle_mode` リセット等
+- `src/replay/store.rs`: `ingest_loaded` / `is_loaded` / `klines_in` / `trades_in` 動作検証
+- `src/replay/clock.rs`: `ClockStatus` 遷移 / `tick` ステップ計算 / `seek` スナップ
+- `src/replay/dispatcher.rs`: `dispatch_tick` のスライス抽出 / Waiting 検出 / 終端判定
+- `src/replay/loader.rs`: `EventStore` 直接操作で loader 動作を検証
+- `src/chart/kline.rs`: `ingest_historical_klines` / `reset_for_seek`
+- `src/screen/dashboard.rs`: `all_panes_have_ready_streams` の true/false 条件
+- `src/replay_api.rs`: ルーター/パーサーテスト
+- E2E テスト: `tests/` ディレクトリ配下、HTTP API 経由でシナリオ検証
+
+`cargo test --bin flowsurface` で全件実行する。
+
+---
+
+## 15. 付録: 実装履歴と設計判断
+
+### 15.1 実装フェーズ
+
+| Phase | 内容 | 参照 |
+|---|---|---|
+| Phase 1 | ヘッダーバー UI（見た目のみ）| 本書 §3 |
+| Phase 2 | リプレイデータのプリフェッチ | 本書 §6.1 |
+| Phase 3 | リプレイ再生エンジン (Tick + 段階挿入) | 本書 §7 |
+| Phase 4 | ライブ復帰・巻き戻し・速度切替 | 本書 §7.2 |
+| Phase 5 | ローカル HTTP 制御 API | 本書 §11 |
+| Phase 6 | 統一 Tick ハンドラ（D1 分岐撤廃） | [docs/plan/archive/replay_unified_step.md](plan/archive/replay_unified_step.md) |
+| Phase 7 | mid-replay ペイン操作許容 | 本書 §8 |
+| Phase 8 | レビュー駆動の設計不整合修正 | 本書 §12.3 (旧) |
+| Tachibana Phase 1〜3 | 立花証券 D1 対応 | [docs/tachibana_spec.md §8](tachibana_spec.md) / [docs/plan/archive/tachibana_replay.md](plan/archive/tachibana_replay.md) |
+| **R3: アーキテクチャ刷新** | `PlaybackState` / `FireStatus` / `process_tick` / `ReplayKlineBuffer` / `TradeBuffer` を全廃し、`StepClock` + `EventStore` + `dispatch_tick` に置き換え | [docs/plan/replay_redesign.md](plan/replay_redesign.md) |
+| **Fixture 直接起動** | `pending_auto_play` / `all_panes_have_ready_streams` を追加し、`saved-state.json` の replay 構成で自動 Play | [docs/plan/replay_fixture_direct_boot.md](plan/replay_fixture_direct_boot.md) |
+
+### 15.2 R3 刷新の設計判断
+
+#### 15.2.1 旧アーキテクチャの問題点
+
+Phase 8 までの実装（`process_tick` + `COARSE_CUTOFF_MS` 境界 + `FireStatus` + buffer ベース）は動作したが、以下の構造的問題を抱えていた:
+
+1. **`FireStatus` の 3 状態管理**: `None(buffer末尾)` と `None(バックフィル中)` を区別するために enum が必要で、全 chart を走査するたびに `min` 計算が複雑化した
+2. **`TradeBuffer` の cursor ベース管理**: `advance_cursor_to` / `drain_until` の cursor 不変条件が壊れると trades が重複 or 欠損し、デバッグが困難だった
+3. **`SyncReplayBuffers` の 2 系統 chain**: streams 変更を確実に追従させるため、`Message::Dashboard` 末尾と `Message::Sidebar::TickerSelected` の両方に chain が必要で、追加を忘れると silent バグになった
+4. **`is_replay_mode()` ガード**: 遅延完了したライブフェッチが `replay_kline_buffer` を上書きするのを防ぐガードが必要で、デッドロックのトリップワイヤーだった
+
+#### 15.2.2 R3 の設計方針
+
+- **EventStore**: データを「ロード済み範囲」として蓄積し、クエリは純粋な範囲検索。cursor 管理ゼロ
+- **StepClock**: 離散バーステップモデル。`tick(wall_now)` を呼ぶと発火タイミングかどうかを判定し、発火した場合のみ emit 範囲を返す。連続時刻補間なし
+- **dispatch_tick**: ステートレスなロジック。Tick ごとに「今の step 範囲」のスライスを EventStore から取得するだけ
+- **Waiting 状態**: データ未ロード時は `dispatch_tick` がクロックを自動 Waiting に遷移し、ロード完了で `resume_from_waiting` により自動再開
+
+#### 15.2.3 廃止されたコンポーネント
+
+| 廃止コンポーネント | 代替 |
+|---|---|
+| `PlaybackState` | `StepClock` + `EventStore` + `active_streams` |
+| `FireStatus` enum | `dispatch_tick` の戻り値 `reached_end: bool` |
+| `process_tick` | `dispatch_tick` (ステートレス) |
+| `TradeBuffer` | `EventStore::trades_in` (half-open range query) |
+| `ReplayKlineBuffer` | `KlineChart::ingest_historical_klines` |
+| `enable_replay_mode` / `disable_replay_mode` / `is_replay_mode` | 廃止（モード管理不要）|
+| `replay_advance` | `ingest_historical_klines` で EventStore のスライスを直接渡す |
+| `rebuild_for_step_backward` | `reset_for_seek` + `ingest_historical_klines` に統一 |
+| `VirtualClock` | `StepClock`（離散ステップに特化）|
+
+### 15.3 Fixture 直接起動の設計判断
+
+以前の E2E テストは「Live fixture で起動 → 15s 待機 → `POST /api/replay/toggle` → `POST /api/replay/play`」という 4 ステップを強制されていた。これを `saved-state.json` に replay 構成を含めた fixture を置くだけで自動再生できるように改修した。
+
+**方針選定**: `ReplayState` に `pending_auto_play` フラグを transient フィールドとして追加し、全ペインが `Ready` になった瞬間に `ReplayMessage::Play` を dispatch する。既存の `prepare_replay()` / `start()` / kline load パスを一切変更しないため、UI でのPlay操作と完全等価な経路を通る。詳細は [docs/plan/replay_fixture_direct_boot.md](plan/replay_fixture_direct_boot.md) を参照。

@@ -53,6 +53,11 @@ pub enum Effect {
     RequestFetch(Vec<FetchSpec>),
     SwitchTickersInGroup(TickerInfo),
     FocusWidget(iced::widget::Id),
+    /// リプレイ中に kline stream の basis が変わったとき、コントローラに再ロードを依頼する。
+    ReloadReplayKlines {
+        old_stream: Option<StreamKind>,
+        new_stream: StreamKind,
+    },
 }
 
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -429,27 +434,6 @@ impl State {
         self.rebuild_content(false);
     }
 
-    /// StepBackward 用: チャートをリビルドしつつ kline バッファを保持する。
-    pub fn rebuild_content_for_step_backward(&mut self) {
-        // バッファを退避
-        let saved_buf = match &mut self.content {
-            Content::Kline { chart, .. } => {
-                chart.as_mut().and_then(|c| c.replay_kline_buffer.take())
-            }
-            _ => None,
-        };
-
-        self.rebuild_content(true);
-
-        // バッファを復元（cursor=0 にリセット）
-        if let (Content::Kline { chart, .. }, Some(mut buf)) = (&mut self.content, saved_buf) {
-            if let Some(c) = chart.as_mut() {
-                buf.cursor = 0;
-                c.replay_kline_buffer = Some(buf);
-            }
-        }
-    }
-
     fn rebuild_content(&mut self, replay_mode: bool) {
         // ticker_info を先に取得してからコンテンツを変更する（借用競合を回避）
         let ticker_info = self.stream_pair();
@@ -468,7 +452,7 @@ impl State {
                     let basis = c.basis();
                     let saved_indicators = indicators.clone();
 
-                    let mut new_chart = KlineChart::new(
+                    let new_chart = KlineChart::new(
                         saved_layout.clone(),
                         basis,
                         step,
@@ -478,9 +462,8 @@ impl State {
                         ti,
                         &saved_kind,
                     );
-                    if replay_mode {
-                        new_chart.enable_replay_mode();
-                    }
+                    let mut new_chart = new_chart;
+                    new_chart.set_replay_mode(replay_mode);
                     *chart = Some(new_chart);
                     *layout = saved_layout;
                     *kind = saved_kind;
@@ -1470,12 +1453,32 @@ impl State {
                                                         });
                                                     }
 
+                                                    // リプレイ中は旧 kline stream を保存してから更新する
+                                                    let old_kline_stream = self
+                                                        .streams
+                                                        .ready_iter()
+                                                        .and_then(|mut it| {
+                                                            it.find(|s| {
+                                                                matches!(
+                                                                    s,
+                                                                    StreamKind::Kline { .. }
+                                                                )
+                                                            })
+                                                        })
+                                                        .copied();
+
                                                     self.streams = ResolvedStream::Ready(streams);
                                                     let action = c.set_basis(new_basis);
 
-                                                    if let Some(chart::Action::RequestFetch(
-                                                        fetch,
-                                                    )) = action
+                                                    if c.is_replay_mode() {
+                                                        // リプレイ中: コントローラに再ロードを依頼
+                                                        effect = Some(Effect::ReloadReplayKlines {
+                                                            old_stream: old_kline_stream,
+                                                            new_stream: kline_stream,
+                                                        });
+                                                    } else if let Some(
+                                                        chart::Action::RequestFetch(fetch),
+                                                    ) = action
                                                     {
                                                         effect = Some(Effect::RequestFetch(fetch));
                                                     }
@@ -1860,12 +1863,20 @@ impl State {
         }
     }
 
-    /// リプレイ進行: kline バッファから current_time 以下のデータを挿入する
-    pub fn replay_advance_klines(&mut self, current_time: u64) {
-        if let Content::Kline { chart, .. } = &mut self.content {
-            if let Some(c) = chart {
-                c.replay_advance(current_time);
-            }
+    /// リプレイ用: EventStore から得た klines をこのペインの kline chart に注入する。
+    pub fn ingest_replay_klines(&mut self, klines: &[Kline]) {
+        if let Content::Kline { chart: Some(c), .. } = &mut self.content {
+            c.set_replay_mode(true);
+            c.ingest_historical_klines(klines);
+        }
+    }
+
+    /// リプレイ seek 時: kline chart のデータをリセットする。
+    /// replay_mode=true を保持することで fetch_missing_data の live fetch を抑制する。
+    pub fn reset_for_seek(&mut self) {
+        if let Content::Kline { chart: Some(c), .. } = &mut self.content {
+            c.set_replay_mode(true);
+            c.reset_for_seek();
         }
     }
 

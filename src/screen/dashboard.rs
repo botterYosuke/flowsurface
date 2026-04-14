@@ -89,6 +89,11 @@ pub enum Event {
         streams: Vec<PersistStreamKind>,
     },
     RequestPalette,
+    /// リプレイ中に kline stream の basis が変わったとき、コントローラに再ロードを依頼する。
+    ReloadReplayKlines {
+        old_stream: Option<StreamKind>,
+        new_stream: StreamKind,
+    },
 }
 
 impl Dashboard {
@@ -398,6 +403,18 @@ impl Dashboard {
                             pane::Effect::FocusWidget(id) => {
                                 return (iced::widget::operation::focus(id), None);
                             }
+                            pane::Effect::ReloadReplayKlines {
+                                old_stream,
+                                new_stream,
+                            } => {
+                                return (
+                                    Task::none(),
+                                    Some(Event::ReloadReplayKlines {
+                                        old_stream,
+                                        new_stream,
+                                    }),
+                                );
+                            }
                         };
                         return (task, None);
                     }
@@ -577,7 +594,7 @@ impl Dashboard {
             .map(|(_, _, state)| state)
     }
 
-    fn iter_all_panes(
+    pub fn iter_all_panes(
         &self,
         main_window: window::Id,
     ) -> impl Iterator<Item = (window::Id, pane_grid::Pane, &pane::State)> {
@@ -589,7 +606,49 @@ impl Dashboard {
             }))
     }
 
-    fn iter_all_panes_mut(
+    /// 全ペインの streams が解決済み（Ready）かどうかを返す。
+    /// `Waiting { streams: [] }` のペインは stream 未設定として Ready 扱いにする。
+    pub fn all_panes_have_ready_streams(&self, main_window: window::Id) -> bool {
+        self.iter_all_panes(main_window)
+            .all(|(_, _, state)| match &state.streams {
+                ResolvedStream::Waiting { streams, .. } => streams.is_empty(),
+                ResolvedStream::Ready(_) => true,
+            })
+    }
+
+    /// いずれかのペインが Tachibana 取引所の Waiting ストリームを持つかを返す。
+    /// `SessionRestoreResult(None)` 時に auto-play を破棄するかどうかを判断するために使う。
+    pub fn has_tachibana_stream_pane(&self, main_window: window::Id) -> bool {
+        self.iter_all_panes(main_window).any(|(_, _, state)| {
+            if let ResolvedStream::Waiting { streams, .. } = &state.streams {
+                streams.iter().any(|s| {
+                    let ticker = match s {
+                        PersistStreamKind::Kline { ticker, .. } => ticker,
+                        PersistStreamKind::Depth(d) => &d.ticker,
+                        PersistStreamKind::Trades { ticker } => ticker,
+                        PersistStreamKind::DepthAndTrades(d) => &d.ticker,
+                    };
+                    ticker.exchange == exchange::adapter::Exchange::Tachibana
+                })
+            } else {
+                false
+            }
+        })
+    }
+
+    /// metadata 到着時など、Waiting ペインの stream 解決を即時トリガするために
+    /// 各ペインの last_attempt をリセットする。
+    pub fn refresh_waiting_panes(&mut self, main_window: window::Id) {
+        for (_, _, state) in self.iter_all_panes_mut(main_window) {
+            if let ResolvedStream::Waiting { streams, .. } = &state.streams
+                && !streams.is_empty()
+            {
+                state.streams.mark_resolution_due();
+            }
+        }
+    }
+
+    pub fn iter_all_panes_mut(
         &mut self,
         main_window: window::Id,
     ) -> impl Iterator<Item = (window::Id, pane_grid::Pane, &mut pane::State)> {
@@ -1038,9 +1097,7 @@ impl Dashboard {
             .for_each(|(_, _, pane_state)| {
                 // 完全一致 または 同一 ticker_info を持つペインにマッチ
                 let matched = pane_state.matches_stream(stream)
-                    || pane_state
-                        .stream_pair()
-                        .map_or(false, |ti| ti == trade_ticker);
+                    || (pane_state.stream_pair() == Some(trade_ticker));
                 if matched {
                     match &mut pane_state.content {
                         pane::Content::Heatmap { chart, .. } => {
@@ -1083,20 +1140,23 @@ impl Dashboard {
         }
     }
 
-    /// リプレイ進行: 全ペインの kline バッファから current_time 以下のデータを挿入する
-    /// StepBackward 用: 全ペインのチャートをリビルドしつつ kline バッファを保持する。
-    pub fn rebuild_for_step_backward(&mut self, main_window: window::Id) {
-        self.iter_all_panes_mut(main_window)
-            .for_each(|(_, _, state)| {
-                state.rebuild_content_for_step_backward();
-            });
-    }
-
-    pub fn replay_advance_klines(&mut self, current_time: u64, main_window: window::Id) {
-        self.iter_all_panes_mut(main_window)
-            .for_each(|(_, _, state)| {
-                state.replay_advance_klines(current_time);
-            });
+    /// リプレイ用: dispatch_tick から得た klines を対応するペインに注入する。
+    /// stream の ticker_info でペインを照合して注入する。
+    pub fn ingest_replay_klines(
+        &mut self,
+        stream: &exchange::adapter::StreamKind,
+        klines: &[Kline],
+        main_window: window::Id,
+    ) {
+        for (_, _, state) in self.iter_all_panes_mut(main_window) {
+            let has_stream = state
+                .streams
+                .ready_iter()
+                .is_some_and(|mut iter| iter.any(|s| s == stream));
+            if has_stream {
+                state.ingest_replay_klines(klines);
+            }
+        }
     }
 
     pub fn invalidate_all_panes(&mut self, main_window: window::Id) {
@@ -1312,6 +1372,21 @@ impl Dashboard {
         kline_targets
     }
 
+    /// StepBackward 用: kline 収集をせずチャートデータのみクリアする。
+    pub fn clear_chart_for_replay(&mut self, main_window: window::Id) {
+        for (_, _, state) in self.iter_all_panes_mut(main_window) {
+            state.rebuild_content_for_replay();
+        }
+    }
+
+    /// StepBackward/StepForward seek 用: ビューポートを保持したままデータのみリセットする。
+    /// `clear_chart_for_replay` と異なり KlineChart を再構築しないため、チラつきが発生しない。
+    pub fn reset_charts_for_seek(&mut self, main_window: window::Id) {
+        for (_, _, state) in self.iter_all_panes_mut(main_window) {
+            state.reset_for_seek();
+        }
+    }
+
     /// Replay→Live 切替時にペインの content をリビルドする（replay_kline_buffer を無効化）。
     pub fn rebuild_for_live(&mut self, main_window: window::Id) {
         for (_, _, state) in self.iter_all_panes_mut(main_window) {
@@ -1370,5 +1445,110 @@ impl From<fetcher::FetchUpdate> for Message {
                 Message::ErrorOccurred(Some(pane_id), DashboardError::Fetch(error))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use iced::window;
+
+    #[test]
+    fn all_panes_have_ready_streams_true_for_default_dashboard() {
+        let dashboard = Dashboard::default();
+        let main_window = window::Id::unique();
+        // Default panes have Waiting { streams: [] } — treated as Ready
+        assert!(dashboard.all_panes_have_ready_streams(main_window));
+    }
+
+    #[test]
+    fn all_panes_have_ready_streams_false_when_pane_has_non_empty_waiting_streams() {
+        use data::stream::PersistStreamKind;
+        let main_window = window::Id::unique();
+        let mut dashboard = Dashboard::default();
+        // Grab first pane and set its streams to a non-empty Waiting
+        let pane = *dashboard.panes.iter().next().map(|(p, _)| p).unwrap();
+        let state = dashboard.panes.get_mut(pane).unwrap();
+        // Use a placeholder PersistStreamKind — just needs to be non-empty
+        state.streams = ResolvedStream::waiting(vec![PersistStreamKind::Kline {
+            ticker: exchange::Ticker::new("BTCUSDT", exchange::adapter::Exchange::BinanceLinear),
+            timeframe: exchange::Timeframe::M1,
+        }]);
+        assert!(!dashboard.all_panes_have_ready_streams(main_window));
+    }
+
+    #[test]
+    fn refresh_waiting_panes_marks_resolution_due_for_waiting_panes() {
+        use data::stream::PersistStreamKind;
+        use std::time::{Duration, Instant};
+
+        let main_window = window::Id::unique();
+        let mut dashboard = Dashboard::default();
+
+        // Set the first pane to Waiting with a non-empty stream list and recent last_attempt
+        let pane = *dashboard.panes.iter().next().map(|(p, _)| p).unwrap();
+        let state = dashboard.panes.get_mut(pane).unwrap();
+        state.streams = ResolvedStream::waiting(vec![PersistStreamKind::Kline {
+            ticker: exchange::Ticker::new("BTCUSDT", exchange::adapter::Exchange::BinanceLinear),
+            timeframe: exchange::Timeframe::M1,
+        }]);
+        // Simulate a recent attempt so due_streams_to_resolve would normally return None
+        if let ResolvedStream::Waiting { last_attempt, .. } = &mut state.streams {
+            *last_attempt = Some(Instant::now() - Duration::from_millis(100));
+        }
+
+        // Before: due_streams_to_resolve returns None (retry interval not elapsed)
+        assert!(
+            state
+                .streams
+                .due_streams_to_resolve(Instant::now())
+                .is_none()
+        );
+
+        // Call refresh_waiting_panes
+        dashboard.refresh_waiting_panes(main_window);
+
+        // After: due_streams_to_resolve returns Some (forced due)
+        let pane_state = dashboard.panes.get_mut(pane).unwrap();
+        assert!(
+            pane_state
+                .streams
+                .due_streams_to_resolve(Instant::now())
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn has_tachibana_stream_pane_returns_true_for_tachibana_ticker() {
+        use data::stream::PersistStreamKind;
+        use exchange::adapter::Exchange;
+
+        let main_window = window::Id::unique();
+        let mut dashboard = Dashboard::default();
+
+        let pane = *dashboard.panes.iter().next().map(|(p, _)| p).unwrap();
+        let state = dashboard.panes.get_mut(pane).unwrap();
+        state.streams = ResolvedStream::waiting(vec![PersistStreamKind::Kline {
+            ticker: exchange::Ticker::new("7203", Exchange::Tachibana),
+            timeframe: exchange::Timeframe::D1,
+        }]);
+
+        assert!(dashboard.has_tachibana_stream_pane(main_window));
+    }
+
+    #[test]
+    fn has_tachibana_stream_pane_returns_false_for_binance_ticker() {
+        let main_window = window::Id::unique();
+        let dashboard = Dashboard::default();
+        // Default dashboard has no streams
+        assert!(!dashboard.has_tachibana_stream_pane(main_window));
+    }
+
+    // compile-time: clear_chart_for_replay returns (), not Vec<...>
+    fn _type_check_clear_chart_for_replay_returns_unit(
+        d: &mut super::Dashboard,
+        id: iced::window::Id,
+    ) {
+        let _: () = d.clear_chart_for_replay(id);
     }
 }

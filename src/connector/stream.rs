@@ -82,6 +82,12 @@ impl ResolvedStream {
         }
     }
 
+    pub fn mark_resolution_due(&mut self) {
+        if let ResolvedStream::Waiting { last_attempt, .. } = self {
+            *last_attempt = None;
+        }
+    }
+
     pub fn into_waiting(self) -> Vec<PersistStreamKind> {
         match self {
             ResolvedStream::Waiting { streams, .. } => streams,
@@ -89,5 +95,35 @@ impl ResolvedStream {
                 streams.into_iter().map(PersistStreamKind::from).collect()
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mark_resolution_due_forces_immediate_resolve() {
+        use data::stream::PersistStreamKind;
+        use std::time::{Duration, Instant};
+
+        let streams = vec![PersistStreamKind::Kline {
+            ticker: exchange::Ticker::new("BTCUSDT", exchange::adapter::Exchange::BinanceLinear),
+            timeframe: exchange::Timeframe::M1,
+        }];
+        let mut resolved = ResolvedStream::waiting(streams);
+
+        // Simulate that we already tried 0.1s ago (not yet due for retry)
+        let recent_time = Instant::now() - Duration::from_millis(100);
+        if let ResolvedStream::Waiting { last_attempt, .. } = &mut resolved {
+            *last_attempt = Some(recent_time);
+        }
+
+        // Without mark_resolution_due, due_streams_to_resolve returns None
+        assert!(resolved.due_streams_to_resolve(Instant::now()).is_none());
+
+        // After mark_resolution_due, it returns Some immediately
+        resolved.mark_resolution_due();
+        assert!(resolved.due_streams_to_resolve(Instant::now()).is_some());
     }
 }

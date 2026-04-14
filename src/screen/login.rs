@@ -127,6 +127,20 @@ pub fn tachibana_error_message(code: &str) -> &'static str {
 
 impl LoginScreen {
     pub fn new() -> Self {
+        // ↓↓↓ DEV AUTO-LOGIN: 環境変数 DEV_USER_ID / DEV_PASSWORD が設定されている場合のみ有効 ↓↓↓
+        #[cfg(debug_assertions)]
+        if let (Ok(user_id), Ok(password)) =
+            (std::env::var("DEV_USER_ID"), std::env::var("DEV_PASSWORD"))
+        {
+            let is_demo = std::env::var("DEV_IS_DEMO").is_ok_and(|v| v == "true");
+            return Self {
+                user_id,
+                password,
+                is_demo,
+                error: None,
+            };
+        }
+        // ↑↑↑ DEV AUTO-LOGIN ↑↑↑
         Self {
             user_id: String::new(),
             password: String::new(),

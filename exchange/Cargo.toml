@@ -37,4 +37,6 @@ urlencoding = "2"
 
 [dev-dependencies]
 mockito = "1.5"
+rstest.workspace = true
 tokio = { version = "1.43", features = ["rt", "macros", "rt-multi-thread"] }
+
