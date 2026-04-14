@@ -49,6 +49,15 @@ cargo build --features e2e-mock
 | `tdd-workflow` | 新機能実装、バグ修正、リファクタリング | `/tdd-workflow` |
 | `e2e-testing` | E2E テスト作成・実行（HTTP API ポート 9876 経由） | `/e2e-testing` |
 
+## コーディングルール
+
+実装は `.claude/rules/rust/` のルールに従ってください：
+
+- **[coding-style.md](.claude/rules/rust/coding-style.md)**: フォーマット・命名・借用・エラーハンドリング
+- **[patterns.md](.claude/rules/rust/patterns.md)**: Repository/Service/Newtype/Builder/State Machine パターン
+- **[security.md](.claude/rules/rust/security.md)**: シークレット管理・unsafe の扱い・依存関係監査
+- **[testing.md](.claude/rules/rust/testing.md)**: テスト構成・カバレッジ 80%+ 目標
+
 ## 作業依頼の必須フォーマット
 
 計画書を `docs/plan` に作成し、進捗があり次第更新してください。完了項目には ✅ を付けてください。

@@ -1,4 +1,27 @@
 {
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cargo fmt 2>/dev/null || true",
+            "if": "Edit(*.rs)|Write(*.rs)",
+            "statusMessage": "Formatting Rust...",
+            "async": true
+          },
+          {
+            "type": "command",
+            "command": "cargo check 2>/dev/null || true",
+            "if": "Edit(*.rs)|Write(*.rs)|Edit(*Cargo.toml)|Write(*Cargo.toml)",
+            "statusMessage": "Checking compilation...",
+            "async": true
+          }
+        ]
+      }
+    ]
+  },
   "permissions": {
     "allow": [
       "Bash(tasklist)",
