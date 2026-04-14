@@ -593,6 +593,12 @@ impl Flowsurface {
 
                             Task::none()
                         }
+                        Some(dashboard::Event::ReloadReplayKlines { old_stream, new_stream }) => {
+                            Task::done(Message::Replay(ReplayMessage::ReloadKlineStream {
+                                old_stream,
+                                new_stream,
+                            }))
+                        }
                         None => Task::none(),
                     };
 

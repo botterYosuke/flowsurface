@@ -442,6 +442,11 @@ impl KlineChart {
         self.fetching_trades = (false, None);
     }
 
+    /// リプレイモードかどうかを返す。
+    pub fn is_replay_mode(&self) -> bool {
+        self.replay_mode
+    }
+
     /// リプレイモードを設定する。true の場合 fetch_missing_data は live fetch を行わない。
     pub fn set_replay_mode(&mut self, enabled: bool) {
         self.replay_mode = enabled;

@@ -89,6 +89,11 @@ pub enum Event {
         streams: Vec<PersistStreamKind>,
     },
     RequestPalette,
+    /// リプレイ中に kline stream の basis が変わったとき、コントローラに再ロードを依頼する。
+    ReloadReplayKlines {
+        old_stream: Option<StreamKind>,
+        new_stream: StreamKind,
+    },
 }
 
 impl Dashboard {
@@ -397,6 +402,12 @@ impl Dashboard {
                             }
                             pane::Effect::FocusWidget(id) => {
                                 return (iced::widget::operation::focus(id), None);
+                            }
+                            pane::Effect::ReloadReplayKlines { old_stream, new_stream } => {
+                                return (
+                                    Task::none(),
+                                    Some(Event::ReloadReplayKlines { old_stream, new_stream }),
+                                );
                             }
                         };
                         return (task, None);

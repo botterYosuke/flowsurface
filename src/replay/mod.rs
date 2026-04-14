@@ -145,6 +145,11 @@ pub enum ReplayMessage {
     DataLoadFailed(String),
     /// mid-replay stream 同期
     SyncReplayBuffers,
+    /// リプレイ中に kline の timeframe が変わったとき、新 stream を再ロードする。
+    ReloadKlineStream {
+        old_stream: Option<StreamKind>,
+        new_stream: StreamKind,
+    },
 }
 
 impl Default for ReplayState {

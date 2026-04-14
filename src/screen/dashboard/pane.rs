@@ -53,6 +53,11 @@ pub enum Effect {
     RequestFetch(Vec<FetchSpec>),
     SwitchTickersInGroup(TickerInfo),
     FocusWidget(iced::widget::Id),
+    /// リプレイ中に kline stream の basis が変わったとき、コントローラに再ロードを依頼する。
+    ReloadReplayKlines {
+        old_stream: Option<StreamKind>,
+        new_stream: StreamKind,
+    },
 }
 
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -1448,13 +1453,27 @@ impl State {
                                                         });
                                                     }
 
+                                                    // リプレイ中は旧 kline stream を保存してから更新する
+                                                    let old_kline_stream = self
+                                                        .streams
+                                                        .ready_iter()
+                                                        .and_then(|mut it| {
+                                                            it.find(|s| {
+                                                                matches!(s, StreamKind::Kline { .. })
+                                                            })
+                                                        })
+                                                        .copied();
+
                                                     self.streams = ResolvedStream::Ready(streams);
                                                     let action = c.set_basis(new_basis);
 
-                                                    if let Some(chart::Action::RequestFetch(
-                                                        fetch,
-                                                    )) = action
-                                                    {
+                                                    if c.is_replay_mode() {
+                                                        // リプレイ中: コントローラに再ロードを依頼
+                                                        effect = Some(Effect::ReloadReplayKlines {
+                                                            old_stream: old_kline_stream,
+                                                            new_stream: kline_stream,
+                                                        });
+                                                    } else if let Some(chart::Action::RequestFetch(fetch)) = action {
                                                         effect = Some(Effect::RequestFetch(fetch));
                                                     }
                                                 }

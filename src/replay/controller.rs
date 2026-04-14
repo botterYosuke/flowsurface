@@ -265,6 +265,39 @@ impl ReplayController {
                 }
                 (Task::none(), None)
             }
+
+            ReplayMessage::ReloadKlineStream { old_stream, new_stream } => {
+                let Some(clock) = &mut self.state.clock else {
+                    return (Task::none(), None);
+                };
+
+                // 旧 stream を active_streams から除去し、新 stream を登録
+                if let Some(old) = old_stream {
+                    self.state.active_streams.remove(&old);
+                }
+                self.state.active_streams.insert(new_stream);
+
+                // step_size を新 active_streams の最小 timeframe に更新
+                let step_size_ms = min_timeframe_ms(&self.state.active_streams);
+                let start_ms = clock.full_range().start;
+                let end_ms = clock.full_range().end;
+
+                // クロックをリセットして先頭に戻し、データロード待ちへ
+                clock.set_step_size(step_size_ms);
+                clock.seek(start_ms);
+                clock.set_waiting();
+
+                // 新 stream の klines を再ロード
+                let range = super::compute_load_range(start_ms, end_ms, step_size_ms);
+                let task = Task::perform(
+                    loader::load_klines(new_stream, range),
+                    |result| match result {
+                        Ok(r) => ReplayMessage::KlinesLoadCompleted(r.stream, r.range, r.klines),
+                        Err(e) => ReplayMessage::DataLoadFailed(e),
+                    },
+                );
+                (task, None)
+            }
         }
     }
 
