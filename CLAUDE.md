@@ -1,0 +1,55 @@
+# flowsurface — CLAUDE.md
+
+## プロジェクト概要
+
+flowsurface は Rust 製デスクトップアプリで、暗号資産マーケットのチャートプラットフォームです。
+`iced` GUI フレームワークを使用し、リアルタイムデータの表示・リプレイ機能を提供します。
+
+## 技術スタック
+
+- **言語**: Rust（TypeScript / JavaScript は一切使用していない）
+- **GUI**: `iced` 0.14.x
+- **ビルド**: `cargo`
+- **主要クレート**: `iced`, `tokio`, `thiserror`, `serde`
+- **プラットフォーム**: Windows 11
+
+## 開発コマンド一覧
+
+```bash
+# ビルド
+cargo build
+
+# テスト
+cargo test
+
+# Lint（警告をエラーとして扱う）
+cargo clippy -- -D warnings
+
+# フォーマット
+cargo fmt
+
+# フォーマットチェック（修正なし）
+cargo fmt --check
+
+# コンパイル確認（高速）
+cargo check
+
+# E2E テスト用ビルド
+cargo build --features e2e-mock
+```
+
+## スキルの使い方ガイド
+
+| スキル | いつ使うか | 呼び出し方 |
+| :--- | :--- | :--- |
+| `verification-loop` | PR 作成前、機能実装後、リファクタリング後 | `/verification-loop` |
+| `strategic-compact` | 長いセッション（フェーズ切り替え時）、デバッグ完了後 | `/compact` を手動実行 |
+| `agent-introspection-debugging` | エージェントがループ・失敗を繰り返すとき | 明示的に呼び出し |
+| `coding-standards` | コードレビュー、新モジュール追加時、規約確認時 | `/coding-standards` |
+| `tdd-workflow` | 新機能実装、バグ修正、リファクタリング | `/tdd-workflow` |
+| `e2e-testing` | E2E テスト作成・実行（HTTP API ポート 9876 経由） | `/e2e-testing` |
+
+## 作業依頼の必須フォーマット
+
+計画書を `docs/plan` に作成し、進捗があり次第更新してください。完了項目には ✅ を付けてください。
+TDD アプローチ：`.claude/skills/tdd-workflow/SKILL.md` で実装してください。
