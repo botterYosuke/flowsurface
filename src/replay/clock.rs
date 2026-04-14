@@ -25,6 +25,9 @@ pub struct StepClock {
     status: ClockStatus,
     /// リプレイ範囲 (Unix ms)
     range: Range<u64>,
+    /// true のとき、終端到達時に range.start へシークしてから停止する。
+    /// Playing 中に StepForward が押されたとき設定される。一度発火したら false に戻す。
+    seek_to_start_on_end: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,6 +49,7 @@ impl StepClock {
             speed: 1.0,
             status: ClockStatus::Paused,
             range: start_ms..end_ms,
+            seek_to_start_on_end: false,
         }
     }
 
@@ -65,6 +69,26 @@ impl StepClock {
         self.range.clone()
     }
 
+    /// range.end を step 分延長する。
+    /// Playing 中に StepForward が押されたとき使用する。
+    pub fn extend_range_end(&mut self, step: u64) {
+        self.range.end = self.range.end.saturating_add(step);
+    }
+
+    /// range.end を step 分縮小する（range.start より小さくはならない）。
+    /// Playing 中に StepBackward が押されたとき使用する。
+    /// 縮小後の新しい range.end を返す。
+    pub fn shrink_range_end(&mut self, step: u64) -> u64 {
+        let new_end = self.range.end.saturating_sub(step).max(self.range.start);
+        self.range.end = new_end;
+        new_end
+    }
+
+    /// true のとき、終端到達時に range.start へシークしてから停止する。
+    pub fn set_seek_to_start_on_end(&mut self, v: bool) {
+        self.seek_to_start_on_end = v;
+    }
+
     /// Playing に遷移する。次のステップは wall_now + step_delay 後に発火する。
     pub fn play(&mut self, wall_now: Instant) {
         self.status = ClockStatus::Playing;
@@ -73,9 +97,12 @@ impl StepClock {
     }
 
     /// Paused に遷移する。
+    /// `seek_to_start_on_end` フラグも同時にクリアする（StepBackward や明示的 Pause で
+    /// 保留中の「終端到達 → start へ戻す」動作をキャンセルするため）。
     pub fn pause(&mut self) {
         self.status = ClockStatus::Paused;
         self.next_step_at = None;
+        self.seek_to_start_on_end = false;
     }
 
     /// now_ms を指定値に設定する（step forward/back で使用）。
@@ -176,6 +203,10 @@ impl StepClock {
             next_step += Duration::from_millis(step_delay_ms);
 
             if self.now_ms >= self.range.end {
+                if self.seek_to_start_on_end {
+                    self.now_ms = self.range.start;
+                    self.seek_to_start_on_end = false;
+                }
                 self.status = ClockStatus::Paused;
                 self.next_step_at = None;
                 break;
@@ -488,6 +519,281 @@ mod tests {
         clock.set_waiting();
         clock.resume_from_waiting(t(base, 2_000));
         assert_eq!(clock.status(), ClockStatus::Playing);
+    }
+
+    // ── extend_range_end ──────────────────────────────────────────────────────
+
+    #[test]
+    fn extend_range_end_increases_range_end() {
+        let mut clock = StepClock::new(0, 1_000, 1_000);
+        clock.extend_range_end(1_000);
+        assert_eq!(clock.full_range().end, 2_000);
+    }
+
+    #[test]
+    fn extend_range_end_multiple_calls_accumulate() {
+        let mut clock = StepClock::new(0, 1_000, 1_000);
+        clock.extend_range_end(500);
+        clock.extend_range_end(500);
+        assert_eq!(clock.full_range().end, 2_000);
+    }
+
+    #[test]
+    fn extend_range_end_does_not_affect_playing_status() {
+        let mut clock = StepClock::new(0, 1_000_000, 60_000);
+        let base = Instant::now();
+        clock.play(base);
+        clock.extend_range_end(60_000);
+        assert_eq!(clock.status(), ClockStatus::Playing);
+    }
+
+    #[test]
+    fn extend_range_end_play_continues_past_original_end() {
+        // original end = 2_000, extended to 3_000
+        // 2nd tick (now = 2_000) must still be Playing — old boundary no longer applies
+        let mut clock = StepClock::new(0, 2_000, 1_000);
+        let base = Instant::now();
+        clock.play(base);
+        clock.extend_range_end(1_000); // new end = 3_000
+
+        clock.tick(t(base, 100)); // step 1: now = 1_000
+        clock.tick(t(base, 200)); // step 2: now = 2_000 (old end, not new)
+        assert_eq!(clock.status(), ClockStatus::Playing);
+        assert_eq!(clock.now_ms(), 2_000);
+    }
+
+    #[test]
+    fn extend_range_end_clock_pauses_at_new_end() {
+        // extended end = 3_000 → clock must pause at 3_000, not 2_000
+        let mut clock = StepClock::new(0, 2_000, 1_000);
+        let base = Instant::now();
+        clock.play(base);
+        clock.extend_range_end(1_000); // new end = 3_000
+
+        clock.tick(t(base, 10_000)); // catch-up: crosses 3_000
+        assert_eq!(clock.now_ms(), 3_000);
+        assert_eq!(clock.status(), ClockStatus::Paused);
+    }
+
+    // ── shrink_range_end ──────────────────────────────────────────────────────
+
+    #[test]
+    fn shrink_range_end_decreases_range_end() {
+        let mut clock = StepClock::new(0, 5_000, 1_000);
+        clock.shrink_range_end(1_000);
+        assert_eq!(clock.full_range().end, 4_000);
+    }
+
+    #[test]
+    fn shrink_range_end_returns_new_end_value() {
+        let mut clock = StepClock::new(0, 5_000, 1_000);
+        let new_end = clock.shrink_range_end(1_000);
+        assert_eq!(new_end, 4_000);
+    }
+
+    #[test]
+    fn shrink_range_end_clamps_to_range_start() {
+        let mut clock = StepClock::new(1_000, 5_000, 1_000);
+        let new_end = clock.shrink_range_end(10_000); // far more than available
+        assert_eq!(new_end, 1_000);
+        assert_eq!(clock.full_range().end, 1_000);
+    }
+
+    #[test]
+    fn shrink_range_end_exact_step_reduces_to_start() {
+        let mut clock = StepClock::new(0, 1_000, 1_000);
+        let new_end = clock.shrink_range_end(1_000); // end - step == start
+        assert_eq!(new_end, 0);
+        assert_eq!(clock.full_range().end, 0);
+    }
+
+    #[test]
+    fn shrink_range_end_when_end_equals_start_returns_start() {
+        let mut clock = StepClock::new(1_000, 1_000, 1_000); // degenerate: end == start
+        let new_end = clock.shrink_range_end(500);
+        assert_eq!(new_end, 1_000); // clamped to start
+        assert_eq!(clock.full_range().end, 1_000);
+    }
+
+    #[test]
+    fn shrink_range_end_does_not_go_below_zero_for_zero_start() {
+        let mut clock = StepClock::new(0, 500, 1_000);
+        let new_end = clock.shrink_range_end(1_000); // would underflow without saturating_sub
+        assert_eq!(new_end, 0);
+    }
+
+    // ── seek_to_start_on_end ─────────────────────────────────────────────────
+
+    #[test]
+    fn seek_to_start_on_end_resets_now_ms_to_range_start() {
+        let mut clock = StepClock::new(0, 2_000, 1_000);
+        clock.set_seek_to_start_on_end(true);
+        let base = Instant::now();
+        clock.play(base);
+
+        clock.tick(t(base, 10_000)); // catch-up → reaches 2_000 → reset to 0
+        assert_eq!(clock.now_ms(), 0);
+    }
+
+    #[test]
+    fn seek_to_start_on_end_pauses_clock_after_reset() {
+        let mut clock = StepClock::new(0, 2_000, 1_000);
+        clock.set_seek_to_start_on_end(true);
+        let base = Instant::now();
+        clock.play(base);
+
+        clock.tick(t(base, 10_000));
+        assert_eq!(clock.status(), ClockStatus::Paused);
+    }
+
+    #[test]
+    fn seek_to_start_on_end_with_nonzero_range_start() {
+        // range.start が 0 以外でも range.start に戻ること
+        let mut clock = StepClock::new(500_000, 502_000, 1_000);
+        clock.set_seek_to_start_on_end(true);
+        let base = Instant::now();
+        clock.play(base);
+
+        clock.tick(t(base, 10_000));
+        assert_eq!(clock.now_ms(), 500_000); // range.start
+        assert_eq!(clock.status(), ClockStatus::Paused);
+    }
+
+    #[test]
+    fn seek_to_start_on_end_flag_cleared_after_firing() {
+        // 発火後フラグはリセットされる → 再 play で終端到達時に range.start に戻らない
+        let mut clock = StepClock::new(0, 2_000, 1_000);
+        clock.set_seek_to_start_on_end(true);
+        let base = Instant::now();
+        clock.play(base);
+        clock.tick(t(base, 10_000)); // fires: now_ms = 0, Paused
+
+        // 再 play → 終端到達
+        clock.play(base);
+        clock.tick(t(base, 10_000));
+        // フラグが消えているので now_ms = range.end (2_000)、range.start(0) に戻らない
+        assert_eq!(clock.now_ms(), 2_000);
+    }
+
+    #[test]
+    fn seek_to_start_on_end_false_keeps_now_ms_at_range_end() {
+        // デフォルト (false): 終端到達で range.end に留まって停止
+        let mut clock = StepClock::new(0, 2_000, 1_000);
+        let base = Instant::now();
+        clock.play(base);
+
+        clock.tick(t(base, 10_000));
+        assert_eq!(clock.now_ms(), 2_000);
+        assert_eq!(clock.status(), ClockStatus::Paused);
+    }
+
+    #[test]
+    fn seek_to_start_on_end_subsequent_ticks_return_empty_after_reset() {
+        // リセット後は Paused なので tick は空レンジを返す
+        let mut clock = StepClock::new(0, 1_000, 1_000);
+        clock.set_seek_to_start_on_end(true);
+        let base = Instant::now();
+        clock.play(base);
+        clock.tick(t(base, 10_000)); // fires: reset to 0
+
+        let range = clock.tick(t(base, 20_000)); // Paused → empty
+        assert!(range.is_empty());
+        assert_eq!(clock.now_ms(), 0);
+    }
+
+    // ── extend + seek_to_start_on_end の組み合わせ（Playing StepForward シナリオ）──
+
+    #[test]
+    fn extend_then_seek_to_start_plays_through_extended_range_then_resets() {
+        // range: 0..2_000. extend → 0..3_000. play through 3_000 → reset to 0.
+        let mut clock = StepClock::new(0, 2_000, 1_000);
+        let base = Instant::now();
+        clock.play(base);
+
+        clock.extend_range_end(1_000); // new end = 3_000
+        clock.set_seek_to_start_on_end(true);
+
+        clock.tick(t(base, 200)); // 2 steps: now = 2_000 — still Playing
+        assert_eq!(clock.status(), ClockStatus::Playing);
+        assert_eq!(clock.now_ms(), 2_000);
+
+        clock.tick(t(base, 10_000)); // reaches 3_000 → seek to start
+        assert_eq!(clock.now_ms(), 0);
+        assert_eq!(clock.status(), ClockStatus::Paused);
+    }
+
+    #[test]
+    fn extend_multiple_steps_then_seek_to_start_plays_all_extended_bars() {
+        // 3 回 StepForward → extend by 3 steps → seek_to_start_on_end
+        let mut clock = StepClock::new(0, 1_000, 1_000);
+        let base = Instant::now();
+        clock.play(base);
+
+        clock.extend_range_end(1_000); // 2_000
+        clock.extend_range_end(1_000); // 3_000
+        clock.extend_range_end(1_000); // 4_000
+        clock.set_seek_to_start_on_end(true);
+
+        clock.tick(t(base, 300)); // 3 steps: now = 3_000 — not yet at 4_000
+        assert_eq!(clock.status(), ClockStatus::Playing);
+
+        clock.tick(t(base, 10_000)); // reaches 4_000 → reset
+        assert_eq!(clock.now_ms(), 0);
+        assert_eq!(clock.status(), ClockStatus::Paused);
+    }
+
+    // ── pause() が seek_to_start_on_end フラグをクリアする ────────────────────
+
+    #[test]
+    fn pause_clears_seek_to_start_on_end_flag() {
+        // StepForward(Playing) → StepBackward(Playing=pause) → Resume のシナリオ
+        // pause() でフラグがクリアされ、Resume 後の終端到達でリセットされない
+        let mut clock = StepClock::new(0, 5_000, 1_000);
+        let base = Instant::now();
+        clock.play(base);
+        clock.extend_range_end(1_000); // new end = 6_000
+        clock.set_seek_to_start_on_end(true);
+
+        // StepBackward が pause() を呼ぶ
+        clock.pause();
+
+        // Resume
+        clock.play(base);
+        clock.tick(t(base, 10_000)); // reaches 6_000
+
+        // フラグがクリアされていれば now_ms = 6_000、残っていれば 0（誤動作）
+        assert_eq!(
+            clock.now_ms(),
+            6_000,
+            "pause() must clear seek_to_start_on_end to prevent stale reset"
+        );
+        assert_eq!(clock.status(), ClockStatus::Paused);
+    }
+
+    #[test]
+    fn pause_after_set_flag_then_replay_stays_at_range_end() {
+        // フラグ設定後 Pause → 再 Play → 終端で停止（range.start に戻らない）
+        let mut clock = StepClock::new(0, 2_000, 1_000);
+        let base = Instant::now();
+        clock.play(base);
+        clock.set_seek_to_start_on_end(true);
+        clock.pause(); // clears the flag
+
+        clock.play(base);
+        clock.tick(t(base, 10_000));
+        assert_eq!(clock.now_ms(), 2_000); // stays at end
+    }
+
+    // ── shrink 後の shrink（連打）境界 ─────────────────────────────────────────
+
+    #[test]
+    fn shrink_range_end_repeated_calls_clamp_correctly() {
+        let mut clock = StepClock::new(0, 3_000, 1_000);
+        clock.shrink_range_end(1_000); // → 2_000
+        clock.shrink_range_end(1_000); // → 1_000
+        clock.shrink_range_end(1_000); // → 0 (clamped to start)
+        clock.shrink_range_end(1_000); // → 0 (already at start)
+        assert_eq!(clock.full_range().end, 0);
     }
 
     #[test]

@@ -37,10 +37,14 @@ pub fn dispatch_tick(
     wall_now: Instant,
 ) -> DispatchResult {
     // 1. 全 active_streams の full replay range が loaded か確認
+    // Paused 状態では Waiting に遷移させない — mid-replay で銘柄/timeframe を変更した際に
+    // clock が Paused のまま保たれ、ロード完了後の自動再生 (try_resume_from_waiting) を防ぐ。
     let full_range = clock.full_range();
     for stream in active_streams {
         if !store.is_loaded(stream, full_range.clone()) {
-            clock.set_waiting();
+            if clock.status() == ClockStatus::Playing {
+                clock.set_waiting();
+            }
             return DispatchResult::empty(clock.now_ms());
         }
     }
@@ -54,7 +58,16 @@ pub fn dispatch_tick(
     // 2. clock を 1 ステップ進める
     let range = clock.tick(wall_now);
     if range.is_empty() {
-        return DispatchResult::empty(clock.now_ms());
+        // 通常の空レンジ (start == end): Paused clock や未発火ステップ — reached_end = false
+        // 逆転レンジ (start > end): seek_to_start_on_end 発火時 — clock は Paused になっており
+        //   最終ステップの emit はスキップされるが reached_end = true を伝播して Toast を発行する。
+        let reached_end = range.start > range.end && clock.status() == ClockStatus::Paused;
+        return DispatchResult {
+            current_time: clock.now_ms(),
+            trade_events: vec![],
+            kline_events: vec![],
+            reached_end,
+        };
     }
 
     // 3. イベント抽出

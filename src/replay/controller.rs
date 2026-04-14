@@ -183,13 +183,24 @@ impl ReplayController {
             }
 
             ReplayMessage::StepForward => {
-                // Playing 中は tick が自動で進める — StepForward は Paused 時のみ有効
+                let step_size = min_timeframe_ms(&self.state.active_streams);
+
+                if self.state.is_playing() {
+                    // Playing 中: range.end を 1 bar 延長して再生継続。
+                    // 終端到達時は range.start に戻って停止する。
+                    if let Some(clock) = &mut self.state.clock {
+                        clock.extend_range_end(step_size);
+                        clock.set_seek_to_start_on_end(true);
+                    }
+                    return (Task::none(), None);
+                }
+
+                // Paused 時のみ位置を 1 bar 前進する
                 if !self.state.is_paused() {
                     return (Task::none(), None);
                 }
 
                 let current_time = self.state.current_time();
-                let step_size = min_timeframe_ms(&self.state.active_streams);
                 let new_time = current_time + step_size;
 
                 if let Some(clock) = &mut self.state.clock {
@@ -211,6 +222,25 @@ impl ReplayController {
             }
 
             ReplayMessage::StepBackward => {
+                let step_size = min_timeframe_ms(&self.state.active_streams);
+
+                if self.state.is_playing() {
+                    // Playing 中: range.end を 1 bar 縮小 → 停止 → 新終端位置へシーク
+                    let new_end = if let Some(clock) = &mut self.state.clock {
+                        let new_end = clock.shrink_range_end(step_size);
+                        clock.pause();
+                        clock.seek(new_end);
+                        new_end
+                    } else {
+                        return (Task::none(), None);
+                    };
+
+                    dashboard.reset_charts_for_seek(main_window_id);
+                    self.inject_klines_up_to(new_end, dashboard, main_window_id);
+                    return (Task::none(), None);
+                }
+
+                // Paused 時: 1 bar 前の位置へシーク
                 let current_time = self.state.current_time();
 
                 // 全アクティブ stream の前の kline 時刻の最大値
@@ -273,6 +303,11 @@ impl ReplayController {
                     return (Task::none(), None);
                 };
 
+                // 再生中なら明示的に一時停止する。
+                // Waiting 遷移は行わず Paused のまま保持することで、ロード完了後に
+                // try_resume_from_waiting が自動再生するのを防ぐ。
+                clock.pause();
+
                 // 旧 stream を active_streams から除去し、新 stream を登録
                 if let Some(old) = old_stream {
                     self.state.active_streams.remove(&old);
@@ -284,10 +319,12 @@ impl ReplayController {
                 let start_ms = clock.full_range().start;
                 let end_ms = clock.full_range().end;
 
-                // クロックをリセットして先頭に戻し、データロード待ちへ
+                // クロックを先頭にリセット（Paused 状態を維持）
                 clock.set_step_size(step_size_ms);
                 clock.seek(start_ms);
-                clock.set_waiting();
+
+                // チャートの表示をクリアして新しいデータ受信に備える
+                dashboard.reset_charts_for_seek(main_window_id);
 
                 // 新 stream の klines を再ロード
                 let range = super::compute_load_range(start_ms, end_ms, step_size_ms);
