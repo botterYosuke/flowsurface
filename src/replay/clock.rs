@@ -2,7 +2,10 @@ use std::ops::Range;
 use std::time::{Duration, Instant};
 
 /// 1x speed での wall delay (ms/bar)
-pub const BASE_STEP_DELAY_MS: u64 = 1_000;
+pub const BASE_STEP_DELAY_MS: u64 = 100;
+
+/// 瞬間再生速度（for ループそのまま、1 tick で range.end まで完走）。
+pub const SPEED_INSTANT: f32 = f32::INFINITY;
 
 /// バーステップ離散クロック。
 /// `tick()` を各フレームで呼び、発火タイミングなら 1 ステップ進めて emit range を返す。
@@ -137,9 +140,21 @@ impl StepClock {
     /// 各フレームで呼ぶ。
     /// 発火タイミングなら 1 ステップ（または catch-up で複数ステップ）進めて emit range を返す。
     /// Playing 以外、または発火タイミング未到達の場合は空 range を返す。
+    /// `SPEED_INSTANT` 時は 1 tick で `range.end` まで一気に完走し Paused に遷移する。
     pub fn tick(&mut self, wall_now: Instant) -> Range<u64> {
         if self.status != ClockStatus::Playing {
             return self.now_ms..self.now_ms;
+        }
+
+        let step_delay_ms = self.step_delay_ms();
+
+        // Instant mode (SPEED_INSTANT): wall 時刻によらず 1 tick で range.end へ
+        if step_delay_ms == 0 {
+            let prev = self.now_ms;
+            self.now_ms = self.range.end;
+            self.status = ClockStatus::Paused;
+            self.next_step_at = None;
+            return prev..self.now_ms;
         }
 
         let mut next_step = self.next_step_at.expect("Playing without next_step_at");
@@ -148,7 +163,6 @@ impl StepClock {
             return self.now_ms..self.now_ms;
         }
 
-        let step_delay_ms = self.step_delay_ms();
         let prev = self.now_ms;
 
         // Catch-up ループ: 溜まったステップをまとめて emit
@@ -219,8 +233,8 @@ mod tests {
         let base = Instant::now();
         clock.play(base);
 
-        // 999ms 後はまだ発火しない（delay = 1000ms）
-        let range = clock.tick(t(base, 999));
+        // 99ms 後はまだ発火しない（delay = 100ms）
+        let range = clock.tick(t(base, 99));
         assert!(range.is_empty());
         assert_eq!(clock.now_ms(), 0);
     }
@@ -231,8 +245,8 @@ mod tests {
         let base = Instant::now();
         clock.play(base);
 
-        // 1000ms 後に発火（1x speed = 1000ms/step）
-        let range = clock.tick(t(base, 1_000));
+        // 100ms 後に発火（1x speed = 100ms/step）
+        let range = clock.tick(t(base, 100));
         assert!(!range.is_empty());
         assert_eq!(range.start, 0);
         assert_eq!(range.end, 60_000);
@@ -246,8 +260,8 @@ mod tests {
         clock.play(base);
 
         // 2 ステップ発火: 0 → 60_000 → 120_000
-        clock.tick(t(base, 1_000)); // 1st step
-        clock.tick(t(base, 2_000)); // 2nd step
+        clock.tick(t(base, 100)); // 1st step
+        clock.tick(t(base, 200)); // 2nd step
         assert_eq!(clock.now_ms(), 120_000);
     }
 
@@ -260,9 +274,9 @@ mod tests {
         let base = Instant::now();
         clock.play(base);
 
-        // 2x speed → delay = 500ms/step
-        let range = clock.tick(t(base, 500));
-        assert!(!range.is_empty(), "2x speed should fire at 500ms");
+        // 2x speed → delay = 50ms/step
+        let range = clock.tick(t(base, 50));
+        assert!(!range.is_empty(), "2x speed should fire at 50ms");
         assert_eq!(clock.now_ms(), 60_000);
     }
 
@@ -287,8 +301,8 @@ mod tests {
         let base = Instant::now();
         clock.play(base);
 
-        // 3000ms wall → 3 ステップ catch-up: 0 → 1000 → 2000 → 3000
-        let range = clock.tick(t(base, 3_000));
+        // 300ms wall → 3 ステップ catch-up: 0 → 1000 → 2000 → 3000
+        let range = clock.tick(t(base, 300));
         assert_eq!(range.start, 0);
         assert_eq!(range.end, 3_000);
         assert_eq!(clock.now_ms(), 3_000);
@@ -363,7 +377,7 @@ mod tests {
         let mut clock = StepClock::new(0, 1_000_000, 60_000);
         let base = Instant::now();
         clock.play(base);
-        clock.tick(t(base, 3_000)); // 3 steps: 0→60_000→120_000→180_000
+        clock.tick(t(base, 300)); // 3 steps: 0→60_000→120_000→180_000
         assert_eq!(clock.now_ms(), 180_000);
 
         clock.set_step_size(300_000); // 5m
@@ -377,12 +391,56 @@ mod tests {
         let mut clock = StepClock::new(0, 1_000_000, 300_000);
         let base = Instant::now();
         clock.play(base);
-        clock.tick(t(base, 1_000)); // 1 step: 0→300_000
+        clock.tick(t(base, 100)); // 1 step: 0→300_000
         assert_eq!(clock.now_ms(), 300_000);
 
         clock.set_step_size(60_000); // 1m
         // 300_000 は 60_000 の倍数 → 変わらず
         assert_eq!(clock.now_ms(), 300_000);
+    }
+
+    // ── instant speed ────────────────────────────────────────────────────────
+
+    #[test]
+    fn instant_speed_completes_in_one_tick() {
+        let mut clock = StepClock::new(0, 300_000, 60_000);
+        clock.set_speed(SPEED_INSTANT);
+        let base = Instant::now();
+        clock.play(base);
+
+        // wall 時刻によらず 1 tick で完走
+        let range = clock.tick(base);
+        assert_eq!(range.start, 0);
+        assert_eq!(range.end, 300_000);
+        assert_eq!(clock.now_ms(), 300_000);
+        assert_eq!(clock.status(), ClockStatus::Paused);
+    }
+
+    #[test]
+    fn instant_speed_from_mid_range_jumps_to_end() {
+        let mut clock = StepClock::new(0, 300_000, 60_000);
+        clock.seek(120_000);
+        clock.set_speed(SPEED_INSTANT);
+        let base = Instant::now();
+        clock.play(base);
+
+        let range = clock.tick(base);
+        assert_eq!(range.start, 120_000);
+        assert_eq!(range.end, 300_000);
+        assert_eq!(clock.status(), ClockStatus::Paused);
+    }
+
+    #[test]
+    fn after_instant_tick_further_ticks_return_empty() {
+        let mut clock = StepClock::new(0, 100_000, 1_000);
+        clock.set_speed(SPEED_INSTANT);
+        let base = Instant::now();
+        clock.play(base);
+        clock.tick(base); // completes instantly
+
+        let range = clock.tick(t(base, 1_000));
+        assert!(range.is_empty());
+        assert_eq!(clock.now_ms(), 100_000);
     }
 
     // ── waiting ───────────────────────────────────────────────────────────────
@@ -433,7 +491,7 @@ mod tests {
         let mut clock = StepClock::new(0, 100_000, 1_000);
         let base = Instant::now();
         clock.play(base);
-        clock.tick(t(base, 1_000)); // 1st step: now_ms = 1000
+        clock.tick(t(base, 100)); // 1st step: now_ms = 1000
         assert_eq!(clock.now_ms(), 1_000);
 
         clock.set_waiting();
@@ -442,11 +500,11 @@ mod tests {
         let resume_wall = t(base, 6_000);
         clock.resume_from_waiting(resume_wall);
 
-        // resume から 1000ms 後に次のステップが発火するはず
-        let range = clock.tick(t(base, 6_999)); // 999ms 後 → まだ発火しない
+        // resume から 100ms 後に次のステップが発火するはず
+        let range = clock.tick(t(base, 6_099)); // 99ms 後 → まだ発火しない
         assert!(range.is_empty());
 
-        let range = clock.tick(t(base, 7_000)); // 1000ms 後 → 発火
+        let range = clock.tick(t(base, 6_100)); // 100ms 後 → 発火
         assert!(!range.is_empty());
         assert_eq!(clock.now_ms(), 2_000);
     }

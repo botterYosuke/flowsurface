@@ -151,7 +151,8 @@ async fn run_server(mut sender: mpsc::Sender<ApiMessage>) {
         };
 
         // 1 リクエスト / 接続（keep-alive なし）
-        let mut buf = vec![0u8; 8192];
+        // 512KB バッファ: inject-daily-history で多数 kline を送る場合に備えて確保
+        let mut buf = vec![0u8; 524288];
         let n = match stream.read(&mut buf).await {
             Ok(0) => continue,
             Ok(n) => n,

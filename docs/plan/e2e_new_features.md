@@ -1,7 +1,7 @@
 # E2E テスト計画書 — 新機能カバレッジ拡張
 
 **作成日**: 2026-04-14  
-**更新日**: 2026-04-14（S15〜S18 実装・全テスト PASS 確認）  
+**更新日**: 2026-04-14（S19〜S22 TachibanaSpot スイート追加）  
 **対象ブランチ**: `sasa/develop`  
 **テストスキル**: [.claude/skills/e2e-testing/SKILL.md](../../.claude/skills/e2e-testing/SKILL.md)  
 **前提 E2E 計画**: [archive/replay_e2e_test_plan.md](archive/replay_e2e_test_plan.md)（S1–S10, X1–X3 実装済み）
@@ -117,6 +117,10 @@ speed_to_10x() {
 | S16 | `s16_replay_resilience.sh`    | UI操作中の Replay 耐性 | ✅ | ✅ PASS (7/7) |
 | S17 | `s17_error_boundary.sh`       | クラッシュ・エラー境界 | ✅ | ✅ PASS (7/7) |
 | S18 | `s18_endurance.sh`            | 耐久テスト（15〜30 分） | ✅ | ✅ PASS (4/4) |
+| S19 | `s19_tachibana_chart_snapshot.sh` | chart-snapshot API（TachibanaSpot） | ✅ | ✅ PASS (5/5) |
+| S20 | `s20_tachibana_replay_resilience.sh` | UI操作耐性（TachibanaSpot） | ✅ | ✅ PASS (7/7) |
+| S21 | `s21_tachibana_error_boundary.sh` | エラー境界（TachibanaSpot） | ✅ | ✅ PASS (7/7) |
+| S22 | `s22_tachibana_endurance.sh` | 耐久テスト（TachibanaSpot、15〜30 分） | ✅ | ✅ PASS (4/4) |
 
 ---
 

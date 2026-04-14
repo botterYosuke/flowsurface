@@ -832,15 +832,31 @@ pub async fn fetch_all_master(
 static ISSUE_MASTER_CACHE: RwLock<Option<Arc<Vec<MasterRecord>>>> = RwLock::new(None);
 
 /// ログイン成功時に呼び出し、銘柄マスタをキャッシュに格納する。
+///
+/// e2e-mock ビルドでは HTTP フェッチを完全にスキップする。
+/// マスタは `/api/test/tachibana/inject-master` API で注入されるため、
+/// 起動時に `https://e2e-mock.invalid/master/` へリクエストしてエラーになることを防ぐ。
 pub async fn init_issue_master(
     client: &reqwest::Client,
     session: &TachibanaSession,
 ) -> Result<(), TachibanaError> {
-    let records = fetch_all_master(client, session).await?;
-    if let Ok(mut guard) = ISSUE_MASTER_CACHE.write() {
-        *guard = Some(Arc::new(records));
+    #[cfg(feature = "e2e-mock")]
+    {
+        let _ = (client, session);
+        log::info!(
+            "Tachibana [e2e-mock]: skipping master HTTP download \
+             (populate via /api/test/tachibana/inject-master)"
+        );
+        return Ok(());
     }
-    Ok(())
+    #[cfg(not(feature = "e2e-mock"))]
+    {
+        let records = fetch_all_master(client, session).await?;
+        if let Ok(mut guard) = ISSUE_MASTER_CACHE.write() {
+            *guard = Some(Arc::new(records));
+        }
+        Ok(())
+    }
 }
 
 /// キャッシュ済みの銘柄マスタを返す。未取得なら None。
