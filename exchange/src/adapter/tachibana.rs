@@ -686,6 +686,39 @@ impl MasterDownloadRequest {
     }
 }
 
+/// Shift-JIS バイトストリームを `}` (0x7D) で JSON レコードに分割する。
+///
+/// Shift-JIS の2バイト文字はリードバイト (0x81-0x9F, 0xE0-0xEF) の直後に
+/// 0x7D が来ることがある。このトレイルバイトはレコード境界ではなく文字の一部なので
+/// 誤検知を防ぐためリードバイト追跡を行う。
+/// 各エントリには末尾の `}` を含む。末尾に `}` のない残余バイトもそのまま返す。
+#[cfg(test)]
+pub(crate) fn parse_sjis_stream_records(data: &[u8]) -> Vec<Vec<u8>> {
+    let mut records = Vec::new();
+    let mut buf: Vec<u8> = Vec::new();
+    let mut in_multibyte = false;
+
+    for &byte in data {
+        buf.push(byte);
+        if in_multibyte {
+            // Shift-JIS 2バイト文字のトレイルバイト: 次のバイトは通常の1バイトとして扱う
+            in_multibyte = false;
+        } else if matches!(byte, 0x81..=0x9F | 0xE0..=0xEF) {
+            // Shift-JIS リードバイト: 次のバイトはトレイルバイトとして扱う
+            in_multibyte = true;
+        } else if byte == b'}' {
+            records.push(buf.clone());
+            buf.clear();
+        }
+    }
+
+    if !buf.is_empty() {
+        records.push(buf);
+    }
+
+    records
+}
+
 /// MASTER I/F で全マスタを一括ダウンロードする。
 /// CLMEventDownloadComplete を受信するまでストリーミングで読み取り、
 /// CLMIssueMstKabu レコードのみを抽出して返す。
@@ -706,13 +739,25 @@ pub async fn fetch_all_master(
     let mut buf = Vec::new();
     let mut records = Vec::new();
     let mut seen_kabu = false;
+    // Shift-JIS の2バイト文字でトレイルバイトが 0x7D になる場合があるため
+    // リードバイト後の次のバイトをトレイルバイトとして扱うフラグ
+    let mut in_multibyte = false;
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;
         for &byte in chunk.iter() {
             buf.push(byte);
+            if in_multibyte {
+                // Shift-JIS トレイルバイト: レコード境界チェックをスキップ
+                in_multibyte = false;
+                continue;
+            } else if matches!(byte, 0x81..=0x9F | 0xE0..=0xEF) {
+                // Shift-JIS リードバイト: 次のバイトはトレイルバイト
+                in_multibyte = true;
+                continue;
+            }
             if byte == b'}' {
-                // `}` でレコード境界を判定（サンプルコード準拠）
+                // `}` でレコード境界を判定（Shift-JIS 2バイト文字を考慮済み）
                 let (decoded, _, had_errors) = encoding_rs::SHIFT_JIS.decode(&buf);
                 if had_errors {
                     log::warn!(
@@ -3108,5 +3153,69 @@ mod tests {
         };
         let session = TachibanaSession::try_from(response).expect("空 p_errno は成功すべき");
         assert_eq!(session.url_price, "https://p.test/");
+    }
+
+    // ── Cycle XX: Shift-JIS マスタストリーム解析 ─────────────────────────────
+
+    /// ASCII のみの2件レコードが `}` で正しく分割される基本ケース
+    #[test]
+    fn parse_sjis_stream_records_splits_ascii_records_at_brace() {
+        let data = b"abc}def}";
+        let records = parse_sjis_stream_records(data);
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0], b"abc}");
+        assert_eq!(records[1], b"def}");
+    }
+
+    /// Shift-JIS リードバイト (0x81-0x9F 範囲) の直後に来る 0x7D は
+    /// トレイルバイトであり、レコード境界として扱ってはならない。
+    #[test]
+    fn parse_sjis_stream_records_does_not_split_on_sjis_trail_byte_0x7d() {
+        // Shift-JIS 2バイト文字: リードバイト 0x81 + トレイルバイト 0x7D (= ASCII `}`)
+        // このトレイル 0x7D をレコード境界と誤認するバグを再現するテスト。
+        let data: &[u8] = &[b'{', b'"', b'x', b'"', b':', b'"', 0x81, 0x7d, b'"', b'}'];
+        let records = parse_sjis_stream_records(data);
+        assert_eq!(
+            records.len(),
+            1,
+            "Shift-JIS トレイルバイト 0x7D をレコード境界としてはならない; {} 件に分割された",
+            records.len()
+        );
+        assert_eq!(records[0], data);
+    }
+
+    /// リードバイト 0xE0-0xEF 範囲でも同様にトレイル 0x7D を境界扱いしない
+    #[test]
+    fn parse_sjis_stream_records_handles_e0_range_lead_byte() {
+        let data: &[u8] = &[0xE0, 0x7d, b'}'];
+        let records = parse_sjis_stream_records(data);
+        assert_eq!(
+            records.len(),
+            1,
+            "0xE0 リードバイト後の 0x7D も境界外; {} 件に分割された",
+            records.len()
+        );
+    }
+
+    /// Shift-JIS 文字を含む1件目と ASCII のみの2件目が正しく分割される
+    #[test]
+    fn parse_sjis_stream_records_two_records_with_sjis_in_first() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&[b'A', 0x81, 0x7d, b'}']); // 1件目: Shift-JIS 0x81 0x7D を含む
+        data.extend_from_slice(&[b'B', b'}']); // 2件目: ASCII のみ
+        let records = parse_sjis_stream_records(&data);
+        assert_eq!(records.len(), 2, "正確に2件に分割されるべき; {} 件", records.len());
+        assert_eq!(records[0], &[b'A', 0x81, 0x7d, b'}']);
+        assert_eq!(records[1], &[b'B', b'}']);
+    }
+
+    /// 末尾に `}` がない残余データもそのまま返す
+    #[test]
+    fn parse_sjis_stream_records_returns_trailing_incomplete_data() {
+        let data = b"abc}incomplete";
+        let records = parse_sjis_stream_records(data);
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0], b"abc}");
+        assert_eq!(records[1], b"incomplete");
     }
 }

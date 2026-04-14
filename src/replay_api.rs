@@ -263,60 +263,50 @@ fn validate_datetime_str(s: &str) -> Result<(), RouteError> {
 }
 
 /// パスとメソッドから ApiCommand にルーティング
+///
+/// C-3: 以前は `return` を使った 2 つの match ブロックに分かれていた。
+/// 単一の match 式に統合し、複雑な body パースは専用ヘルパー関数に切り出した。
 fn route(method: &str, path: &str, body: &str) -> Result<ApiCommand, RouteError> {
-    // replay / app 系は ReplayCommand にラップ
     match (method, path) {
-        ("GET", "/api/replay/status") => return Ok(ApiCommand::Replay(ReplayCommand::GetStatus)),
-        ("POST", "/api/replay/toggle") => return Ok(ApiCommand::Replay(ReplayCommand::Toggle)),
-        ("POST", "/api/replay/play") => {
-            let parsed: serde_json::Value =
-                serde_json::from_str(body).map_err(|_| RouteError::BadRequest)?;
-            let start = parsed
-                .get("start")
-                .and_then(|v| v.as_str())
-                .ok_or(RouteError::BadRequest)?
-                .to_string();
-            let end = parsed
-                .get("end")
-                .and_then(|v| v.as_str())
-                .ok_or(RouteError::BadRequest)?
-                .to_string();
-            validate_datetime_str(&start)?;
-            validate_datetime_str(&end)?;
-            return Ok(ApiCommand::Replay(ReplayCommand::Play { start, end }));
+        // ── Replay 制御 ────────────────────────────────────────────────────
+        ("GET", "/api/replay/status") => {
+            Ok(ApiCommand::Replay(ReplayCommand::GetStatus))
         }
-        ("POST", "/api/replay/pause") => return Ok(ApiCommand::Replay(ReplayCommand::Pause)),
-        ("POST", "/api/replay/resume") => return Ok(ApiCommand::Replay(ReplayCommand::Resume)),
+        ("POST", "/api/replay/toggle") => {
+            Ok(ApiCommand::Replay(ReplayCommand::Toggle))
+        }
+        ("POST", "/api/replay/play") => parse_play_command(body),
+        ("POST", "/api/replay/pause") => {
+            Ok(ApiCommand::Replay(ReplayCommand::Pause))
+        }
+        ("POST", "/api/replay/resume") => {
+            Ok(ApiCommand::Replay(ReplayCommand::Resume))
+        }
         ("POST", "/api/replay/step-forward") => {
-            return Ok(ApiCommand::Replay(ReplayCommand::StepForward));
+            Ok(ApiCommand::Replay(ReplayCommand::StepForward))
         }
         ("POST", "/api/replay/step-backward") => {
-            return Ok(ApiCommand::Replay(ReplayCommand::StepBackward));
+            Ok(ApiCommand::Replay(ReplayCommand::StepBackward))
         }
         ("POST", "/api/replay/speed") => {
-            return Ok(ApiCommand::Replay(ReplayCommand::CycleSpeed));
+            Ok(ApiCommand::Replay(ReplayCommand::CycleSpeed))
         }
-        ("POST", "/api/app/save") => return Ok(ApiCommand::Replay(ReplayCommand::SaveState)),
-        // auth 系（本番ビルドにも含まれる）
-        ("GET", "/api/auth/tachibana/status") => {
-            return Ok(ApiCommand::Auth(AuthCommand::TachibanaSessionStatus));
-        }
-        _ => {}
-    }
 
-    // pane 系
-    match (method, path) {
-        ("GET", "/api/pane/list") => Ok(ApiCommand::Pane(PaneCommand::ListPanes)),
-        ("POST", "/api/pane/split") => {
-            let pane_id = body_uuid_field(body, "pane_id")?;
-            let axis = body_str_field(body, "axis")?;
-            // axis は "Vertical" または "Horizontal" のみ許可する
-            match axis.as_str() {
-                "Vertical" | "vertical" | "Horizontal" | "horizontal" => {}
-                _ => return Err(RouteError::BadRequest),
-            }
-            Ok(ApiCommand::Pane(PaneCommand::Split { pane_id, axis }))
+        // ── App 制御 ───────────────────────────────────────────────────────
+        ("POST", "/api/app/save") => {
+            Ok(ApiCommand::Replay(ReplayCommand::SaveState))
         }
+
+        // ── 認証（本番ビルドにも含まれる）────────────────────────────────
+        ("GET", "/api/auth/tachibana/status") => {
+            Ok(ApiCommand::Auth(AuthCommand::TachibanaSessionStatus))
+        }
+
+        // ── ペイン CRUD ────────────────────────────────────────────────────
+        ("GET", "/api/pane/list") => {
+            Ok(ApiCommand::Pane(PaneCommand::ListPanes))
+        }
+        ("POST", "/api/pane/split") => parse_split_command(body),
         ("POST", "/api/pane/close") => {
             let pane_id = body_uuid_field(body, "pane_id")?;
             Ok(ApiCommand::Pane(PaneCommand::Close { pane_id }))
@@ -329,61 +319,41 @@ fn route(method: &str, path: &str, body: &str) -> Result<ApiCommand, RouteError>
         ("POST", "/api/pane/set-timeframe") => {
             let pane_id = body_uuid_field(body, "pane_id")?;
             let timeframe = body_str_field(body, "timeframe")?;
-            Ok(ApiCommand::Pane(PaneCommand::SetTimeframe {
-                pane_id,
-                timeframe,
-            }))
+            Ok(ApiCommand::Pane(PaneCommand::SetTimeframe { pane_id, timeframe }))
         }
+
+        // ── その他 ────────────────────────────────────────────────────────
         ("GET", "/api/notification/list") => {
             Ok(ApiCommand::Pane(PaneCommand::ListNotifications))
         }
-        ("POST", "/api/sidebar/select-ticker") => {
-            let pane_id = body_uuid_field(body, "pane_id")?;
-            let ticker = body_str_field(body, "ticker")?;
-            // kind は optional
-            let parsed: serde_json::Value =
-                serde_json::from_str(body).map_err(|_| RouteError::BadRequest)?;
-            let kind = parsed
-                .get("kind")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-            Ok(ApiCommand::Pane(PaneCommand::SidebarSelectTicker {
-                pane_id,
-                ticker,
-                kind,
-            }))
-        }
+        ("POST", "/api/sidebar/select-ticker") => parse_sidebar_select_ticker(body),
+
+        // ── E2E テスト用 (e2e-mock feature のみ) ──────────────────────────
         #[cfg(feature = "e2e-mock")]
         ("POST", "/api/test/tachibana/inject-session") => {
             Ok(ApiCommand::Test(TestCommand::TachibanaInjectSession))
         }
         #[cfg(feature = "e2e-mock")]
         ("POST", "/api/test/tachibana/inject-master") => {
-            // body のフィールド存在だけ先に軽く検証
-            let _: serde_json::Value =
-                serde_json::from_str(body).map_err(|_| RouteError::BadRequest)?;
+            validate_json_body(body)?;
             Ok(ApiCommand::Test(TestCommand::TachibanaInjectMaster {
                 raw_body: body.to_string(),
             }))
         }
         #[cfg(feature = "e2e-mock")]
         ("POST", "/api/test/tachibana/inject-daily-history") => {
-            let _: serde_json::Value =
-                serde_json::from_str(body).map_err(|_| RouteError::BadRequest)?;
+            validate_json_body(body)?;
             Ok(ApiCommand::Test(TestCommand::TachibanaInjectDailyHistory {
                 raw_body: body.to_string(),
             }))
         }
-        // ── Phase T2: inject-market-price ──────────────────────────────────
         #[cfg(feature = "e2e-mock")]
         ("POST", "/api/test/tachibana/inject-market-price") => {
-            let _: serde_json::Value =
-                serde_json::from_str(body).map_err(|_| RouteError::BadRequest)?;
+            validate_json_body(body)?;
             Ok(ApiCommand::Test(TestCommand::TachibanaInjectMarketPrice {
                 raw_body: body.to_string(),
             }))
         }
-        // ── Phase T3: keyring 永続化テスト ─────────────────────────────────
         #[cfg(feature = "e2e-mock")]
         ("POST", "/api/test/tachibana/persist-session") => {
             Ok(ApiCommand::Test(TestCommand::TachibanaInjectPersistSession))
@@ -392,8 +362,56 @@ fn route(method: &str, path: &str, body: &str) -> Result<ApiCommand, RouteError>
         ("POST", "/api/test/tachibana/delete-persisted-session") => {
             Ok(ApiCommand::Test(TestCommand::TachibanaDeletePersistedSession))
         }
+
         _ => Err(RouteError::NotFound),
     }
+}
+
+/// `POST /api/replay/play` のボディをパースして ApiCommand を返す。
+fn parse_play_command(body: &str) -> Result<ApiCommand, RouteError> {
+    let start = body_str_field(body, "start")?;
+    let end = body_str_field(body, "end")?;
+    validate_datetime_str(&start)?;
+    validate_datetime_str(&end)?;
+    Ok(ApiCommand::Replay(ReplayCommand::Play { start, end }))
+}
+
+/// `POST /api/pane/split` のボディをパースして ApiCommand を返す。
+fn parse_split_command(body: &str) -> Result<ApiCommand, RouteError> {
+    let pane_id = body_uuid_field(body, "pane_id")?;
+    let axis = body_str_field(body, "axis")?;
+    match axis.as_str() {
+        "Vertical" | "vertical" | "Horizontal" | "horizontal" => {}
+        _ => return Err(RouteError::BadRequest),
+    }
+    Ok(ApiCommand::Pane(PaneCommand::Split { pane_id, axis }))
+}
+
+/// `POST /api/sidebar/select-ticker` のボディをパースして ApiCommand を返す。
+fn parse_sidebar_select_ticker(body: &str) -> Result<ApiCommand, RouteError> {
+    let pane_id = body_uuid_field(body, "pane_id")?;
+    let ticker = body_str_field(body, "ticker")?;
+    let kind = body_opt_str_field(body, "kind")?;
+    Ok(ApiCommand::Pane(PaneCommand::SidebarSelectTicker {
+        pane_id,
+        ticker,
+        kind,
+    }))
+}
+
+/// body から省略可能な文字列フィールドを取り出す（存在しなければ None）。
+fn body_opt_str_field(body: &str, key: &str) -> Result<Option<String>, RouteError> {
+    let parsed: serde_json::Value =
+        serde_json::from_str(body).map_err(|_| RouteError::BadRequest)?;
+    Ok(parsed.get(key).and_then(|v| v.as_str()).map(|s| s.to_string()))
+}
+
+/// body が有効な JSON であることだけを検証する（e2e-mock ルートで使用）。
+#[cfg(feature = "e2e-mock")]
+fn validate_json_body(body: &str) -> Result<(), RouteError> {
+    serde_json::from_str::<serde_json::Value>(body)
+        .map(|_| ())
+        .map_err(|_| RouteError::BadRequest)
 }
 
 /// HTTP レスポンスを書き込む

@@ -59,6 +59,7 @@ num-traits.workspace = true
 rustc-hash.workspace = true
 enum-map.workspace = true
 url.workspace = true
+dotenvy = "0.15"
 fern = "0.7.1"
 rodio = { version = "0.20.1", default-features = false, features = [ "wav" ]}
 

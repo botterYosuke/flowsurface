@@ -1,4 +1,5 @@
 pub mod clock;
+pub mod controller;
 pub mod dispatcher;
 pub mod loader;
 pub mod store;
@@ -13,6 +14,11 @@ use exchange::adapter::StreamKind;
 use clock::{ClockStatus, StepClock};
 use store::{EventStore, LoadedData};
 
+/// Replay Start 時刻より前に何本の kline を履歴として読み込むか。
+/// 最小 timeframe × この本数分を pre-start history として fetch する。
+/// 将来 `data/config/replay.rs` 等で設定化する余地を残す。
+pub const PRE_START_HISTORY_BARS: u64 = 300;
+
 /// kline streams のうち最小 timeframe を ms で返す。kline stream が 0 本なら 1m (60_000ms) を返す。
 pub fn min_timeframe_ms(active_streams: &HashSet<StreamKind>) -> u64 {
     active_streams
@@ -21,6 +27,31 @@ pub fn min_timeframe_ms(active_streams: &HashSet<StreamKind>) -> u64 {
         .map(|(_, tf)| tf.to_milliseconds())
         .min()
         .unwrap_or(clock::BASE_STEP_DELAY_MS * 60) // 1m fallback
+}
+
+/// Play 開始時に fetch する kline の range を計算する。
+/// Start 時刻から `PRE_START_HISTORY_BARS` 本分遡って load_start を求め、
+/// `load_start_ms..end_ms` を返す。
+pub fn compute_load_range(start_ms: u64, end_ms: u64, step_size_ms: u64) -> std::ops::Range<u64> {
+    start_ms.saturating_sub(PRE_START_HISTORY_BARS * step_size_ms)..end_ms
+}
+
+/// KlinesLoadCompleted 時に、Start 時刻より前のバーのみを抽出して返す。
+/// `k.time < start_ms` の条件で strictly less than を使うため、
+/// Start 時刻ちょうどのバーは含まない（dispatcher の最初の tick が注入する）。
+pub fn pre_start_history(klines: &[Kline], start_ms: u64) -> Vec<Kline> {
+    klines.iter().filter(|k| k.time < start_ms).cloned().collect()
+}
+
+/// StepBackward で clock を戻す先の時刻を計算する。
+/// history 範囲 (< start_ms) のバーが EventStore に存在しても
+/// start_ms 未満には seek しないようにクランプする。
+pub fn compute_step_backward_target(
+    prev_time: Option<u64>,
+    current_time: u64,
+    start_ms: u64,
+) -> u64 {
+    prev_time.unwrap_or(current_time).max(start_ms)
 }
 
 // ── 公開 API ────────────────────────────────────────────────────────────────
@@ -824,6 +855,98 @@ mod tests {
         assert!(
             !state.active_streams.contains(&trades_stream),
             "active_streams must not contain non-Kline streams, but Trades was found"
+        );
+    }
+
+    // ── compute_load_range ────────────────────────────────────────────────
+
+    #[test]
+    fn compute_load_range_extends_start_back_by_history_span() {
+        // 1_000_000_000 ms start, 2_000_000_000 ms end, 60_000 ms (1m) step
+        // expected start = 1_000_000_000 - 300 * 60_000 = 982_000_000
+        // expected end   = 2_000_000_000 (unchanged)
+        let range = compute_load_range(1_000_000_000, 2_000_000_000, 60_000);
+        assert_eq!(range.start, 982_000_000);
+        assert_eq!(range.end, 2_000_000_000);
+    }
+
+    #[test]
+    fn compute_load_range_saturates_at_zero_when_history_exceeds_start() {
+        // start_ms=1_000 is less than 300 * 60_000 = 18_000_000, so saturating_sub → 0
+        let range = compute_load_range(1_000, 5_000_000, 60_000);
+        assert_eq!(range.start, 0);
+        assert_eq!(range.end, 5_000_000);
+    }
+
+    // ── pre_start_history ────────────────────────────────────────────────────
+
+    fn make_kline_at(time: u64) -> Kline {
+        use exchange::{Volume, unit::{Qty, price::Price}};
+        Kline {
+            time,
+            open: Price::from_f32(100.0),
+            high: Price::from_f32(110.0),
+            low: Price::from_f32(90.0),
+            close: Price::from_f32(105.0),
+            volume: Volume::TotalOnly(Qty::zero()),
+        }
+    }
+
+    #[test]
+    fn pre_start_history_returns_only_bars_before_start_ms() {
+        let klines: Vec<Kline> = [700, 800, 900, 1000, 1100]
+            .iter()
+            .map(|&t| make_kline_at(t))
+            .collect();
+
+        let result = pre_start_history(&klines, 1000);
+
+        let times: Vec<u64> = result.iter().map(|k| k.time).collect();
+        assert_eq!(times, vec![700, 800, 900]);
+    }
+
+    #[test]
+    fn pre_start_history_excludes_bar_at_exact_start_ms() {
+        let kline = make_kline_at(1000);
+
+        let result = pre_start_history(&[kline], 1000);
+
+        assert!(
+            result.is_empty(),
+            "expected empty vec but got {} klines",
+            result.len()
+        );
+    }
+
+    // ── compute_step_backward_target ─────────────────────────────────────────
+
+    #[test]
+    fn step_backward_target_clamps_to_start_ms_when_prev_is_below() {
+        // prev=900, current=1000, start_ms=1000 → history bar below start, must clamp
+        let target = compute_step_backward_target(Some(900), 1000, 1000);
+        assert_eq!(
+            target, 1000,
+            "seeking to a pre-start history bar (t=900) must be clamped to start_ms=1000"
+        );
+    }
+
+    #[test]
+    fn step_backward_target_allows_seek_within_replay_range() {
+        // prev=1000 (exactly start_ms), current=2000, start_ms=1000 → valid seek
+        let target = compute_step_backward_target(Some(1000), 2000, 1000);
+        assert_eq!(
+            target, 1000,
+            "seeking from t=2000 to t=1000 (exactly start_ms) must be allowed"
+        );
+    }
+
+    #[test]
+    fn step_backward_target_stays_at_current_when_no_prev() {
+        // prev=None, current=1500, start_ms=1000 → no previous bar, stay put
+        let target = compute_step_backward_target(None, 1500, 1000);
+        assert_eq!(
+            target, 1500,
+            "when no previous bar exists, target must equal current_time"
         );
     }
 }
