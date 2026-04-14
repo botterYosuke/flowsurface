@@ -739,12 +739,29 @@ pub async fn fetch_all_master(
     let mut buf = Vec::new();
     let mut records = Vec::new();
     let mut seen_kabu = false;
+    let mut chunk_count = 0usize;
     // Shift-JIS の2バイト文字でトレイルバイトが 0x7D になる場合があるため
     // リードバイト後の次のバイトをトレイルバイトとして扱うフラグ
     let mut in_multibyte = false;
 
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
+        let chunk = match chunk {
+            Ok(chunk) => chunk,
+            Err(e) => {
+                if !records.is_empty() {
+                    log::warn!(
+                        "Tachibana master stream interrupted at chunk #{chunk_count} ({} records so far): {e}. \
+                         Returning partial data.",
+                        records.len()
+                    );
+                    return Ok(records);
+                } else {
+                    log::error!("Tachibana master stream failed at chunk #{chunk_count} (no records yet): {e}");
+                    return Err(TachibanaError::Http(e));
+                }
+            }
+        };
+        chunk_count += 1;
         for &byte in chunk.iter() {
             buf.push(byte);
             if in_multibyte {
