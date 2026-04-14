@@ -1,7 +1,7 @@
 # E2E テスト計画書 — 立花証券銘柄スイート S19〜S22
 
 **作成日**: 2026-04-14  
-**更新日**: 2026-04-14（全 TC PASS 確認）  
+**更新日**: 2026-04-14（本番データ移行 — e2e-mock 廃止）  
 **対象ブランチ**: `sasa/develop`  
 **テストスキル**: [.claude/skills/e2e-testing/SKILL.md](../../.claude/skills/e2e-testing/SKILL.md)  
 **参照元計画書**: [e2e_new_features.md](e2e_new_features.md)（S15〜S18 の設計・知見）
@@ -27,24 +27,35 @@ S15〜S18（BinanceLinear:BTCUSDT M1）で確認した以下の観点を、
 ### ビルド
 
 ```bash
-cargo build --release --features e2e-mock
-EXE="./target/release/flowsurface.exe"
+cargo build   # 通常のデバッグビルド（--features e2e-mock は不要）
+EXE="./target/debug/flowsurface.exe"
 API="http://localhost:9876/api"
 ```
+
+### 環境変数
+
+実行前に以下の環境変数を設定済みであること（スクリプト内にハードコードしない）：
+
+```bash
+export DEV_USER_ID="<立花証券ユーザID>"
+export DEV_PASSWORD="<パスワード>"
+# export DEV_IS_DEMO="true"   # デモ口座を使う場合
+```
+
+未設定の場合、各スクリプトは即座に `exit 1` する。
 
 ### TachibanaSpot セットアップ手順
 
 各スクリプトの `tachibana_replay_setup` 関数が以下を実行する：
 
 1. **saved-state.json** を Live モードで書き込む（replay セクションなし）
-2. `start_app`
-3. `POST /api/test/tachibana/inject-session` — メモリにダミーセッションを注入
-4. `POST /api/test/tachibana/inject-master` — 銘柄マスター注入
-5. `POST /api/test/tachibana/inject-daily-history` — D1 モック kline を注入
-6. `POST /api/replay/toggle` + `POST /api/replay/play` — リプレイ開始
+2. `start_app`（デバッグビルドは起動時に DEV AUTO-LOGIN を自動発火）
+3. `GET /api/auth/tachibana/status` をポーリング → `session="present"` まで待機（最大 120 秒）
+4. `GET /api/pane/list` で pane_id を取得し `streams_ready=true` まで待機（D1 kline フェッチ完了）
+5. `POST /api/replay/toggle` + `POST /api/replay/play` — リプレイ開始
 
-> **重要**: Auto-play は使用しない（セッションが keyring にない状態でのレース条件を回避するため）。
-> Live モードで起動 → inject-session 後に手動 play。
+> **重要**: モックデータ注入（inject-session / inject-master / inject-daily-history）は一切不要。
+> 本番 Tachibana API から D1 kline が自動フェッチされる。
 
 ### D1 スペック
 
@@ -62,10 +73,10 @@ API="http://localhost:9876/api"
 
 | スイート | ファイル名 | TC 数 | 結果 |
 |---|---|---|---|
-| S19 | `s19_tachibana_chart_snapshot.sh` | 5 | ✅ 5/5 PASS |
-| S20 | `s20_tachibana_replay_resilience.sh` | 7 | ✅ 7/7 PASS |
-| S21 | `s21_tachibana_error_boundary.sh` | 7 | ✅ 7/7 PASS |
-| S22 | `s22_tachibana_endurance.sh` | 4 | ✅ 4/4 PASS |
+| S19 | `s19_tachibana_chart_snapshot.sh` | 5 | 本番データ移行済み（要実行確認） |
+| S20 | `s20_tachibana_replay_resilience.sh` | 7 | 本番データ移行済み（要実行確認） |
+| S21 | `s21_tachibana_error_boundary.sh` | 7 | 本番データ移行済み（要実行確認） |
+| S22 | `s22_tachibana_endurance.sh` | 4 | 本番データ移行済み（要実行確認） |
 
 ---
 
@@ -216,4 +227,5 @@ M1 と混在させると最小 TF の M1（60000ms）になるので注意（S5-
 | 日時 | 内容 |
 |---|---|
 | 2026-04-14 | 計画書作成、スクリプト実装開始 |
-| 2026-04-14 | S19〜S22 全 TC PASS 確認（修正履歴は §9 参照） |
+| 2026-04-14 | S19〜S22 全 TC PASS 確認（e2e-mock ビルド版。修正履歴は §9 参照） |
+| 2026-04-14 | S19〜S22 を本番データ移行。`--features e2e-mock` → 通常デバッグビルド、inject 系 POST → DEV AUTO-LOGIN + `wait_tachibana_session` ポーリングに変更 |
