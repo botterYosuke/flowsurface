@@ -815,6 +815,24 @@ impl Flowsurface {
                     Some(dashboard::sidebar::Action::TickerSelected(ticker_info, content)) => {
                         let main_window_id = self.main_window.id;
 
+                        // mid-replay での銘柄変更: active_streams にある旧 kline stream を取得してから
+                        // switch を実行し、ReloadKlineStream で pause + active_streams 更新 + 再ロードする。
+                        // Live モードでは空 Vec になり、末尾で SyncReplayBuffers にフォールバックする。
+                        let old_kline_streams: Vec<exchange::adapter::StreamKind> =
+                            if self.replay.is_replay() {
+                                self.replay
+                                    .state
+                                    .active_streams
+                                    .iter()
+                                    .filter(|s| {
+                                        matches!(s, exchange::adapter::StreamKind::Kline { .. })
+                                    })
+                                    .copied()
+                                    .collect()
+                            } else {
+                                vec![]
+                            };
+
                         let task = {
                             if let Some(kind) = content {
                                 self.active_dashboard_mut().init_focused_pane(
@@ -828,18 +846,37 @@ impl Flowsurface {
                             }
                         };
 
-                        // review 🟡 #4: mid-replay で heatmap-only pane を選択した場合、
-                        // init_focused_pane は Task::none() を返すため Message::Dashboard 末尾の
-                        // SyncReplayBuffers chain が発火しない。ここで明示的に chain する。
-                        // Replay モードでない場合は SyncReplayBuffers ハンドラ側で no-op。
+                        // mid-replay で kline stream がある場合は ReloadKlineStream を chain する。
+                        // これにより: clock.pause() → active_streams 更新 → clock.seek(start) →
+                        // reset_charts_for_seek() → 新銘柄の klines 再ロードが行われる。
+                        // kline stream が無い場合（Heatmap only 等）は SyncReplayBuffers にフォールバック。
+                        let reload_tasks: Vec<Task<Message>> = old_kline_streams
+                            .into_iter()
+                            .filter_map(|old| {
+                                old.as_kline_stream().map(|(_, tf)| {
+                                    Task::done(Message::Replay(ReplayMessage::ReloadKlineStream {
+                                        old_stream: Some(old),
+                                        new_stream: exchange::adapter::StreamKind::Kline {
+                                            ticker_info,
+                                            timeframe: tf,
+                                        },
+                                    }))
+                                })
+                            })
+                            .collect();
+
+                        let replay_task = if reload_tasks.is_empty() {
+                            Task::done(Message::Replay(ReplayMessage::SyncReplayBuffers))
+                        } else {
+                            Task::batch(reload_tasks)
+                        };
+
                         return task
                             .map(move |msg| Message::Dashboard {
                                 layout_id: None,
                                 event: msg,
                             })
-                            .chain(Task::done(Message::Replay(
-                                ReplayMessage::SyncReplayBuffers,
-                            )));
+                            .chain(replay_task);
                     }
                     Some(dashboard::sidebar::Action::ErrorOccurred(err)) => {
                         self.notifications.push(Toast::error(err.to_string()));
@@ -1809,6 +1846,21 @@ impl Flowsurface {
         };
 
         let main_window_id = self.main_window.id;
+
+        // mid-replay での銘柄変更: Message::Sidebar 経路と同じく active_streams の旧 kline stream を
+        // 先に取得し、ReloadKlineStream で pause + 再ロードする。
+        let old_kline_streams: Vec<exchange::adapter::StreamKind> = if self.replay.is_replay() {
+            self.replay
+                .state
+                .active_streams
+                .iter()
+                .filter(|s| matches!(s, exchange::adapter::StreamKind::Kline { .. }))
+                .copied()
+                .collect()
+        } else {
+            vec![]
+        };
+
         let dashboard = self.active_dashboard_mut();
         let prev_focus = dashboard.focus;
         dashboard.focus = Some((window_id, pg_pane));
@@ -1820,14 +1872,33 @@ impl Flowsurface {
             dashboard.switch_tickers_in_group(main_window_id, ticker_info)
         };
 
+        let reload_tasks: Vec<Task<Message>> = old_kline_streams
+            .into_iter()
+            .filter_map(|old| {
+                old.as_kline_stream().map(|(_, tf)| {
+                    Task::done(Message::Replay(ReplayMessage::ReloadKlineStream {
+                        old_stream: Some(old),
+                        new_stream: exchange::adapter::StreamKind::Kline {
+                            ticker_info,
+                            timeframe: tf,
+                        },
+                    }))
+                })
+            })
+            .collect();
+
+        let replay_task = if reload_tasks.is_empty() {
+            Task::done(Message::Replay(ReplayMessage::SyncReplayBuffers))
+        } else {
+            Task::batch(reload_tasks)
+        };
+
         let task = task
             .map(move |msg| Message::Dashboard {
                 layout_id: None,
                 event: msg,
             })
-            .chain(Task::done(Message::Replay(
-                ReplayMessage::SyncReplayBuffers,
-            )));
+            .chain(replay_task);
 
         let dashboard = self.active_dashboard_mut();
         dashboard.focus = prev_focus;
