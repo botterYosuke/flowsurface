@@ -26,7 +26,7 @@ pub fn min_timeframe_ms(active_streams: &HashSet<StreamKind>) -> u64 {
         .filter_map(|s| s.as_kline_stream())
         .map(|(_, tf)| tf.to_milliseconds())
         .min()
-        .unwrap_or(clock::BASE_STEP_DELAY_MS * 60) // 1m fallback
+        .unwrap_or(60_000) // 1m fallback
 }
 
 /// Play 開始時に fetch する kline の range を計算する。
@@ -499,10 +499,10 @@ mod tests {
     fn current_time_returns_clock_now_ms() {
         let mut state = ReplayState::default();
         let base = Instant::now();
-        // step_size=1000, step_delay=1000ms → tick at +1000ms fires once → now_ms = 50_000+1000 = 51_000
+        // step_size=1000, step_delay=BASE_STEP_DELAY_MS(100ms) → tick at +100ms fires once → now_ms = 51_000
         let mut clock = StepClock::new(50_000, 100_000, 1_000);
         clock.play(base);
-        clock.tick(make_instant_plus(base, 1_000));
+        clock.tick(make_instant_plus(base, 100));
         state.clock = Some(clock);
         assert_eq!(state.current_time(), 51_000);
     }
@@ -569,10 +569,10 @@ mod tests {
         let mut state = ReplayState::default();
         state.mode = ReplayMode::Replay;
         let base = Instant::now();
-        // step_size=500, step_delay=1000ms → 3 ticks at +3000ms → 3 steps → 0+500+500+500=1500
+        // step_size=500, step_delay=BASE_STEP_DELAY_MS(100ms) → 3 steps at +300ms → now_ms = 1500
         let mut clock = StepClock::new(0, 5_000, 500);
         clock.play(base);
-        clock.tick(make_instant_plus(base, 3_000)); // 3 steps: now_ms = 1500
+        clock.tick(make_instant_plus(base, 300)); // 3 steps: now_ms = 1500
         state.clock = Some(clock);
 
         let status = state.to_status();
@@ -643,10 +643,10 @@ mod tests {
         let mut state = ReplayState::default();
         state.mode = ReplayMode::Replay;
         let base = Instant::now();
-        // step_size=500, 3 steps at +3000ms → now_ms=1500
+        // step_size=500, step_delay=100ms → 3 steps at +300ms → now_ms=1500
         let mut clock = StepClock::new(0, 5_000, 500);
         clock.play(base);
-        clock.tick(make_instant_plus(base, 3_000));
+        clock.tick(make_instant_plus(base, 300));
         state.clock = Some(clock);
         let json = serde_json::to_string(&state.to_status()).unwrap();
         assert!(json.contains(r#""mode":"Replay""#));

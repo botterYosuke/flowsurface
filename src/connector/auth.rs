@@ -81,16 +81,6 @@ pub async fn try_restore_session() -> Option<TachibanaSession> {
         }
     };
 
-    // E2E テスト: e2e-mock ビルドでダミー URL が保存されている場合は validate をスキップする。
-    // ダミー URL には実 API サーバーが存在しないため、validate_session はネットワークエラーになる。
-    // `persist_injected_session` で書き込んだセッションのみこの経路に入る。
-    #[cfg(feature = "e2e-mock")]
-    if session.url_request.contains("e2e-mock.invalid") {
-        log::info!("Tachibana [e2e-mock]: skipping session validation for mock URL, restoring as-is");
-        store_session(session.clone());
-        return Some(session);
-    }
-
     let client = reqwest::Client::new();
     match exchange::adapter::tachibana::validate_session(&client, &session).await {
         Ok(()) => {
@@ -105,38 +95,10 @@ pub async fn try_restore_session() -> Option<TachibanaSession> {
     }
 }
 
-/// E2E テスト用: keyring を経由せず、ダミー `TachibanaSession` をメモリに格納する。
-/// 本番ビルドには含まれない（`e2e-mock` feature gate）。
-/// URL は test backdoor API から呼ばれる前提なので、フォーマットだけ有効な
-/// ダミー値を埋める（EVENT I/F や REST は mock 経路に分岐するため実際には叩かれない）。
-#[cfg(feature = "e2e-mock")]
-pub fn inject_dummy_session() {
-    let session = exchange::adapter::tachibana::TachibanaSession {
-        url_request: "https://e2e-mock.invalid/request/".to_string(),
-        url_master: "https://e2e-mock.invalid/master/".to_string(),
-        url_price: "https://e2e-mock.invalid/price/".to_string(),
-        url_event: "https://e2e-mock.invalid/event/".to_string(),
-        url_event_ws: "wss://e2e-mock.invalid/ws/".to_string(),
-    };
-    store_session(session);
-}
-
-/// E2E テスト用（Phase T3）: ダミーセッションをメモリ AND keyring 両方に保存する。
-/// `inject_dummy_session` （メモリのみ）と異なり、keyring 永続化パスも通る。
-/// 再起動後に `try_restore_session` がキーリングから復元できることを検証する際に使用。
-#[cfg(feature = "e2e-mock")]
-pub fn persist_injected_session() {
-    inject_dummy_session();
-    if let Some(session) = get_session() {
-        persist_session(&session);
-        log::info!("Tachibana [e2e-mock]: dummy session persisted to keyring");
-    }
-}
-
 /// E2E テスト用（Phase T3）: メモリセッションと keyring セッションを両方クリアする。
 /// テスト間のクリーンアップや「セッション未存在」状態の確認に使用。
-/// `e2e-mock` feature または debug ビルドで有効（release ビルドには含まれない）。
-#[cfg(any(feature = "e2e-mock", debug_assertions))]
+/// debug ビルドで有効（release ビルドには含まれない）。
+#[cfg(debug_assertions)]
 pub fn delete_all_sessions() {
     clear_session();
     data::config::tachibana::delete_session();

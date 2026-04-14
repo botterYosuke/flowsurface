@@ -115,7 +115,7 @@ impl EventStore {
             .insert_sorted(data.klines);
         self.loaded_ranges
             .entry(stream)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(range);
     }
 

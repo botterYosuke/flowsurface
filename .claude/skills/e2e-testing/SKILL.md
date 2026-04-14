@@ -23,7 +23,7 @@ src/main.rs       — Iced アプリ メッセージハンドラ
 JSON レスポンス → curl → テストスクリプト
 ```
 
-**ビルドフラグ**: `--features e2e-mock` で Tachibana モック注入エンドポイントが有効になる。
+**ビルドフラグ**: debug ビルド（`cargo build`）で Tachibana セッション削除エンドポイントが有効になる。
 
 ---
 
@@ -55,11 +55,8 @@ flowsurface/
 ## ビルド・起動
 
 ```bash
-# 通常ビルド
+# リリースビルド
 cargo build --release
-
-# e2e-mock 付きビルド（Tachibana モック注入を使う場合）
-cargo build --release --features e2e-mock
 
 EXE="./target/release/flowsurface.exe"
 API="http://localhost:9876"
@@ -146,15 +143,10 @@ api_post() { curl -sf -X POST -H "Content-Type: application/json" -d "${2:-{}}" 
 | `GET`  | `/api/notification/list` | Toast 通知一覧 |
 | `GET`  | `/api/auth/tachibana/status` | Tachibana セッション有無 |
 
-### e2e-mock エンドポイント（`--features e2e-mock` ビルドのみ）
+### デバッグビルド専用エンドポイント（`cargo build` debug ビルドのみ）
 
 | メソッド | パス | 用途 |
 |---------|------|------|
-| `POST` | `/api/test/tachibana/inject-session`        | ダミーセッション注入 |
-| `POST` | `/api/test/tachibana/inject-master`         | 銘柄マスター注入 |
-| `POST` | `/api/test/tachibana/inject-daily-history`  | 日足データ注入 |
-| `POST` | `/api/test/tachibana/inject-market-price`   | 現在値データ注入 |
-| `POST` | `/api/test/tachibana/persist-session`       | keyring 永続化テスト |
 | `POST` | `/api/test/tachibana/delete-persisted-session` | keyring セッション削除 |
 
 ---
@@ -289,25 +281,6 @@ wait_for_streams_ready() {
 }
 
 wait_for_streams_ready "$PANE_ID"
-```
-
-### Tachibana モックパターン（e2e-mock ビルド）
-
-```bash
-# ダミーセッション注入
-api_post /api/test/tachibana/inject-session
-
-# セッション有無確認
-STATUS=$(api_get /api/auth/tachibana/status)
-HAS_SESSION=$(jqn "$STATUS" 'd.has_session')
-[ "$HAS_SESSION" = "true" ] && pass "Tachibana セッション注入成功" || fail "セッションなし" ""
-
-# 銘柄マスター注入
-MASTER_JSON=$(cat <<'EOF'
-[{"code":"7203","name":"トヨタ自動車","market":"東証プライム"}]
-EOF
-)
-api_post /api/test/tachibana/inject-master "$MASTER_JSON"
 ```
 
 ---
@@ -468,8 +441,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Build (e2e-mock)
-        run: cargo build --release --features e2e-mock
+      - name: Build
+        run: cargo build --release
       - name: Run E2E tests
         run: bash tests/e2e_replay_api.sh
       - name: Upload logs on failure

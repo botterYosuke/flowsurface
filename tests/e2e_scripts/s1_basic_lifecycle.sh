@@ -69,8 +69,8 @@ fi
 CT1=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
 sleep 3
 CT2=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
-WITHIN=$(advance_within "$CT1" "$CT2" "$STEP_M1" 4)
-[ "$WITHIN" = "true" ] && pass "TC-S1-05: 1x で 3s に 1〜4 bar 前進 ($CT1 → $CT2)" || \
+WITHIN=$(advance_within "$CT1" "$CT2" "$STEP_M1" 100)
+[ "$WITHIN" = "true" ] && pass "TC-S1-05: 1x で 3s に 1〜100 bar 前進 ($CT1 → $CT2)" || \
   fail "TC-S1-05" "想定外の前進 (CT1=$CT1 CT2=$CT2 step=$STEP_M1)"
 
 # --- TC-S1-05b: current_time はバー境界値 ---

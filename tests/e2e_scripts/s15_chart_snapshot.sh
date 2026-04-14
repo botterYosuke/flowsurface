@@ -14,6 +14,7 @@ setup_single_pane "BinanceLinear:BTCUSDT" "M1" "$START" "$END"
 start_app
 
 if ! wait_playing 30; then
+  diagnose_playing_failure
   fail "TC-S15-precond" "Playing 到達せず"
   exit 1
 fi
@@ -42,19 +43,26 @@ if [ -z "$PANE_ID" ]; then
 fi
 echo "  PANE_ID=$PANE_ID"
 
-# TC-S15-01: Replay Play 直後（Pause 直後）のバー本数が 1 ≤ bar_count ≤ 300
-# PRE_START_HISTORY_BARS=300 の検証 — start 時刻以前の履歴バーが最大 300 本ロードされる
+# TC-S15-01: PRE_START_HISTORY_BARS=300 の検証
+# oldest_ts ≤ start_time かつ start_time - oldest_ts ≤ 300 bars 分 (60000ms × 301)
+# bar_count は再生中に range 内バーが積み重なるため上限は設けない
 SNAP=$(curl -s "$API/pane/chart-snapshot?pane_id=$PANE_ID")
 echo "  snapshot response: $SNAP"
 BAR_COUNT=$(node -e "const d=JSON.parse(process.argv[1]); console.log(d.bar_count !== undefined ? String(d.bar_count) : 'null');" "$SNAP")
-echo "  bar_count=$BAR_COUNT"
+OLDEST_TS=$(node -e "const d=JSON.parse(process.argv[1]); console.log(d.oldest_ts !== undefined ? String(d.oldest_ts) : 'null');" "$SNAP")
+START_T=$(jqn "$(curl -s "$API/replay/status")" "d.start_time")
+echo "  bar_count=$BAR_COUNT oldest_ts=$OLDEST_TS start_time=$START_T"
 if node -e "
-  const n = Number(process.argv[1]);
-  process.exit((Number.isFinite(n) && n >= 1 && n <= 301) ? 0 : 1);
-" "$BAR_COUNT" 2>/dev/null; then
-  pass "TC-S15-01: Play 後 bar_count=$BAR_COUNT (1 ≤ N ≤ 301, PRE_START_HISTORY_BARS 確認)"
+  const oldest = BigInt(process.argv[1]);
+  const start  = BigInt(process.argv[2]);
+  const STEP   = 60000n;            // M1
+  const MAX_PRE = 301n * STEP;      // PRE_START_HISTORY_BARS=300 + 1 bar tolerance
+  const ok = oldest <= start && (start - oldest) <= MAX_PRE;
+  process.exit(ok ? 0 : 1);
+" "$OLDEST_TS" "$START_T" 2>/dev/null; then
+  pass "TC-S15-01: oldest_ts=$OLDEST_TS ≤ start=$START_T かつ差分 ≤ 301 bars (PRE_START_HISTORY_BARS 確認)"
 else
-  fail "TC-S15-01" "bar_count=$BAR_COUNT (想定: 1..301)"
+  fail "TC-S15-01" "oldest_ts=$OLDEST_TS start=$START_T bar_count=$BAR_COUNT (pre-start history バー数異常)"
 fi
 
 # TC-S15-02: StepForward 後 bar_count が増加または同数（リグレッションなし）

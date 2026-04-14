@@ -92,6 +92,3 @@ harness = false
 
 [features]
 debug = ["iced/hot"]
-# E2E テスト用の fixture 注入バックドア（本番ビルドには絶対に含めない）。
-# 詳細: docs/plan/tachibana_e2e_phase_t1.md
-e2e-mock = ["exchange/e2e-mock"]

@@ -162,8 +162,8 @@ mod tests {
 
     #[test]
     fn dispatch_returns_one_trade_in_half_open_range_when_store_loaded() {
-        // 新モデル (step_size=1000, step_delay=1000):
-        // wall=1500ms → 1 step 発火 → range [0, 1000)
+        // step_size=1000, step_delay=BASE_STEP_DELAY_MS(100ms):
+        // wall=100ms → exactly 1 step fires → range [0, 1000)
         // trade at 500 → ✓ (included)
         // trade at 1000 → ✗ (end 境界は半開区間で除外)
         let stream = trade_stream();
@@ -175,7 +175,7 @@ mod tests {
         let mut streams = HashSet::new();
         streams.insert(stream);
 
-        let result = dispatch_tick(&mut clock, &store, &streams, t(base, 1_500));
+        let result = dispatch_tick(&mut clock, &store, &streams, t(base, 100));
         assert_eq!(result.current_time, 1_000);
 
         let (_, trades) = result.trade_events.iter().find(|(s, _)| *s == stream).unwrap();
@@ -185,7 +185,8 @@ mod tests {
 
     #[test]
     fn dispatch_catchup_two_steps_returns_events_from_entire_range() {
-        // 2000ms wall → 2 steps: range [0, 2000)
+        // step_size=1000, step_delay=100ms:
+        // wall=200ms → exactly 2 steps fire: range [0, 2000)
         // trades at 500, 1000 → both included (2000 is exclusive end)
         let stream = trade_stream();
         let store = make_store_with_data(stream, 0..10_000);
@@ -196,7 +197,7 @@ mod tests {
         let mut streams = HashSet::new();
         streams.insert(stream);
 
-        let result = dispatch_tick(&mut clock, &store, &streams, t(base, 2_000));
+        let result = dispatch_tick(&mut clock, &store, &streams, t(base, 200));
         assert_eq!(result.current_time, 2_000);
 
         let (_, trades) = result.trade_events.iter().find(|(s, _)| *s == stream).unwrap();
@@ -228,8 +229,8 @@ mod tests {
         let store = EventStore::new();
         let streams = HashSet::new(); // no streams
 
-        // 1 step fires at 1000ms: now_ms = 1000
-        let result = dispatch_tick(&mut clock, &store, &streams, t(base, 1_000));
+        // step_delay=100ms → 1 step fires at wall=100ms: now_ms = 1000
+        let result = dispatch_tick(&mut clock, &store, &streams, t(base, 100));
         assert_eq!(result.current_time, 1_000);
         assert!(result.trade_events.is_empty());
         assert!(!result.reached_end);

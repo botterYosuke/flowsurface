@@ -448,17 +448,6 @@ pub async fn fetch_market_prices(
     session: &TachibanaSession,
     issue_codes: &[&str],
 ) -> Result<Vec<MarketPriceRecord>, TachibanaError> {
-    // E2E テスト: mock 経路。feature 有効かつ mock データが注入されている場合、
-    // ネットワークを叩かず mock データをそのまま返す。
-    #[cfg(feature = "e2e-mock")]
-    if let Some(mock) = e2e_mock::get_mock_market_prices() {
-        log::info!(
-            "Tachibana [e2e-mock]: returned {} market price records",
-            mock.len()
-        );
-        return Ok(mock);
-    }
-
     let req = MarketPriceRequest::new(issue_codes);
     let json_body = serialize_request(&req)?;
 
@@ -832,31 +821,15 @@ pub async fn fetch_all_master(
 static ISSUE_MASTER_CACHE: RwLock<Option<Arc<Vec<MasterRecord>>>> = RwLock::new(None);
 
 /// ログイン成功時に呼び出し、銘柄マスタをキャッシュに格納する。
-///
-/// e2e-mock ビルドでは HTTP フェッチを完全にスキップする。
-/// マスタは `/api/test/tachibana/inject-master` API で注入されるため、
-/// 起動時に `https://e2e-mock.invalid/master/` へリクエストしてエラーになることを防ぐ。
 pub async fn init_issue_master(
     client: &reqwest::Client,
     session: &TachibanaSession,
 ) -> Result<(), TachibanaError> {
-    #[cfg(feature = "e2e-mock")]
-    {
-        let _ = (client, session);
-        log::info!(
-            "Tachibana [e2e-mock]: skipping master HTTP download \
-             (populate via /api/test/tachibana/inject-master)"
-        );
-        return Ok(());
+    let records = fetch_all_master(client, session).await?;
+    if let Ok(mut guard) = ISSUE_MASTER_CACHE.write() {
+        *guard = Some(Arc::new(records));
     }
-    #[cfg(not(feature = "e2e-mock"))]
-    {
-        let records = fetch_all_master(client, session).await?;
-        if let Ok(mut guard) = ISSUE_MASTER_CACHE.write() {
-            *guard = Some(Arc::new(records));
-        }
-        Ok(())
-    }
+    Ok(())
 }
 
 /// キャッシュ済みの銘柄マスタを返す。未取得なら None。
@@ -901,95 +874,6 @@ pub async fn cached_ticker_metadata() -> HashMap<Ticker, Option<TickerInfo>> {
     out
 }
 
-// ── E2E テスト用 fixture 注入バックドア ─────────────────────────────────────
-//
-// `e2e-mock` feature を有効にした場合のみコンパイルされる。本番ビルドには
-// 一切含まれない。認証フロー・MASTER I/F・日足取得をバイパスし、
-// Tachibana D1 リプレイ経路の E2E 検証を可能にする。
-// 詳細: docs/plan/tachibana_e2e_phase_t1.md
-
-#[cfg(feature = "e2e-mock")]
-pub mod e2e_mock {
-    use super::{ISSUE_MASTER_CACHE, MasterRecord};
-    use crate::Kline;
-    use std::collections::HashMap;
-    use std::sync::{Arc, RwLock};
-
-    /// `fetch_daily_history` を mock 経路へ分岐させるためのテーブル。
-    /// キーは issue_code（例: "7203"）。
-    /// std::sync::RwLock を使うのは、test backdoor が iced の update() ループから
-    /// 同期的に呼び出されるため（tokio::sync::RwLock だと await が必要で、
-    /// block_in_place の利用条件を満たさないケースで動作しない）。
-    pub(super) static MOCK_DAILY_HISTORY: RwLock<Option<HashMap<String, Vec<Kline>>>> =
-        RwLock::new(None);
-
-    /// ISSUE_MASTER_CACHE にレコードを直接格納する。
-    /// MASTER I/F ストリーミングをバイパスするため、`init_issue_master` を経由せずに
-    /// `cached_ticker_metadata` から参照可能な状態を作れる。
-    pub fn inject_master_cache(records: Vec<MasterRecord>) {
-        if let Ok(mut guard) = ISSUE_MASTER_CACHE.write() {
-            *guard = Some(Arc::new(records));
-        }
-    }
-
-    /// 指定 issue_code の日足 mock データを設定する（累積）。
-    /// 以降の `fetch_tachibana_daily_klines` 呼び出しはネットワークを叩かず、
-    /// ここで設定した Kline 列を返す（range フィルタは呼び出し側でそのまま効く）。
-    pub fn inject_daily_klines(issue_code: String, klines: Vec<Kline>) {
-        if let Ok(mut guard) = MOCK_DAILY_HISTORY.write() {
-            let map = guard.get_or_insert_with(HashMap::new);
-            map.insert(issue_code, klines);
-        }
-    }
-
-    /// Mock テーブル全体をクリアする。テスト後のクリーンアップ用。
-    pub fn clear_daily_klines() {
-        if let Ok(mut guard) = MOCK_DAILY_HISTORY.write() {
-            *guard = None;
-        }
-    }
-
-    /// ISSUE_MASTER_CACHE をクリアする。テスト後のクリーンアップ用。
-    pub fn clear_master_cache() {
-        if let Ok(mut guard) = ISSUE_MASTER_CACHE.write() {
-            *guard = None;
-        }
-    }
-
-    /// 指定 issue_code の mock 日足を取り出す。`fetch_tachibana_daily_klines` から参照される。
-    pub fn get_mock_daily_klines(issue_code: &str) -> Option<Vec<Kline>> {
-        let guard = MOCK_DAILY_HISTORY.read().ok()?;
-        guard.as_ref()?.get(issue_code).cloned()
-    }
-
-    // ── fetch_market_prices mock (Phase T2) ─────────────────────────────────
-
-    /// `fetch_market_prices` を mock 経路へ分岐させるためのストア。
-    /// `inject_market_prices` で注入されたデータを `fetch_market_prices` が参照する。
-    pub(super) static MOCK_MARKET_PRICES: RwLock<Option<Vec<super::MarketPriceRecord>>> =
-        RwLock::new(None);
-
-    /// mock 時価情報レコードを登録する。
-    /// 以降の `fetch_market_prices` 呼び出しはネットワークを叩かず、ここで設定したレコードを返す。
-    pub fn inject_market_prices(records: Vec<super::MarketPriceRecord>) {
-        if let Ok(mut guard) = MOCK_MARKET_PRICES.write() {
-            *guard = Some(records);
-        }
-    }
-
-    /// mock 時価情報レコードを取り出す。`fetch_market_prices` から参照される。
-    pub fn get_mock_market_prices() -> Option<Vec<super::MarketPriceRecord>> {
-        let guard = MOCK_MARKET_PRICES.read().ok()?;
-        guard.clone()
-    }
-
-    /// mock 時価情報ストアをクリアする。テスト後のクリーンアップ用。
-    pub fn clear_market_prices() {
-        if let Ok(mut guard) = MOCK_MARKET_PRICES.write() {
-            *guard = None;
-        }
-    }
-}
 
 // ── EVENT I/F パーサー ───────────────────────────────────────────────────────
 //

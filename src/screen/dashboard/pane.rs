@@ -1859,22 +1859,18 @@ impl State {
 
     /// リプレイ用: EventStore から得た klines をこのペインの kline chart に注入する。
     pub fn ingest_replay_klines(&mut self, klines: &[Kline]) {
-        if let Content::Kline { chart, .. } = &mut self.content {
-            if let Some(c) = chart {
-                c.set_replay_mode(true);
-                c.ingest_historical_klines(klines);
-            }
+        if let Content::Kline { chart: Some(c), .. } = &mut self.content {
+            c.set_replay_mode(true);
+            c.ingest_historical_klines(klines);
         }
     }
 
     /// リプレイ seek 時: kline chart のデータをリセットする。
     /// replay_mode=true を保持することで fetch_missing_data の live fetch を抑制する。
     pub fn reset_for_seek(&mut self) {
-        if let Content::Kline { chart, .. } = &mut self.content {
-            if let Some(c) = chart {
-                c.set_replay_mode(true);
-                c.reset_for_seek();
-            }
+        if let Content::Kline { chart: Some(c), .. } = &mut self.content {
+            c.set_replay_mode(true);
+            c.reset_for_seek();
         }
     }
 

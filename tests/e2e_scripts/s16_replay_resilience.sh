@@ -17,6 +17,7 @@ setup_single_pane "BinanceLinear:BTCUSDT" "M1" "$START" "$END"
 start_app
 
 if ! wait_playing 30; then
+  diagnose_playing_failure
   fail "TC-S16-01-pre" "Playing 到達せず"
   exit 1
 fi

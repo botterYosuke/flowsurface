@@ -67,58 +67,6 @@ async fn fetch_all_klines(
 
 // ── テスト ────────────────────────────────────────────────────────────────────
 
-#[cfg(all(test, feature = "e2e-mock"))]
-mod tachibana_tests {
-    use super::*;
-    use exchange::adapter::{Exchange, StreamKind};
-    use exchange::{Ticker, TickerInfo, Timeframe};
-
-    fn tachibana_kline_stream() -> StreamKind {
-        StreamKind::Kline {
-            ticker_info: TickerInfo::new(
-                Ticker::new("7203", Exchange::Tachibana),
-                1.0,
-                0.0,
-                None,
-            ),
-            timeframe: Timeframe::D1,
-        }
-    }
-
-    #[tokio::test]
-    async fn load_klines_tachibana_uses_daily_history_not_adapter_fetch() {
-        use exchange::adapter::tachibana::e2e_mock;
-        use exchange::unit::MinTicksize;
-        use exchange::{Kline, Volume};
-
-        let mock_kline = Kline::new(
-            1_700_000_000_000,
-            3000.0,
-            3100.0,
-            2900.0,
-            3050.0,
-            Volume::empty_total(),
-            MinTicksize::from(1.0),
-        );
-        e2e_mock::inject_daily_klines("7203".to_string(), vec![mock_kline]);
-
-        let stream = tachibana_kline_stream();
-        let range = 0u64..u64::MAX;
-
-        let result = load_klines(stream, range).await;
-
-        e2e_mock::clear_daily_klines();
-
-        assert!(
-            result.is_ok(),
-            "Tachibana load_klines は InvalidRequest を返すべきでない: {:?}",
-            result.err()
-        );
-        let loaded = result.unwrap();
-        assert_eq!(loaded.klines.len(), 1);
-    }
-}
-
 /// ローダーの単体テスト。
 ///
 /// ネットワーク呼び出しを避けるため、`LoadedData` の ingest → `is_loaded` / クエリ の

@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 pub const BASE_STEP_DELAY_MS: u64 = 100;
 
 /// 瞬間再生速度（for ループそのまま、1 tick で range.end まで完走）。
+#[allow(dead_code)]
 pub const SPEED_INSTANT: f32 = f32::INFINITY;
 
 /// バーステップ離散クロック。
@@ -169,7 +170,7 @@ impl StepClock {
         while self.status == ClockStatus::Playing && wall_now >= next_step {
             let new_now = self.now_ms.saturating_add(self.step_size_ms).min(self.range.end);
             self.now_ms = new_now;
-            next_step = next_step + Duration::from_millis(step_delay_ms);
+            next_step += Duration::from_millis(step_delay_ms);
 
             if self.now_ms >= self.range.end {
                 self.status = ClockStatus::Paused;

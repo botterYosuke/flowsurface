@@ -634,10 +634,10 @@ impl Dashboard {
     /// 各ペインの last_attempt をリセットする。
     pub fn refresh_waiting_panes(&mut self, main_window: window::Id) {
         for (_, _, state) in self.iter_all_panes_mut(main_window) {
-            if let ResolvedStream::Waiting { streams, .. } = &state.streams {
-                if !streams.is_empty() {
-                    state.streams.mark_resolution_due();
-                }
+            if let ResolvedStream::Waiting { streams, .. } = &state.streams
+                && !streams.is_empty()
+            {
+                state.streams.mark_resolution_due();
             }
         }
     }
@@ -1091,9 +1091,7 @@ impl Dashboard {
             .for_each(|(_, _, pane_state)| {
                 // 完全一致 または 同一 ticker_info を持つペインにマッチ
                 let matched = pane_state.matches_stream(stream)
-                    || pane_state
-                        .stream_pair()
-                        .map_or(false, |ti| ti == trade_ticker);
+                    || (pane_state.stream_pair() == Some(trade_ticker));
                 if matched {
                     match &mut pane_state.content {
                         pane::Content::Heatmap { chart, .. } => {

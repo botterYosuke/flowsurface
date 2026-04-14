@@ -13,8 +13,8 @@ pub enum ApiCommand {
     Pane(PaneCommand),
     /// 認証状態確認コマンド（テスト・デバッグ用、本番ビルドにも含まれる）。
     Auth(AuthCommand),
-    /// E2E テスト用コマンド（`e2e-mock` feature または debug ビルドで有効）。
-    #[cfg(any(feature = "e2e-mock", debug_assertions))]
+    /// E2E テスト用コマンド（debug ビルドで有効）。
+    #[cfg(debug_assertions)]
     Test(TestCommand),
 }
 
@@ -26,28 +26,10 @@ pub enum AuthCommand {
 }
 
 /// E2E テスト fixture 注入コマンド。
-/// 詳細: docs/plan/tachibana_e2e_phase_t1.md
-#[cfg(any(feature = "e2e-mock", debug_assertions))]
+#[cfg(debug_assertions)]
 #[derive(Debug, Clone)]
 pub enum TestCommand {
-    /// ダミー `TachibanaSession` をメモリに格納する（keyring 非経由、e2e-mock のみ）。
-    #[cfg(feature = "e2e-mock")]
-    TachibanaInjectSession,
-    /// `ISSUE_MASTER_CACHE` に MasterRecord を直接注入する（e2e-mock のみ）。
-    #[cfg(feature = "e2e-mock")]
-    TachibanaInjectMaster { raw_body: String },
-    /// `MOCK_DAILY_HISTORY` に issue_code → Vec<Kline> を登録する（e2e-mock のみ）。
-    #[cfg(feature = "e2e-mock")]
-    TachibanaInjectDailyHistory { raw_body: String },
-    // ── Phase T2 ──────────────────────────────────────────────────────────
-    /// `MOCK_MARKET_PRICES` に MarketPriceRecord を登録する（e2e-mock のみ）。
-    #[cfg(feature = "e2e-mock")]
-    TachibanaInjectMarketPrice { raw_body: String },
-    // ── Phase T3 ──────────────────────────────────────────────────────────
-    /// ダミーセッションをメモリ AND keyring 両方に保存する（e2e-mock のみ）。
-    #[cfg(feature = "e2e-mock")]
-    TachibanaInjectPersistSession,
-    /// メモリセッション + keyring セッションを両方クリアする（debug ビルド以上で有効）。
+    /// メモリセッション + keyring セッションを両方クリアする（debug ビルドで有効）。
     TachibanaDeletePersistedSession,
 }
 
@@ -337,38 +319,8 @@ fn route(method: &str, path: &str, body: &str) -> Result<ApiCommand, RouteError>
         }
         ("POST", "/api/sidebar/select-ticker") => parse_sidebar_select_ticker(body),
 
-        // ── E2E テスト用 (e2e-mock feature のみ) ──────────────────────────
-        #[cfg(feature = "e2e-mock")]
-        ("POST", "/api/test/tachibana/inject-session") => {
-            Ok(ApiCommand::Test(TestCommand::TachibanaInjectSession))
-        }
-        #[cfg(feature = "e2e-mock")]
-        ("POST", "/api/test/tachibana/inject-master") => {
-            validate_json_body(body)?;
-            Ok(ApiCommand::Test(TestCommand::TachibanaInjectMaster {
-                raw_body: body.to_string(),
-            }))
-        }
-        #[cfg(feature = "e2e-mock")]
-        ("POST", "/api/test/tachibana/inject-daily-history") => {
-            validate_json_body(body)?;
-            Ok(ApiCommand::Test(TestCommand::TachibanaInjectDailyHistory {
-                raw_body: body.to_string(),
-            }))
-        }
-        #[cfg(feature = "e2e-mock")]
-        ("POST", "/api/test/tachibana/inject-market-price") => {
-            validate_json_body(body)?;
-            Ok(ApiCommand::Test(TestCommand::TachibanaInjectMarketPrice {
-                raw_body: body.to_string(),
-            }))
-        }
-        #[cfg(feature = "e2e-mock")]
-        ("POST", "/api/test/tachibana/persist-session") => {
-            Ok(ApiCommand::Test(TestCommand::TachibanaInjectPersistSession))
-        }
-        // ── debug ビルドでも有効（keyring クリア） ────────────────────────
-        #[cfg(any(feature = "e2e-mock", debug_assertions))]
+        // ── debug ビルドで有効（keyring クリア） ─────────────────────────
+        #[cfg(debug_assertions)]
         ("POST", "/api/test/tachibana/delete-persisted-session") => {
             Ok(ApiCommand::Test(TestCommand::TachibanaDeletePersistedSession))
         }
@@ -435,14 +387,6 @@ fn body_opt_str_field(body: &str, key: &str) -> Result<Option<String>, RouteErro
     let parsed: serde_json::Value =
         serde_json::from_str(body).map_err(|_| RouteError::BadRequest)?;
     Ok(parsed.get(key).and_then(|v| v.as_str()).map(|s| s.to_string()))
-}
-
-/// body が有効な JSON であることだけを検証する（e2e-mock ルートで使用）。
-#[cfg(feature = "e2e-mock")]
-fn validate_json_body(body: &str) -> Result<(), RouteError> {
-    serde_json::from_str::<serde_json::Value>(body)
-        .map(|_| ())
-        .map_err(|_| RouteError::BadRequest)
 }
 
 /// HTTP レスポンスを書き込む
@@ -904,67 +848,6 @@ mod tests {
         assert!(matches!(result, Err(RouteError::BadRequest)));
     }
 
-    // ── route tests: test backdoor (e2e-mock only) ──
-
-    #[cfg(feature = "e2e-mock")]
-    fn unwrap_test(cmd: ApiCommand) -> TestCommand {
-        match cmd {
-            ApiCommand::Test(c) => c,
-            _ => panic!("Expected ApiCommand::Test, got {cmd:?}"),
-        }
-    }
-
-    #[cfg(feature = "e2e-mock")]
-    #[test]
-    fn route_post_tachibana_inject_session() {
-        let cmd = route("POST", "/api/test/tachibana/inject-session", "").unwrap();
-        assert!(matches!(
-            unwrap_test(cmd),
-            TestCommand::TachibanaInjectSession
-        ));
-    }
-
-    #[cfg(feature = "e2e-mock")]
-    #[test]
-    fn route_post_tachibana_inject_master_valid() {
-        let body = r#"{"records":[{"sIssueCode":"7203","sIssueName":"トヨタ","sIssueNameEizi":"TOYOTA"}]}"#;
-        let cmd = route("POST", "/api/test/tachibana/inject-master", body).unwrap();
-        match unwrap_test(cmd) {
-            TestCommand::TachibanaInjectMaster { raw_body } => {
-                assert!(raw_body.contains("7203"));
-            }
-            _ => panic!("Expected TachibanaInjectMaster"),
-        }
-    }
-
-    #[cfg(feature = "e2e-mock")]
-    #[test]
-    fn route_post_tachibana_inject_master_invalid_json() {
-        let result = route("POST", "/api/test/tachibana/inject-master", "not json");
-        assert!(matches!(result, Err(RouteError::BadRequest)));
-    }
-
-    #[cfg(feature = "e2e-mock")]
-    #[test]
-    fn route_post_tachibana_inject_daily_history_valid() {
-        let body = r#"{"issue_code":"7203","klines":[{"time":1700000000000,"open":100.0,"high":110.0,"low":90.0,"close":105.0,"volume":1000.0}]}"#;
-        let cmd = route("POST", "/api/test/tachibana/inject-daily-history", body).unwrap();
-        match unwrap_test(cmd) {
-            TestCommand::TachibanaInjectDailyHistory { raw_body } => {
-                assert!(raw_body.contains("7203"));
-                assert!(raw_body.contains("klines"));
-            }
-            _ => panic!("Expected TachibanaInjectDailyHistory"),
-        }
-    }
-
-    #[cfg(feature = "e2e-mock")]
-    #[test]
-    fn route_post_tachibana_inject_daily_history_invalid_json() {
-        let result = route("POST", "/api/test/tachibana/inject-daily-history", "xx");
-        assert!(matches!(result, Err(RouteError::BadRequest)));
-    }
-
     // ── route tests: auth ──
 
     #[test]
@@ -983,67 +866,19 @@ mod tests {
         assert!(matches!(result, Err(RouteError::NotFound)));
     }
 
-    // ── Phase T2: inject-market-price ──
+    // ── inject-* エンドポイントは存在しないため 404 ──
 
-    #[cfg(feature = "e2e-mock")]
     #[test]
-    fn route_post_tachibana_inject_market_price_valid() {
-        let body = r#"{"records":[{"sIssueCode":"7203","pDPP":"3000.0","pDOP":"2990.0","pDHP":"3010.0","pDLP":"2985.0","pDV":"500000.0","pPRP":"2950.0"}]}"#;
-        let cmd = route("POST", "/api/test/tachibana/inject-market-price", body).unwrap();
-        match unwrap_test(cmd) {
-            TestCommand::TachibanaInjectMarketPrice { raw_body } => {
-                assert!(raw_body.contains("7203"));
-                assert!(raw_body.contains("records"));
-            }
-            _ => panic!("Expected TachibanaInjectMarketPrice"),
-        }
-    }
-
-    #[cfg(feature = "e2e-mock")]
-    #[test]
-    fn route_post_tachibana_inject_market_price_invalid_json() {
-        let result = route("POST", "/api/test/tachibana/inject-market-price", "not json");
-        assert!(matches!(result, Err(RouteError::BadRequest)));
-    }
-
-    // ── Phase T3: keyring 永続化テスト ──
-
-    #[cfg(feature = "e2e-mock")]
-    #[test]
-    fn route_post_tachibana_persist_session() {
-        let cmd = route("POST", "/api/test/tachibana/persist-session", "").unwrap();
-        assert!(matches!(
-            unwrap_test(cmd),
-            TestCommand::TachibanaInjectPersistSession
-        ));
-    }
-
-    #[cfg(feature = "e2e-mock")]
-    #[test]
-    fn route_post_tachibana_delete_persisted_session() {
-        let cmd =
-            route("POST", "/api/test/tachibana/delete-persisted-session", "").unwrap();
-        assert!(matches!(
-            unwrap_test(cmd),
-            TestCommand::TachibanaDeletePersistedSession
-        ));
-    }
-
-    // backdoor エンドポイントは feature OFF 時は 404 であるべき
-    #[cfg(not(feature = "e2e-mock"))]
-    #[test]
-    fn route_test_backdoor_disabled_when_feature_off() {
+    fn route_test_inject_endpoints_not_found() {
         let r1 = route("POST", "/api/test/tachibana/inject-session", "");
         let r2 = route("POST", "/api/test/tachibana/inject-master", "{}");
         let r3 = route("POST", "/api/test/tachibana/inject-daily-history", "{}");
         let r4 = route("POST", "/api/test/tachibana/inject-market-price", "{}");
         let r5 = route("POST", "/api/test/tachibana/persist-session", "");
-        let r6 = route("POST", "/api/test/tachibana/delete-persisted-session", "");
         assert!(matches!(r1, Err(RouteError::NotFound)));
         assert!(matches!(r2, Err(RouteError::NotFound)));
         assert!(matches!(r3, Err(RouteError::NotFound)));
         assert!(matches!(r4, Err(RouteError::NotFound)));
         assert!(matches!(r5, Err(RouteError::NotFound)));
-        assert!(matches!(r6, Err(RouteError::NotFound)));
     }
 }

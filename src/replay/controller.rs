@@ -14,6 +14,7 @@ use super::{ReplayMessage, ReplayState, loader, min_timeframe_ms, parse_replay_r
 /// `Deref<Target = ReplayState>` を実装するため、既存の `replay.is_replay()` 等の
 /// 読み取りメソッドはそのままコンパイルできる。状態変化・副作用を伴う処理は
 /// [`ReplayController::handle_message`] と [`ReplayController::tick`] に集約する。
+#[derive(Default)]
 pub struct ReplayController {
     pub state: ReplayState,
 }
@@ -31,13 +32,6 @@ impl std::ops::DerefMut for ReplayController {
     }
 }
 
-impl Default for ReplayController {
-    fn default() -> Self {
-        Self {
-            state: ReplayState::default(),
-        }
-    }
-}
 
 impl From<ReplayState> for ReplayController {
     fn from(state: ReplayState) -> Self {
@@ -360,7 +354,7 @@ impl ReplayController {
         for stream in self.state.active_streams.iter() {
             let klines = self.state.event_store.klines_in(stream, 0..target_ms + 1);
             if !klines.is_empty() {
-                dashboard.ingest_replay_klines(stream, &klines.to_vec(), main_window_id);
+                dashboard.ingest_replay_klines(stream, klines, main_window_id);
             }
         }
     }

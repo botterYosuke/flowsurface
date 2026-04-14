@@ -33,9 +33,6 @@ cargo fmt --check
 
 # コンパイル確認（高速）
 cargo check
-
-# E2E テスト用ビルド
-cargo build --features e2e-mock
 ```
 
 ## スキルの使い方ガイド

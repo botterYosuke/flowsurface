@@ -40,7 +40,3 @@ mockito = "1.5"
 rstest.workspace = true
 tokio = { version = "1.43", features = ["rt", "macros", "rt-multi-thread"] }
 
-[features]
-# E2E テスト用の fixture 注入バックドア（本番ビルドには絶対に含めない）。
-# 詳細: docs/plan/tachibana_e2e_phase_t1.md
-e2e-mock = []

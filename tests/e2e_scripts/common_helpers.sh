@@ -91,6 +91,34 @@ wait_playing() {
   return 1
 }
 
+# Playing 到達失敗時の原因を診断して stdout に出力する。
+# ログイン失敗・セッション不在などを検出し、単なる "timeout" と区別する。
+diagnose_playing_failure() {
+  local auth session notifs login_blocked
+  auth=$(curl -s "$API/auth/tachibana/status" 2>/dev/null || echo '{}')
+  session=$(node -e "try{const d=JSON.parse(process.argv[1]);console.log(d.session||'none');}catch(e){console.log('unknown');}" "$auth")
+  notifs=$(curl -s "$API/notification/list" 2>/dev/null || echo '{"notifications":[]}')
+  login_blocked=$(node -e "
+    try {
+      const ns=(JSON.parse(process.argv[1]).notifications||[]);
+      const LOGIN_KEYWORDS=['login','ログイン','session','deferred','failed','失敗'];
+      const ERR_LEVELS=['error','warning'];
+      const hit=ns.some(n=>
+        (ERR_LEVELS.includes(n.level)) &&
+        LOGIN_KEYWORDS.some(k=>(n.body||'').toLowerCase().includes(k)||(n.title||'').toLowerCase().includes(k))
+      );
+      console.log(hit?'true':'false');
+    } catch(e){console.log('false');}
+  " "$notifs")
+  if [ "$login_blocked" = "true" ]; then
+    echo "  [DIAG] ログイン失敗によるブロック検出 (session=$session). 通知: $(node -e "const d=JSON.parse(process.argv[1]);console.log((d.notifications||[]).map(n=>n.level+':'+n.body).join(' | ')||'(none)');" "$notifs")"
+  elif [ "$session" = "none" ]; then
+    echo "  [DIAG] Tachibana セッションなし (session=none) — e2e-mock ビルドか確認してください"
+  else
+    echo "  [DIAG] タイムアウト (session=$session) — Binance 接続・e2e-mock フィクスチャを確認してください"
+  fi
+}
+
 wait_paused() {
   local MAX=${1:-15}
   for i in $(seq 1 $MAX); do
