@@ -1527,6 +1527,28 @@ impl Flowsurface {
         };
 
         let main_window_id = self.main_window.id;
+
+        // リプレイ中は mutable borrow の前に旧 kline stream を確保する。
+        // init_focused_pane は pane の streams を書き換えるため、先に取得しておく必要がある。
+        let old_kline_stream_for_replay = if self.replay.is_replay() {
+            self.active_dashboard()
+                .iter_all_panes(main_window_id)
+                .find(|(_, p, _)| *p == pg_pane)
+                .and_then(|(_, _, state)| {
+                    state
+                        .streams
+                        .ready_iter()
+                        .and_then(|mut it| {
+                            it.find(|s| {
+                                matches!(s, exchange::adapter::StreamKind::Kline { .. })
+                            })
+                        })
+                        .copied()
+                })
+        } else {
+            None
+        };
+
         let dashboard = self.active_dashboard_mut();
 
         // 既存コンテンツの kind を保ったまま ticker を差し替える。
@@ -1548,15 +1570,31 @@ impl Flowsurface {
             })
             .unwrap_or(data::layout::pane::ContentKind::CandlestickChart);
 
+        // リプレイ中は ReloadKlineStream で clock を Paused に遷移させる。
+        // active_streams の旧 stream を除去し新 stream を登録、klines を再ロードするため
+        // SyncReplayBuffers ではなく ReloadKlineStream を chain する。
+        let replay_task = if let Some(old) = old_kline_stream_for_replay
+            && let Some((_, tf)) = old.as_kline_stream()
+        {
+            let new_stream = exchange::adapter::StreamKind::Kline {
+                ticker_info,
+                timeframe: tf,
+            };
+            Task::done(Message::Replay(ReplayMessage::ReloadKlineStream {
+                old_stream: Some(old),
+                new_stream,
+            }))
+        } else {
+            Task::done(Message::Replay(ReplayMessage::SyncReplayBuffers))
+        };
+
         let task = dashboard
             .init_focused_pane(main_window_id, ticker_info, kind)
             .map(move |msg| Message::Dashboard {
                 layout_id: None,
                 event: msg,
             })
-            .chain(Task::done(Message::Replay(
-                ReplayMessage::SyncReplayBuffers,
-            )));
+            .chain(replay_task);
 
         // focus を元に戻す
         let dashboard = self.active_dashboard_mut();
@@ -1614,9 +1652,10 @@ impl Flowsurface {
             );
         };
 
-        // 対象ペインの現在の ticker_info と kind を取得
+        // 対象ペインの現在の ticker_info・kind・旧 kline stream を取得する。
+        // init_focused_pane は pane の streams を書き換えるため、mutable borrow の前に取得する。
         let main_window_id = self.main_window.id;
-        let (ticker_info, kind) = {
+        let (ticker_info, kind, old_kline_stream_for_replay) = {
             let dashboard = self.active_dashboard();
             let Some((_, _, state)) = dashboard
                 .iter_all_panes(main_window_id)
@@ -1635,7 +1674,21 @@ impl Flowsurface {
                     Task::none(),
                 );
             };
-            (ti, state.content.kind())
+            // リプレイ中は旧 kline stream を保存（ReloadKlineStream で active_streams を更新するため）
+            let old_kline = if self.replay.is_replay() {
+                state
+                    .streams
+                    .ready_iter()
+                    .and_then(|mut it| {
+                        it.find(|s| {
+                            matches!(s, exchange::adapter::StreamKind::Kline { .. })
+                        })
+                    })
+                    .copied()
+            } else {
+                None
+            };
+            (ti, state.content.kind(), old_kline)
         };
 
         // settings.selected_basis を書き換えてから init_focused_pane を呼ぶ。
@@ -1652,15 +1705,27 @@ impl Flowsurface {
             state.settings.selected_basis = Some(data::chart::Basis::Time(tf));
         }
 
+        // リプレイ中は ReloadKlineStream で clock を Paused に遷移させる。
+        let replay_task = if let Some(old) = old_kline_stream_for_replay {
+            let new_stream = exchange::adapter::StreamKind::Kline {
+                ticker_info,
+                timeframe: tf,
+            };
+            Task::done(Message::Replay(ReplayMessage::ReloadKlineStream {
+                old_stream: Some(old),
+                new_stream,
+            }))
+        } else {
+            Task::done(Message::Replay(ReplayMessage::SyncReplayBuffers))
+        };
+
         let task = dashboard
             .init_focused_pane(main_window_id, ticker_info, kind)
             .map(move |msg| Message::Dashboard {
                 layout_id: None,
                 event: msg,
             })
-            .chain(Task::done(Message::Replay(
-                ReplayMessage::SyncReplayBuffers,
-            )));
+            .chain(replay_task);
 
         let dashboard = self.active_dashboard_mut();
         dashboard.focus = prev_focus;
