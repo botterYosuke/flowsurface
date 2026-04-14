@@ -13,8 +13,8 @@ pub enum ApiCommand {
     Pane(PaneCommand),
     /// 認証状態確認コマンド（テスト・デバッグ用、本番ビルドにも含まれる）。
     Auth(AuthCommand),
-    /// E2E テスト用の fixture 注入コマンド（`e2e-mock` feature でのみ有効）。
-    #[cfg(feature = "e2e-mock")]
+    /// E2E テスト用コマンド（`e2e-mock` feature または debug ビルドで有効）。
+    #[cfg(any(feature = "e2e-mock", debug_assertions))]
     Test(TestCommand),
 }
 
@@ -26,26 +26,28 @@ pub enum AuthCommand {
 }
 
 /// E2E テスト fixture 注入コマンド。
-/// 認証・MASTER I/F・日足取得をバイパスし、mock データで Tachibana D1 リプレイを検証する。
 /// 詳細: docs/plan/tachibana_e2e_phase_t1.md
-#[cfg(feature = "e2e-mock")]
+#[cfg(any(feature = "e2e-mock", debug_assertions))]
 #[derive(Debug, Clone)]
 pub enum TestCommand {
-    /// ダミー `TachibanaSession` をメモリに格納する（keyring 非経由）
+    /// ダミー `TachibanaSession` をメモリに格納する（keyring 非経由、e2e-mock のみ）。
+    #[cfg(feature = "e2e-mock")]
     TachibanaInjectSession,
-    /// `ISSUE_MASTER_CACHE` に MasterRecord を直接注入する。
-    /// body は `/api/test/tachibana/inject-master` で受け取った JSON 文字列そのまま。
+    /// `ISSUE_MASTER_CACHE` に MasterRecord を直接注入する（e2e-mock のみ）。
+    #[cfg(feature = "e2e-mock")]
     TachibanaInjectMaster { raw_body: String },
-    /// `MOCK_DAILY_HISTORY` に issue_code → Vec<Kline> を登録する。
+    /// `MOCK_DAILY_HISTORY` に issue_code → Vec<Kline> を登録する（e2e-mock のみ）。
+    #[cfg(feature = "e2e-mock")]
     TachibanaInjectDailyHistory { raw_body: String },
     // ── Phase T2 ──────────────────────────────────────────────────────────
-    /// `MOCK_MARKET_PRICES` に MarketPriceRecord を登録する（Phase T2）。
-    /// 以降の `fetch_market_prices` 呼び出しがネットワークを叩かず mock を返す。
+    /// `MOCK_MARKET_PRICES` に MarketPriceRecord を登録する（e2e-mock のみ）。
+    #[cfg(feature = "e2e-mock")]
     TachibanaInjectMarketPrice { raw_body: String },
     // ── Phase T3 ──────────────────────────────────────────────────────────
-    /// ダミーセッションをメモリ AND keyring 両方に保存する（Phase T3 keyring テスト用）。
+    /// ダミーセッションをメモリ AND keyring 両方に保存する（e2e-mock のみ）。
+    #[cfg(feature = "e2e-mock")]
     TachibanaInjectPersistSession,
-    /// メモリセッション + keyring セッションを両方クリアする（Phase T3 keyring テスト用）。
+    /// メモリセッション + keyring セッションを両方クリアする（debug ビルド以上で有効）。
     TachibanaDeletePersistedSession,
 }
 
@@ -365,7 +367,8 @@ fn route(method: &str, path: &str, body: &str) -> Result<ApiCommand, RouteError>
         ("POST", "/api/test/tachibana/persist-session") => {
             Ok(ApiCommand::Test(TestCommand::TachibanaInjectPersistSession))
         }
-        #[cfg(feature = "e2e-mock")]
+        // ── debug ビルドでも有効（keyring クリア） ────────────────────────
+        #[cfg(any(feature = "e2e-mock", debug_assertions))]
         ("POST", "/api/test/tachibana/delete-persisted-session") => {
             Ok(ApiCommand::Test(TestCommand::TachibanaDeletePersistedSession))
         }

@@ -135,11 +135,12 @@ pub fn persist_injected_session() {
 
 /// E2E テスト用（Phase T3）: メモリセッションと keyring セッションを両方クリアする。
 /// テスト間のクリーンアップや「セッション未存在」状態の確認に使用。
-#[cfg(feature = "e2e-mock")]
+/// `e2e-mock` feature または debug ビルドで有効（release ビルドには含まれない）。
+#[cfg(any(feature = "e2e-mock", debug_assertions))]
 pub fn delete_all_sessions() {
     clear_session();
     data::config::tachibana::delete_session();
-    log::info!("Tachibana [e2e-mock]: all sessions cleared (memory + keyring)");
+    log::info!("Tachibana: all sessions cleared (memory + keyring)");
 }
 
 /// TachibanaError をユーザー向けメッセージに変換する。

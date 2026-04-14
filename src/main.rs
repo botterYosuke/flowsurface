@@ -939,7 +939,7 @@ impl Flowsurface {
                         let body = self.handle_auth_api(cmd);
                         reply_tx.send(body);
                     }
-                    #[cfg(feature = "e2e-mock")]
+                    #[cfg(any(feature = "e2e-mock", debug_assertions))]
                     ApiCommand::Test(cmd) => {
                         let (body, task) = self.handle_test_api(cmd);
                         reply_tx.send(body);
@@ -1230,18 +1230,20 @@ impl Flowsurface {
 
     /// Pane CRUD API コマンドを処理する。
     /// 返り値: (JSON レスポンス, 続行する Task)。
-    /// E2E テスト用 fixture 注入コマンドを処理する。
-    /// `e2e-mock` feature でのみコンパイルされ、本番ビルドには含まれない。
+    /// E2E テスト用コマンドを処理する。
+    /// `e2e-mock` feature または debug ビルドでコンパイルされる。本番 release ビルドには含まれない。
     /// 詳細: docs/plan/tachibana_e2e_phase_t1.md
-    #[cfg(feature = "e2e-mock")]
+    #[cfg(any(feature = "e2e-mock", debug_assertions))]
     fn handle_test_api(
         &mut self,
         cmd: replay_api::TestCommand,
     ) -> (String, Task<Message>) {
+        #[cfg(feature = "e2e-mock")]
         use exchange::adapter::tachibana;
         use replay_api::TestCommand;
 
         match cmd {
+            #[cfg(feature = "e2e-mock")]
             TestCommand::TachibanaInjectSession => {
                 connector::auth::inject_dummy_session();
                 (
@@ -1249,6 +1251,7 @@ impl Flowsurface {
                     Task::none(),
                 )
             }
+            #[cfg(feature = "e2e-mock")]
             TestCommand::TachibanaInjectMaster { raw_body } => {
                 // body 形式: {"records": [{"sIssueCode":"7203", ...}, ...]}
                 let err_body = |msg: String| -> (String, Task<Message>) {
@@ -1309,6 +1312,7 @@ impl Flowsurface {
                 .to_string();
                 (body, task)
             }
+            #[cfg(feature = "e2e-mock")]
             TestCommand::TachibanaInjectDailyHistory { raw_body } => {
                 // body 形式: {"issue_code":"7203","klines":[{"time":...,"open":...,"high":...,"low":...,"close":...,"volume":...}, ...]}
                 let err_body = |msg: String| -> (String, Task<Message>) {
@@ -1378,6 +1382,7 @@ impl Flowsurface {
             }
 
             // ── Phase T2: inject-market-price ──────────────────────────────
+            #[cfg(feature = "e2e-mock")]
             TestCommand::TachibanaInjectMarketPrice { raw_body } => {
                 // body 形式: {"records": [{"sIssueCode":"7203","pDPP":"3000.0",...}, ...]}
                 let err_body = |msg: String| -> (String, Task<Message>) {
@@ -1409,6 +1414,7 @@ impl Flowsurface {
             }
 
             // ── Phase T3: keyring 永続化テスト ──────────────────────────────
+            #[cfg(feature = "e2e-mock")]
             TestCommand::TachibanaInjectPersistSession => {
                 connector::auth::persist_injected_session();
                 (
