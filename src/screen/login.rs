@@ -129,10 +129,9 @@ impl LoginScreen {
     pub fn new() -> Self {
         // ↓↓↓ DEV AUTO-LOGIN: 環境変数 DEV_USER_ID / DEV_PASSWORD が設定されている場合のみ有効 ↓↓↓
         #[cfg(debug_assertions)]
-        if let (Ok(user_id), Ok(password)) = (
-            std::env::var("DEV_USER_ID"),
-            std::env::var("DEV_PASSWORD"),
-        ) {
+        if let (Ok(user_id), Ok(password)) =
+            (std::env::var("DEV_USER_ID"), std::env::var("DEV_PASSWORD"))
+        {
             let is_demo = std::env::var("DEV_IS_DEMO").is_ok_and(|v| v == "true");
             return Self {
                 user_id,

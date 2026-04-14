@@ -104,8 +104,8 @@ mod tests {
 
     #[test]
     fn mark_resolution_due_forces_immediate_resolve() {
-        use std::time::{Duration, Instant};
         use data::stream::PersistStreamKind;
+        use std::time::{Duration, Instant};
 
         let streams = vec![PersistStreamKind::Kline {
             ticker: exchange::Ticker::new("BTCUSDT", exchange::adapter::Exchange::BinanceLinear),

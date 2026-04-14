@@ -403,10 +403,16 @@ impl Dashboard {
                             pane::Effect::FocusWidget(id) => {
                                 return (iced::widget::operation::focus(id), None);
                             }
-                            pane::Effect::ReloadReplayKlines { old_stream, new_stream } => {
+                            pane::Effect::ReloadReplayKlines {
+                                old_stream,
+                                new_stream,
+                            } => {
                                 return (
                                     Task::none(),
-                                    Some(Event::ReloadReplayKlines { old_stream, new_stream }),
+                                    Some(Event::ReloadReplayKlines {
+                                        old_stream,
+                                        new_stream,
+                                    }),
                                 );
                             }
                         };
@@ -1465,10 +1471,7 @@ mod tests {
         let state = dashboard.panes.get_mut(pane).unwrap();
         // Use a placeholder PersistStreamKind — just needs to be non-empty
         state.streams = ResolvedStream::waiting(vec![PersistStreamKind::Kline {
-            ticker: exchange::Ticker::new(
-                "BTCUSDT",
-                exchange::adapter::Exchange::BinanceLinear,
-            ),
+            ticker: exchange::Ticker::new("BTCUSDT", exchange::adapter::Exchange::BinanceLinear),
             timeframe: exchange::Timeframe::M1,
         }]);
         assert!(!dashboard.all_panes_have_ready_streams(main_window));
@@ -1486,10 +1489,7 @@ mod tests {
         let pane = *dashboard.panes.iter().next().map(|(p, _)| p).unwrap();
         let state = dashboard.panes.get_mut(pane).unwrap();
         state.streams = ResolvedStream::waiting(vec![PersistStreamKind::Kline {
-            ticker: exchange::Ticker::new(
-                "BTCUSDT",
-                exchange::adapter::Exchange::BinanceLinear,
-            ),
+            ticker: exchange::Ticker::new("BTCUSDT", exchange::adapter::Exchange::BinanceLinear),
             timeframe: exchange::Timeframe::M1,
         }]);
         // Simulate a recent attempt so due_streams_to_resolve would normally return None
@@ -1498,14 +1498,24 @@ mod tests {
         }
 
         // Before: due_streams_to_resolve returns None (retry interval not elapsed)
-        assert!(state.streams.due_streams_to_resolve(Instant::now()).is_none());
+        assert!(
+            state
+                .streams
+                .due_streams_to_resolve(Instant::now())
+                .is_none()
+        );
 
         // Call refresh_waiting_panes
         dashboard.refresh_waiting_panes(main_window);
 
         // After: due_streams_to_resolve returns Some (forced due)
         let pane_state = dashboard.panes.get_mut(pane).unwrap();
-        assert!(pane_state.streams.due_streams_to_resolve(Instant::now()).is_some());
+        assert!(
+            pane_state
+                .streams
+                .due_streams_to_resolve(Instant::now())
+                .is_some()
+        );
     }
 
     #[test]

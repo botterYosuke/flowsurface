@@ -18,10 +18,7 @@ pub struct KlineLoadResult {
 
 /// klines を全量フェッチして `KlineLoadResult` を返す。
 /// `Task::perform(load_klines(...), |result| Message::ReplayKlinesLoaded(result))` で使う。
-pub async fn load_klines(
-    stream: StreamKind,
-    range: Range<u64>,
-) -> Result<KlineLoadResult, String> {
+pub async fn load_klines(stream: StreamKind, range: Range<u64>) -> Result<KlineLoadResult, String> {
     let (ticker_info, timeframe) = match stream {
         StreamKind::Kline {
             ticker_info,
@@ -76,9 +73,9 @@ async fn fetch_all_klines(
 mod tests {
     use super::super::store::{EventStore, LoadedData};
     use exchange::adapter::{Exchange, StreamKind};
+    use exchange::unit::MinTicksize;
     use exchange::unit::price::Price;
     use exchange::unit::qty::Qty;
-    use exchange::unit::MinTicksize;
     use exchange::{Ticker, TickerInfo, Timeframe, Trade, Volume};
 
     fn trade_stream() -> StreamKind {

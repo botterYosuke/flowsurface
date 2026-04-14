@@ -1,8 +1,8 @@
 use std::collections::HashSet;
 use std::time::Instant;
 
-use exchange::{Kline, Trade};
 use exchange::adapter::StreamKind;
+use exchange::{Kline, Trade};
 
 use super::clock::{ClockStatus, StepClock};
 use super::store::EventStore;
@@ -78,11 +78,11 @@ pub fn dispatch_tick(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
+    use exchange::Volume;
+    use exchange::unit::MinTicksize;
     use exchange::unit::price::Price;
     use exchange::unit::qty::Qty;
-    use exchange::unit::MinTicksize;
-    use exchange::Volume;
+    use std::time::Duration;
 
     fn t(base: Instant, ms: u64) -> Instant {
         base + Duration::from_millis(ms)
@@ -178,8 +178,16 @@ mod tests {
         let result = dispatch_tick(&mut clock, &store, &streams, t(base, 100));
         assert_eq!(result.current_time, 1_000);
 
-        let (_, trades) = result.trade_events.iter().find(|(s, _)| *s == stream).unwrap();
-        assert_eq!(trades.len(), 1, "trade at 500 included; trade at 1000 excluded (half-open)");
+        let (_, trades) = result
+            .trade_events
+            .iter()
+            .find(|(s, _)| *s == stream)
+            .unwrap();
+        assert_eq!(
+            trades.len(),
+            1,
+            "trade at 500 included; trade at 1000 excluded (half-open)"
+        );
         assert_eq!(trades[0].time, 500);
     }
 
@@ -200,7 +208,11 @@ mod tests {
         let result = dispatch_tick(&mut clock, &store, &streams, t(base, 200));
         assert_eq!(result.current_time, 2_000);
 
-        let (_, trades) = result.trade_events.iter().find(|(s, _)| *s == stream).unwrap();
+        let (_, trades) = result
+            .trade_events
+            .iter()
+            .find(|(s, _)| *s == stream)
+            .unwrap();
         assert_eq!(trades.len(), 2, "trades at 500 and 1000 both in [0, 2000)");
     }
 

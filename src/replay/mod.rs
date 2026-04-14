@@ -40,7 +40,11 @@ pub fn compute_load_range(start_ms: u64, end_ms: u64, step_size_ms: u64) -> std:
 /// `k.time < start_ms` の条件で strictly less than を使うため、
 /// Start 時刻ちょうどのバーは含まない（dispatcher の最初の tick が注入する）。
 pub fn pre_start_history(klines: &[Kline], start_ms: u64) -> Vec<Kline> {
-    klines.iter().filter(|k| k.time < start_ms).cloned().collect()
+    klines
+        .iter()
+        .filter(|k| k.time < start_ms)
+        .cloned()
+        .collect()
 }
 
 /// StepBackward で clock を戻す先の時刻を計算する。
@@ -61,7 +65,10 @@ pub fn compute_step_backward_target(
 pub enum ReplayCommand {
     GetStatus,
     Toggle,
-    Play { start: String, end: String },
+    Play {
+        start: String,
+        end: String,
+    },
     Pause,
     Resume,
     StepForward,
@@ -886,7 +893,10 @@ mod tests {
     // ── pre_start_history ────────────────────────────────────────────────────
 
     fn make_kline_at(time: u64) -> Kline {
-        use exchange::{Volume, unit::{Qty, price::Price}};
+        use exchange::{
+            Volume,
+            unit::{Qty, price::Price},
+        };
         Kline {
             time,
             open: Price::from_f32(100.0),

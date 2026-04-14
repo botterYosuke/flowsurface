@@ -853,8 +853,7 @@ pub async fn fetch_klines(
 
     while cursor < range_end {
         let chunk_end = (cursor + chunk_ms).min(range_end);
-        let chunk =
-            fetch_klines_single(ticker_info, timeframe, Some((cursor, chunk_end))).await?;
+        let chunk = fetch_klines_single(ticker_info, timeframe, Some((cursor, chunk_end))).await?;
         all_klines.extend(chunk);
         cursor = chunk_end;
     }

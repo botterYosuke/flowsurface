@@ -168,7 +168,10 @@ impl StepClock {
 
         // Catch-up ループ: 溜まったステップをまとめて emit
         while self.status == ClockStatus::Playing && wall_now >= next_step {
-            let new_now = self.now_ms.saturating_add(self.step_size_ms).min(self.range.end);
+            let new_now = self
+                .now_ms
+                .saturating_add(self.step_size_ms)
+                .min(self.range.end);
             self.now_ms = new_now;
             next_step += Duration::from_millis(step_delay_ms);
 

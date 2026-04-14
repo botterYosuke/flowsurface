@@ -40,17 +40,11 @@ pub enum PaneCommand {
     ListPanes,
     /// ペインを分割する。axis: "Vertical" | "Horizontal"
     /// new_content は無視（既存 pane::Message::SplitPane は Starter しか生成しない）
-    Split {
-        pane_id: uuid::Uuid,
-        axis: String,
-    },
+    Split { pane_id: uuid::Uuid, axis: String },
     /// ペインを閉じる
     Close { pane_id: uuid::Uuid },
     /// ペインのストリームを別 ticker に差し替える（SerTicker 形式 "BinanceLinear:BTCUSDT"）
-    SetTicker {
-        pane_id: uuid::Uuid,
-        ticker: String,
-    },
+    SetTicker { pane_id: uuid::Uuid, ticker: String },
     /// ペインのタイムフレームを変更する（"M1" 〜 "D1"）
     SetTimeframe {
         pane_id: uuid::Uuid,
@@ -257,33 +251,19 @@ fn validate_datetime_str(s: &str) -> Result<(), RouteError> {
 fn route(method: &str, path: &str, body: &str) -> Result<ApiCommand, RouteError> {
     match (method, path) {
         // ── Replay 制御 ────────────────────────────────────────────────────
-        ("GET", "/api/replay/status") => {
-            Ok(ApiCommand::Replay(ReplayCommand::GetStatus))
-        }
-        ("POST", "/api/replay/toggle") => {
-            Ok(ApiCommand::Replay(ReplayCommand::Toggle))
-        }
+        ("GET", "/api/replay/status") => Ok(ApiCommand::Replay(ReplayCommand::GetStatus)),
+        ("POST", "/api/replay/toggle") => Ok(ApiCommand::Replay(ReplayCommand::Toggle)),
         ("POST", "/api/replay/play") => parse_play_command(body),
-        ("POST", "/api/replay/pause") => {
-            Ok(ApiCommand::Replay(ReplayCommand::Pause))
-        }
-        ("POST", "/api/replay/resume") => {
-            Ok(ApiCommand::Replay(ReplayCommand::Resume))
-        }
-        ("POST", "/api/replay/step-forward") => {
-            Ok(ApiCommand::Replay(ReplayCommand::StepForward))
-        }
+        ("POST", "/api/replay/pause") => Ok(ApiCommand::Replay(ReplayCommand::Pause)),
+        ("POST", "/api/replay/resume") => Ok(ApiCommand::Replay(ReplayCommand::Resume)),
+        ("POST", "/api/replay/step-forward") => Ok(ApiCommand::Replay(ReplayCommand::StepForward)),
         ("POST", "/api/replay/step-backward") => {
             Ok(ApiCommand::Replay(ReplayCommand::StepBackward))
         }
-        ("POST", "/api/replay/speed") => {
-            Ok(ApiCommand::Replay(ReplayCommand::CycleSpeed))
-        }
+        ("POST", "/api/replay/speed") => Ok(ApiCommand::Replay(ReplayCommand::CycleSpeed)),
 
         // ── App 制御 ───────────────────────────────────────────────────────
-        ("POST", "/api/app/save") => {
-            Ok(ApiCommand::Replay(ReplayCommand::SaveState))
-        }
+        ("POST", "/api/app/save") => Ok(ApiCommand::Replay(ReplayCommand::SaveState)),
 
         // ── 認証（本番ビルドにも含まれる）────────────────────────────────
         ("GET", "/api/auth/tachibana/status") => {
@@ -291,12 +271,8 @@ fn route(method: &str, path: &str, body: &str) -> Result<ApiCommand, RouteError>
         }
 
         // ── ペイン CRUD ────────────────────────────────────────────────────
-        ("GET", "/api/pane/list") => {
-            Ok(ApiCommand::Pane(PaneCommand::ListPanes))
-        }
-        ("GET", p) if p.starts_with("/api/pane/chart-snapshot") => {
-            parse_chart_snapshot_command(p)
-        }
+        ("GET", "/api/pane/list") => Ok(ApiCommand::Pane(PaneCommand::ListPanes)),
+        ("GET", p) if p.starts_with("/api/pane/chart-snapshot") => parse_chart_snapshot_command(p),
         ("POST", "/api/pane/split") => parse_split_command(body),
         ("POST", "/api/pane/close") => {
             let pane_id = body_uuid_field(body, "pane_id")?;
@@ -310,20 +286,21 @@ fn route(method: &str, path: &str, body: &str) -> Result<ApiCommand, RouteError>
         ("POST", "/api/pane/set-timeframe") => {
             let pane_id = body_uuid_field(body, "pane_id")?;
             let timeframe = body_str_field(body, "timeframe")?;
-            Ok(ApiCommand::Pane(PaneCommand::SetTimeframe { pane_id, timeframe }))
+            Ok(ApiCommand::Pane(PaneCommand::SetTimeframe {
+                pane_id,
+                timeframe,
+            }))
         }
 
         // ── その他 ────────────────────────────────────────────────────────
-        ("GET", "/api/notification/list") => {
-            Ok(ApiCommand::Pane(PaneCommand::ListNotifications))
-        }
+        ("GET", "/api/notification/list") => Ok(ApiCommand::Pane(PaneCommand::ListNotifications)),
         ("POST", "/api/sidebar/select-ticker") => parse_sidebar_select_ticker(body),
 
         // ── debug ビルドで有効（keyring クリア） ─────────────────────────
         #[cfg(debug_assertions)]
-        ("POST", "/api/test/tachibana/delete-persisted-session") => {
-            Ok(ApiCommand::Test(TestCommand::TachibanaDeletePersistedSession))
-        }
+        ("POST", "/api/test/tachibana/delete-persisted-session") => Ok(ApiCommand::Test(
+            TestCommand::TachibanaDeletePersistedSession,
+        )),
 
         _ => Err(RouteError::NotFound),
     }
@@ -386,7 +363,10 @@ fn parse_sidebar_select_ticker(body: &str) -> Result<ApiCommand, RouteError> {
 fn body_opt_str_field(body: &str, key: &str) -> Result<Option<String>, RouteError> {
     let parsed: serde_json::Value =
         serde_json::from_str(body).map_err(|_| RouteError::BadRequest)?;
-    Ok(parsed.get(key).and_then(|v| v.as_str()).map(|s| s.to_string()))
+    Ok(parsed
+        .get(key)
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string()))
 }
 
 /// HTTP レスポンスを書き込む
@@ -717,8 +697,7 @@ mod tests {
 
     #[test]
     fn route_post_pane_set_timeframe_valid() {
-        let body =
-            r#"{"pane_id":"00000000-0000-0000-0000-000000000004","timeframe":"M5"}"#;
+        let body = r#"{"pane_id":"00000000-0000-0000-0000-000000000004","timeframe":"M5"}"#;
         let cmd = route("POST", "/api/pane/set-timeframe", body).unwrap();
         match unwrap_pane(cmd) {
             PaneCommand::SetTimeframe { pane_id, timeframe } => {
@@ -809,7 +788,11 @@ mod tests {
 
     #[test]
     fn route_post_chart_snapshot_not_found() {
-        let result = route("POST", "/api/pane/chart-snapshot?pane_id=00000000-0000-0000-0000-000000000010", "");
+        let result = route(
+            "POST",
+            "/api/pane/chart-snapshot?pane_id=00000000-0000-0000-0000-000000000010",
+            "",
+        );
         assert!(matches!(result, Err(RouteError::NotFound)));
     }
 

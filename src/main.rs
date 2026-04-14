@@ -71,7 +71,9 @@ fn extract_pane_ticker_timeframe(
             }
             (ticker_str, tf_str)
         }
-        ResolvedStream::Waiting { streams: persist, .. } => {
+        ResolvedStream::Waiting {
+            streams: persist, ..
+        } => {
             let mut ticker_str: Option<String> = None;
             let mut tf_str: Option<String> = None;
             for ps in persist {
@@ -218,8 +220,7 @@ impl Flowsurface {
                 };
                 let range_start = saved_state.replay_config.range_start;
                 let range_end = saved_state.replay_config.range_end;
-                let has_valid_range =
-                    replay::parse_replay_range(&range_start, &range_end).is_ok();
+                let has_valid_range = replay::parse_replay_range(&range_start, &range_end).is_ok();
                 let pending_auto_play =
                     replay_mode == replay::ReplayMode::Replay && has_valid_range;
                 ReplayController::from(ReplayState {
@@ -301,10 +302,14 @@ impl Flowsurface {
                 // 再ログイン失敗 → ログイン画面を表示（e2e-mock ではスキップ）
                 let main_window_id = self.main_window.id;
                 if self.replay.pending_auto_play
-                    && self.active_dashboard().has_tachibana_stream_pane(main_window_id)
+                    && self
+                        .active_dashboard()
+                        .has_tachibana_stream_pane(main_window_id)
                 {
                     self.replay.on_session_unavailable();
-                    log::info!("[auto-play] session unavailable — auto-play deferred (Tachibana login required)");
+                    log::info!(
+                        "[auto-play] session unavailable — auto-play deferred (Tachibana login required)"
+                    );
                     self.notifications.push(Toast::info(
                         "Replay auto-play was deferred: please log in to resume",
                     ));
@@ -518,7 +523,10 @@ impl Flowsurface {
 
                             let has_any_ticker_info =
                                 tickers_info.values().any(|opt| opt.is_some());
-                            log::info!("[e2e-live] ResolveStreams pane={pane_id} streams={} has_ticker_info={has_any_ticker_info}", streams.len());
+                            log::info!(
+                                "[e2e-live] ResolveStreams pane={pane_id} streams={} has_ticker_info={has_any_ticker_info}",
+                                streams.len()
+                            );
                             if !has_any_ticker_info {
                                 log::debug!(
                                     "Deferring persisted stream resolution for pane {pane_id}: ticker metadata not loaded yet"
@@ -545,7 +553,10 @@ impl Flowsurface {
 
                             match resolved_streams {
                                 Ok(resolved) => {
-                                    log::info!("[e2e-live] Streams resolved: {} streams for pane={pane_id}", resolved.len());
+                                    log::info!(
+                                        "[e2e-live] Streams resolved: {} streams for pane={pane_id}",
+                                        resolved.len()
+                                    );
                                     if resolved.is_empty() {
                                         return Task::none();
                                     }
@@ -568,7 +579,9 @@ impl Flowsurface {
                                             .active_dashboard()
                                             .all_panes_have_ready_streams(main_window.id)
                                     {
-                                        log::info!("[auto-play] All panes ready — firing ReplayMessage::Play");
+                                        log::info!(
+                                            "[auto-play] All panes ready — firing ReplayMessage::Play"
+                                        );
                                         self.replay.pending_auto_play = false;
                                         let play_task =
                                             Task::done(Message::Replay(ReplayMessage::Play));
@@ -593,12 +606,13 @@ impl Flowsurface {
 
                             Task::none()
                         }
-                        Some(dashboard::Event::ReloadReplayKlines { old_stream, new_stream }) => {
-                            Task::done(Message::Replay(ReplayMessage::ReloadKlineStream {
-                                old_stream,
-                                new_stream,
-                            }))
-                        }
+                        Some(dashboard::Event::ReloadReplayKlines {
+                            old_stream,
+                            new_stream,
+                        }) => Task::done(Message::Replay(ReplayMessage::ReloadKlineStream {
+                            old_stream,
+                            new_stream,
+                        })),
                         None => Task::none(),
                     };
 
@@ -835,8 +849,11 @@ impl Flowsurface {
 
                 if is_metadata_update && self.replay.pending_auto_play {
                     let main_window_id = self.main_window.id;
-                    self.active_dashboard_mut().refresh_waiting_panes(main_window_id);
-                    log::info!("[auto-play] metadata updated — refreshed waiting panes for stream resolution");
+                    self.active_dashboard_mut()
+                        .refresh_waiting_panes(main_window_id);
+                    log::info!(
+                        "[auto-play] metadata updated — refreshed waiting panes for stream resolution"
+                    );
                 }
 
                 return task.map(Message::Sidebar);
@@ -864,8 +881,7 @@ impl Flowsurface {
                     .get_mut(active_id)
                     .map(|l| &mut l.dashboard)
                     .expect("No active dashboard");
-                let (task, toast) =
-                    self.replay.handle_message(msg, dashboard, main_window_id);
+                let (task, toast) = self.replay.handle_message(msg, dashboard, main_window_id);
                 if let Some(t) = toast {
                     self.notifications.push(t);
                 }
@@ -1233,10 +1249,7 @@ impl Flowsurface {
     /// E2E テスト用コマンドを処理する。
     /// debug ビルドでコンパイルされる。本番 release ビルドには含まれない。
     #[cfg(debug_assertions)]
-    fn handle_test_api(
-        &mut self,
-        cmd: replay_api::TestCommand,
-    ) -> (String, Task<Message>) {
+    fn handle_test_api(&mut self, cmd: replay_api::TestCommand) -> (String, Task<Message>) {
         use replay_api::TestCommand;
 
         match cmd {
@@ -1251,10 +1264,7 @@ impl Flowsurface {
         }
     }
 
-    fn handle_pane_api(
-        &mut self,
-        cmd: replay_api::PaneCommand,
-    ) -> (String, Task<Message>) {
+    fn handle_pane_api(&mut self, cmd: replay_api::PaneCommand) -> (String, Task<Message>) {
         use replay_api::PaneCommand;
 
         match cmd {
@@ -1309,9 +1319,8 @@ impl Flowsurface {
             })
             .collect();
         let body = serde_json::json!({ "notifications": items });
-        serde_json::to_string(&body).unwrap_or_else(|_| {
-            r#"{"error":"failed to serialize notifications"}"#.to_string()
-        })
+        serde_json::to_string(&body)
+            .unwrap_or_else(|_| r#"{"error":"failed to serialize notifications"}"#.to_string())
     }
 
     /// 現在のアクティブレイアウトの全ペインを JSON シリアライズする。
@@ -1352,9 +1361,8 @@ impl Flowsurface {
             "pending_trade_streams": pending_streams,
             "trade_buffer_streams": trade_buffer_streams,
         });
-        serde_json::to_string(&body).unwrap_or_else(|_| {
-            r#"{"error":"failed to serialize pane list"}"#.to_string()
-        })
+        serde_json::to_string(&body)
+            .unwrap_or_else(|_| r#"{"error":"failed to serialize pane list"}"#.to_string())
     }
 
     /// 指定ペインのチャートスナップショットを JSON シリアライズする。
@@ -1399,10 +1407,7 @@ impl Flowsurface {
     }
 
     /// uuid から (window_id, pane_grid::Pane) を検索する。
-    fn find_pane_handle(
-        &self,
-        pane_id: uuid::Uuid,
-    ) -> Option<(window::Id, pane_grid::Pane)> {
+    fn find_pane_handle(&self, pane_id: uuid::Uuid) -> Option<(window::Id, pane_grid::Pane)> {
         let main_window_id = self.main_window.id;
         self.active_dashboard()
             .iter_all_panes(main_window_id)
@@ -1644,8 +1649,7 @@ impl Flowsurface {
             .find(|(_, p, _)| *p == pg_pane)
             .map(|(_, _, s)| s)
         {
-            state.settings.selected_basis =
-                Some(data::chart::Basis::Time(tf));
+            state.settings.selected_basis = Some(data::chart::Basis::Time(tf));
         }
 
         let task = dashboard
@@ -1726,10 +1730,7 @@ impl Flowsurface {
             Some(s) => match Self::parse_content_kind(s) {
                 Some(k) => Some(k),
                 None => {
-                    return (
-                        format!(r#"{{"error":"invalid kind: {s}"}}"#),
-                        Task::none(),
-                    );
+                    return (format!(r#"{{"error":"invalid kind: {s}"}}"#), Task::none());
                 }
             },
             None => None,

@@ -649,9 +649,8 @@ impl KlineChart {
                 timeseries.insert_trades_existing_buckets(buffer);
 
                 if let Some(last_trade) = buffer.last() {
-                    let rounded =
-                        (last_trade.time / timeseries.interval.to_milliseconds())
-                            * timeseries.interval.to_milliseconds();
+                    let rounded = (last_trade.time / timeseries.interval.to_milliseconds())
+                        * timeseries.interval.to_milliseconds();
                     if let Some(dp) = timeseries.datapoints.get(&rounded) {
                         self.chart.last_price =
                             Some(PriceInfoLabel::new(dp.kline.close, dp.kline.open));
@@ -2001,7 +2000,10 @@ mod tests {
     use super::*;
 
     fn make_kline(time: u64) -> Kline {
-        use exchange::{Volume, unit::{Qty, price::Price}};
+        use exchange::{
+            Volume,
+            unit::{Qty, price::Price},
+        };
         Kline {
             time,
             open: Price::from_f32(100.0),
@@ -2062,7 +2064,10 @@ mod tests {
         chart.reset_for_seek();
 
         if let PlotData::TimeBased(ref ts) = chart.data_source {
-            assert!(ts.datapoints.is_empty(), "reset_for_seek should clear all data");
+            assert!(
+                ts.datapoints.is_empty(),
+                "reset_for_seek should clear all data"
+            );
         } else {
             panic!("expected TimeBased data source");
         }
@@ -2106,5 +2111,4 @@ mod tests {
             "expected Ok(Some(_)) after reset_for_seek, but got Ok(None) — request_handler was not reset"
         );
     }
-
 }

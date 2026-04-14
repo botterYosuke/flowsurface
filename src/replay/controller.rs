@@ -32,7 +32,6 @@ impl std::ops::DerefMut for ReplayController {
     }
 }
 
-
 impl From<ReplayState> for ReplayController {
     fn from(state: ReplayState) -> Self {
         Self { state }
@@ -119,15 +118,12 @@ impl ReplayController {
                     .into_iter()
                     .map(|(_, stream)| {
                         let range = super::compute_load_range(start_ms, end_ms, step_size_ms);
-                        Task::perform(
-                            loader::load_klines(stream, range),
-                            |result| match result {
-                                Ok(r) => ReplayMessage::KlinesLoadCompleted(
-                                    r.stream, r.range, r.klines,
-                                ),
-                                Err(e) => ReplayMessage::DataLoadFailed(e),
-                            },
-                        )
+                        Task::perform(loader::load_klines(stream, range), |result| match result {
+                            Ok(r) => {
+                                ReplayMessage::KlinesLoadCompleted(r.stream, r.range, r.klines)
+                            }
+                            Err(e) => ReplayMessage::DataLoadFailed(e),
+                        })
                     })
                     .collect();
 
@@ -147,12 +143,15 @@ impl ReplayController {
                 }
 
                 let now = Instant::now();
-                self.state.on_klines_loaded(stream, range, klines.clone(), now);
+                self.state
+                    .on_klines_loaded(stream, range, klines.clone(), now);
 
                 // Start 時刻より前のバーのみを注入する（pre_start_history バー）。
                 // Start 以降のバーは dispatch_tick が逐次注入するため、ここで注入すると
                 // dedup で無視されてバーが増えなくなる。
-                let start_ms = self.state.clock
+                let start_ms = self
+                    .state
+                    .clock
                     .as_ref()
                     .map(|c| c.full_range().start)
                     .unwrap_or(0);
@@ -220,17 +219,23 @@ impl ReplayController {
                     .active_streams
                     .iter()
                     .filter_map(|stream| {
-                        let klines =
-                            self.state.event_store.klines_in(stream, 0..current_time);
-                        klines.iter().rev().find(|k| k.time < current_time).map(|k| k.time)
+                        let klines = self.state.event_store.klines_in(stream, 0..current_time);
+                        klines
+                            .iter()
+                            .rev()
+                            .find(|k| k.time < current_time)
+                            .map(|k| k.time)
                     })
                     .max();
 
-                let start_ms = self.state.clock
+                let start_ms = self
+                    .state
+                    .clock
                     .as_ref()
                     .map(|c| c.full_range().start)
                     .unwrap_or(0);
-                let new_time = super::compute_step_backward_target(prev_time, current_time, start_ms);
+                let new_time =
+                    super::compute_step_backward_target(prev_time, current_time, start_ms);
 
                 if let Some(clock) = &mut self.state.clock {
                     clock.seek(new_time);
@@ -260,7 +265,10 @@ impl ReplayController {
                 (Task::none(), None)
             }
 
-            ReplayMessage::ReloadKlineStream { old_stream, new_stream } => {
+            ReplayMessage::ReloadKlineStream {
+                old_stream,
+                new_stream,
+            } => {
                 let Some(clock) = &mut self.state.clock else {
                     return (Task::none(), None);
                 };
@@ -283,13 +291,16 @@ impl ReplayController {
 
                 // 新 stream の klines を再ロード
                 let range = super::compute_load_range(start_ms, end_ms, step_size_ms);
-                let task = Task::perform(
-                    loader::load_klines(new_stream, range),
-                    |result| match result {
-                        Ok(r) => ReplayMessage::KlinesLoadCompleted(r.stream, r.range, r.klines),
-                        Err(e) => ReplayMessage::DataLoadFailed(e),
-                    },
-                );
+                let task =
+                    Task::perform(
+                        loader::load_klines(new_stream, range),
+                        |result| match result {
+                            Ok(r) => {
+                                ReplayMessage::KlinesLoadCompleted(r.stream, r.range, r.klines)
+                            }
+                            Err(e) => ReplayMessage::DataLoadFailed(e),
+                        },
+                    );
                 (task, None)
             }
         }

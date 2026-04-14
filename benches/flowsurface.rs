@@ -1,4 +1,4 @@
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 
 // ベンチマーク対象の関数をここに追加する。
 // 例: チャート描画計算、ティックデータ処理、ローソク足集計など

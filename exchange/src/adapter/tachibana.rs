@@ -745,7 +745,9 @@ pub async fn fetch_all_master(
                     );
                     return Ok(records);
                 } else {
-                    log::error!("Tachibana master stream failed at chunk #{chunk_count} (no records yet): {e}");
+                    log::error!(
+                        "Tachibana master stream failed at chunk #{chunk_count} (no records yet): {e}"
+                    );
                     return Err(TachibanaError::Http(e));
                 }
             }
@@ -864,8 +866,7 @@ pub async fn cached_ticker_metadata() -> HashMap<Ticker, Option<TickerInfo>> {
                 // display なしキーも同じ TickerInfo で登録しておく。
                 // ペイン設定は display_symbol なしで保存されるため、こちらで
                 // stream resolution の resolver(&ticker) が正しくヒットする。
-                let ticker_no_display =
-                    Ticker::new(&record.issue_code, Exchange::Tachibana);
+                let ticker_no_display = Ticker::new(&record.issue_code, Exchange::Tachibana);
                 out.entry(ticker_no_display).or_insert(Some(info));
                 out.insert(ticker, Some(info));
             }
@@ -873,7 +874,6 @@ pub async fn cached_ticker_metadata() -> HashMap<Ticker, Option<TickerInfo>> {
     }
     out
 }
-
 
 // ── EVENT I/F パーサー ───────────────────────────────────────────────────────
 //
@@ -1093,7 +1093,9 @@ pub fn connect_event_stream(
             let event_url = match get_event_http_url() {
                 Some(url) => url,
                 None => {
-                    log::warn!("[e2e-live] Tachibana EVENT I/F URL not available (no session), waiting 3s...");
+                    log::warn!(
+                        "[e2e-live] Tachibana EVENT I/F URL not available (no session), waiting 3s..."
+                    );
                     tokio::time::sleep(Duration::from_secs(3)).await;
                     continue;
                 }
@@ -1102,8 +1104,11 @@ pub fn connect_event_stream(
             let (issue_code, _) = ticker_info.ticker.to_full_symbol_and_type();
             let params = build_event_params(&issue_code, "00");
             let url = format!("{}?{}", event_url, params);
-            log::info!("[e2e-live] Tachibana EVENT I/F connecting: issue={} url_domain={}", issue_code,
-                url.split('/').nth(2).unwrap_or("unknown"));
+            log::info!(
+                "[e2e-live] Tachibana EVENT I/F connecting: issue={} url_domain={}",
+                issue_code,
+                url.split('/').nth(2).unwrap_or("unknown")
+            );
 
             let client = reqwest::Client::new();
             match client.get(&url).send().await {
@@ -3121,7 +3126,12 @@ mod tests {
         data.extend_from_slice(&[b'A', 0x81, 0x7d, b'}']); // 1件目: Shift-JIS 0x81 0x7D を含む
         data.extend_from_slice(&[b'B', b'}']); // 2件目: ASCII のみ
         let records = parse_sjis_stream_records(&data);
-        assert_eq!(records.len(), 2, "正確に2件に分割されるべき; {} 件", records.len());
+        assert_eq!(
+            records.len(),
+            2,
+            "正確に2件に分割されるべき; {} 件",
+            records.len()
+        );
         assert_eq!(records[0], &[b'A', 0x81, 0x7d, b'}']);
         assert_eq!(records[1], &[b'B', b'}']);
     }

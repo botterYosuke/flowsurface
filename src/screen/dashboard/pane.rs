@@ -1459,7 +1459,10 @@ impl State {
                                                         .ready_iter()
                                                         .and_then(|mut it| {
                                                             it.find(|s| {
-                                                                matches!(s, StreamKind::Kline { .. })
+                                                                matches!(
+                                                                    s,
+                                                                    StreamKind::Kline { .. }
+                                                                )
                                                             })
                                                         })
                                                         .copied();
@@ -1473,7 +1476,10 @@ impl State {
                                                             old_stream: old_kline_stream,
                                                             new_stream: kline_stream,
                                                         });
-                                                    } else if let Some(chart::Action::RequestFetch(fetch)) = action {
+                                                    } else if let Some(
+                                                        chart::Action::RequestFetch(fetch),
+                                                    ) = action
+                                                    {
                                                         effect = Some(Effect::RequestFetch(fetch));
                                                     }
                                                 }

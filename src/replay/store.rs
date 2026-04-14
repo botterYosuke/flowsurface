@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::ops::Range;
 
-use exchange::{Kline, Trade};
 use exchange::adapter::StreamKind;
+use exchange::{Kline, Trade};
 
 /// (stream, time) で引ける read-only 履歴データストア。
 /// Range 単位で bulk load される。
@@ -113,10 +113,7 @@ impl EventStore {
             .entry(stream)
             .or_insert_with(SortedVec::new)
             .insert_sorted(data.klines);
-        self.loaded_ranges
-            .entry(stream)
-            .or_default()
-            .push(range);
+        self.loaded_ranges.entry(stream).or_default().push(range);
     }
 
     /// stream がどのペインからも参照されなくなったときに呼ぶ。
@@ -142,10 +139,10 @@ impl EventStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use exchange::Volume;
+    use exchange::unit::MinTicksize;
     use exchange::unit::price::Price;
     use exchange::unit::qty::Qty;
-    use exchange::unit::MinTicksize;
-    use exchange::Volume;
 
     fn dummy_trade(time: u64) -> Trade {
         Trade {
@@ -269,11 +266,7 @@ mod tests {
     fn klines_in_returns_subset_by_time_range() {
         let mut store = EventStore::new();
         let stream = kline_stream();
-        let klines = vec![
-            dummy_kline(1_000),
-            dummy_kline(2_000),
-            dummy_kline(3_000),
-        ];
+        let klines = vec![dummy_kline(1_000), dummy_kline(2_000), dummy_kline(3_000)];
         store.ingest_loaded(
             stream,
             0..5_000,
