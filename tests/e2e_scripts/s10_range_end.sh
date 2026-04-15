@@ -33,9 +33,12 @@ if ! wait_playing 30; then
 fi
 
 # --- TC-S10-01: 速度を 10x にして終端まで再生 ---
+# 新仕様: CycleSpeed は pause + seek(range.start) を伴う。速度変更後に Resume が必要。
 for s in "2x" "5x" "10x"; do
   jqn "$(curl -s -X POST "$API/replay/speed")" "d.speed" > /dev/null
 done
+curl -s -X POST "$API/replay/resume" > /dev/null
+wait_status Playing 10 || true
 echo "  10x 速度で終端まで待機（最大 300s）..."
 
 REACHED_END="false"

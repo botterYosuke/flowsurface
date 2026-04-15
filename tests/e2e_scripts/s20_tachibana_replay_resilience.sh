@@ -70,10 +70,13 @@ for i in $(seq 1 20); do
   curl -s -X POST "$API/replay/speed" > /dev/null
 done
 
+# 新仕様: CycleSpeed は pause + seek(range.start) を伴う。
+# 20 連打後は Paused になるが、これは仕様通り。Resume で回復できることを確認する。
+curl -s -X POST "$API/replay/resume" > /dev/null
 wait_status Playing 10 || true
 FINAL_STATUS=$(jqn "$(curl -s "$API/replay/status")" "d.status")
 [ "$FINAL_STATUS" = "Playing" ] \
-  && pass "TC-S20-01: speed 20 連打後 status=Playing" \
+  && pass "TC-S20-01: speed 20 連打 + Resume → status=Playing（crash なし）" \
   || fail "TC-S20-01" "status=$FINAL_STATUS (Playing 期待)"
 
 stop_app

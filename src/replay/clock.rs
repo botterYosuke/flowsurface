@@ -70,21 +70,13 @@ impl StepClock {
     }
 
     /// range.end を step 分延長する。
-    /// Playing 中に StepForward が押されたとき使用する。
+    #[allow(dead_code)]
     pub fn extend_range_end(&mut self, step: u64) {
         self.range.end = self.range.end.saturating_add(step);
     }
 
-    /// range.end を step 分縮小する（range.start より小さくはならない）。
-    /// Playing 中に StepBackward が押されたとき使用する。
-    /// 縮小後の新しい range.end を返す。
-    pub fn shrink_range_end(&mut self, step: u64) -> u64 {
-        let new_end = self.range.end.saturating_sub(step).max(self.range.start);
-        self.range.end = new_end;
-        new_end
-    }
-
     /// true のとき、終端到達時に range.start へシークしてから停止する。
+    #[allow(dead_code)]
     pub fn set_seek_to_start_on_end(&mut self, v: bool) {
         self.seek_to_start_on_end = v;
     }
@@ -575,53 +567,6 @@ mod tests {
         assert_eq!(clock.status(), ClockStatus::Paused);
     }
 
-    // ── shrink_range_end ──────────────────────────────────────────────────────
-
-    #[test]
-    fn shrink_range_end_decreases_range_end() {
-        let mut clock = StepClock::new(0, 5_000, 1_000);
-        clock.shrink_range_end(1_000);
-        assert_eq!(clock.full_range().end, 4_000);
-    }
-
-    #[test]
-    fn shrink_range_end_returns_new_end_value() {
-        let mut clock = StepClock::new(0, 5_000, 1_000);
-        let new_end = clock.shrink_range_end(1_000);
-        assert_eq!(new_end, 4_000);
-    }
-
-    #[test]
-    fn shrink_range_end_clamps_to_range_start() {
-        let mut clock = StepClock::new(1_000, 5_000, 1_000);
-        let new_end = clock.shrink_range_end(10_000); // far more than available
-        assert_eq!(new_end, 1_000);
-        assert_eq!(clock.full_range().end, 1_000);
-    }
-
-    #[test]
-    fn shrink_range_end_exact_step_reduces_to_start() {
-        let mut clock = StepClock::new(0, 1_000, 1_000);
-        let new_end = clock.shrink_range_end(1_000); // end - step == start
-        assert_eq!(new_end, 0);
-        assert_eq!(clock.full_range().end, 0);
-    }
-
-    #[test]
-    fn shrink_range_end_when_end_equals_start_returns_start() {
-        let mut clock = StepClock::new(1_000, 1_000, 1_000); // degenerate: end == start
-        let new_end = clock.shrink_range_end(500);
-        assert_eq!(new_end, 1_000); // clamped to start
-        assert_eq!(clock.full_range().end, 1_000);
-    }
-
-    #[test]
-    fn shrink_range_end_does_not_go_below_zero_for_zero_start() {
-        let mut clock = StepClock::new(0, 500, 1_000);
-        let new_end = clock.shrink_range_end(1_000); // would underflow without saturating_sub
-        assert_eq!(new_end, 0);
-    }
-
     // ── seek_to_start_on_end ─────────────────────────────────────────────────
 
     #[test]
@@ -782,18 +727,6 @@ mod tests {
         clock.play(base);
         clock.tick(t(base, 10_000));
         assert_eq!(clock.now_ms(), 2_000); // stays at end
-    }
-
-    // ── shrink 後の shrink（連打）境界 ─────────────────────────────────────────
-
-    #[test]
-    fn shrink_range_end_repeated_calls_clamp_correctly() {
-        let mut clock = StepClock::new(0, 3_000, 1_000);
-        clock.shrink_range_end(1_000); // → 2_000
-        clock.shrink_range_end(1_000); // → 1_000
-        clock.shrink_range_end(1_000); // → 0 (clamped to start)
-        clock.shrink_range_end(1_000); // → 0 (already at start)
-        assert_eq!(clock.full_range().end, 0);
     }
 
     #[test]

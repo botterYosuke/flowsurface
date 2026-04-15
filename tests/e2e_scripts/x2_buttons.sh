@@ -113,15 +113,24 @@ for e in "${EXPECTED[@]}"; do
 done
 [ "$ALL_OK" = "true" ] && pass "TC-X2-06: Speed cycle 1→2→5→10→1" || fail "TC-X2-06" "cycle 異常"
 
-# --- TC-X2-07: Speed 変更で current_time は変化しない ---
-curl -s -X POST "$API/replay/pause" > /dev/null
+# --- TC-X2-07: Speed 変更で current_time が range.start にリセットされる ---
+# 新仕様: CycleSpeed は pause + seek(range.start) を伴う。
+# TC-X2-06 後は range.start にいるため、まず StepForward で前進させてから確認する。
 set +e; wait_paused 5; set -e
+curl -s -X POST "$API/replay/step-forward" > /dev/null
+sleep 0.3
+curl -s -X POST "$API/replay/step-forward" > /dev/null
+sleep 0.3
 PRE_SP=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
+START_T=$(jqn "$(curl -s "$API/replay/status")" "d.start_time")
+IS_AHEAD=$(bigt_gt "$PRE_SP" "$START_T")
+[ "$IS_AHEAD" = "true" ] || fail "TC-X2-07-pre" "pre-condition: not ahead of start (pre=$PRE_SP start=$START_T)"
 curl -s -X POST "$API/replay/speed" > /dev/null
 POST_SP=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
-EQ_SP=$(bigt_eq "$PRE_SP" "$POST_SP")
-[ "$EQ_SP" = "true" ] && pass "TC-X2-07: Speed 切替で current_time 不変" || \
-  fail "TC-X2-07" "pre=$PRE_SP post=$POST_SP"
+EQ_SP=$(bigt_eq "$POST_SP" "$START_T")
+[ "$EQ_SP" = "true" ] \
+  && pass "TC-X2-07: Speed 切替で current_time が range.start にリセット (pre=$PRE_SP → post=$POST_SP)" \
+  || fail "TC-X2-07" "post=$POST_SP (expected start=$START_T)"
 
 # --- TC-X2-08: Live 中はボタンが意味を持たない ---
 curl -s -X POST "$API/replay/toggle" > /dev/null  # → Live

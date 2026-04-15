@@ -98,6 +98,10 @@ if [ -n "$NEW_PANE" ]; then
   else
     fail "TC-S7-04" "streams_ready タイムアウト（30s）"
   fi
+  # set-timeframe は ReloadKlineStream を発生させ clock.pause() を呼ぶ（新仕様）。
+  # TC-S7-06 でペイン close 後も Playing 継続を確認するため、ここで Resume する。
+  curl -s -X POST "$API/replay/resume" > /dev/null
+  wait_status Playing 10 || true
 fi
 
 # TC-S7-05: 新ペインを close → ペイン数 1

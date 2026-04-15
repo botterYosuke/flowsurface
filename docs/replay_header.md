@@ -388,14 +388,29 @@ enum Message {
 ### 6.5 StepForward / StepBackward
 
 ```
-[StepForward]
-  ├─ Paused 以外（Playing / Waiting）の場合は no-op
+[StepForward — Playing 中]
+  ├─ clock.pause()
+  ├─ clock.seek(range.end)                               ← current_time を End まで一気に移動
+  ├─ dashboard.reset_charts_for_seek(main_window)         ← チャートをクリア
+  └─ inject_klines_up_to(range.end)                      ← End 時点までのデータを再注入
+     range.end は変更しない（ユーザー設定の終了時刻を保持）
+     kline 再フェッチは行わない — EventStore から再構成
+
+[StepForward — Paused 中]
   ├─ new_time = current_time + min_timeframe_ms(active_streams)
   ├─ new_time > range.end の場合は no-op（範囲終端を超える）
   ├─ clock.seek(new_time)
   └─ inject_klines_up_to(new_time): 0..new_time+1 の klines を全 active_streams から注入
 
-[StepBackward]
+[StepBackward — Playing 中]
+  ├─ clock.pause()
+  ├─ clock.seek(range.start)                              ← current_time を start に戻す
+  ├─ dashboard.reset_charts_for_seek(main_window)         ← チャートをクリア
+  └─ inject_klines_up_to(range.start)                    ← start 時点のデータを再注入
+     range.end は変更しない（ユーザー設定の終了時刻を保持）
+     kline 再フェッチは行わない — EventStore から再構成
+
+[StepBackward — Paused / Waiting 中]
   ├─ 全 active_streams の klines_in(stream, 0..current_time) で
   │   current_time より小さい最大の kline.time を探す
   ├─ new_time = compute_step_backward_target(prev_time, current_time, start_ms)
@@ -403,10 +418,29 @@ enum Message {
   ├─ clock.seek(new_time) + clock.pause()
   ├─ dashboard.reset_charts_for_seek(main_window) でチャートをクリア
   └─ inject_klines_up_to(new_time): 0..new_time+1 の klines を全 active_streams から注入
-     (kline 再フェッチは行わない — EventStore から再構成)
+     kline 再フェッチは行わない — EventStore から再構成
 ```
 
-### 6.6 Live 復帰
+### 6.6 ユーザー操作による初期状態リセット
+
+以下の操作を受けたとき、clock が Some（リプレイ進行中）ならば **初期状態（range.start）に戻して停止** する。
+
+```
+操作: CycleSpeed / StartTimeChanged / EndTimeChanged
+
+共通フロー（clock が Some の場合）:
+  ├─ clock.pause()
+  ├─ clock.seek(range.start)
+  ├─ dashboard.reset_charts_for_seek(main_window)
+  └─ inject_klines_up_to(range.start)
+     kline 再フェッチは行わない — EventStore から再構成
+
+CycleSpeed の場合は上記に加えて速度の循環変更も行う。
+StartTimeChanged / EndTimeChanged は range_input の更新も行う（clock は再作成しない）。
+clock が None の場合（Play 前）は入力更新または速度変更のみ、リセットは行わない。
+```
+
+### 6.7 Live 復帰
 
 ```
 [ReplayMessage::ToggleMode (Replay → Live)]
@@ -453,7 +487,8 @@ pub fn dispatch_tick(
 
 - `Pause`: `clock.pause()` — `status = Paused`, `next_step_at = None`
 - `Resume`: `clock.play(wall_now)` — `status = Playing`, `next_step_at` 再設定
-- `CycleSpeed`: `SPEEDS = [1.0, 2.0, 5.0, 10.0]` を `(i+1) % 4` で循環、`clock.set_speed(next)` を呼ぶ
+- `CycleSpeed`: `SPEEDS = [1.0, 2.0, 5.0, 10.0]` を `(i+1) % 4` で循環、`clock.set_speed(next)` を呼ぶ。
+  clock が Some の場合は §6.6 の「初期状態リセット」フローを実行する（pause + seek to start）。
 - `speed_label()`: `if speed == floor(speed) { "Nx" } else { "N.Nx" }` を返す
 
 ### 7.3 Waiting 状態の自動解除

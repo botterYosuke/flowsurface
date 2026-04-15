@@ -72,11 +72,31 @@ impl ReplayController {
 
             ReplayMessage::StartTimeChanged(s) => {
                 self.state.range_input.start = s;
+                // clock が存在する場合は初期状態に戻して停止
+                let start_ms = self.state.clock.as_ref().map(|c| c.full_range().start);
+                if let Some(start_ms) = start_ms {
+                    if let Some(clock) = &mut self.state.clock {
+                        clock.pause();
+                        clock.seek(start_ms);
+                    }
+                    dashboard.reset_charts_for_seek(main_window_id);
+                    self.inject_klines_up_to(start_ms, dashboard, main_window_id);
+                }
                 (Task::none(), None)
             }
 
             ReplayMessage::EndTimeChanged(s) => {
                 self.state.range_input.end = s;
+                // clock が存在する場合は初期状態に戻して停止
+                let start_ms = self.state.clock.as_ref().map(|c| c.full_range().start);
+                if let Some(start_ms) = start_ms {
+                    if let Some(clock) = &mut self.state.clock {
+                        clock.pause();
+                        clock.seek(start_ms);
+                    }
+                    dashboard.reset_charts_for_seek(main_window_id);
+                    self.inject_klines_up_to(start_ms, dashboard, main_window_id);
+                }
                 (Task::none(), None)
             }
 
@@ -186,12 +206,19 @@ impl ReplayController {
                 let step_size = min_timeframe_ms(&self.state.active_streams);
 
                 if self.state.is_playing() {
-                    // Playing 中: range.end を 1 bar 延長して再生継続。
-                    // 終端到達時は range.start に戻って停止する。
+                    // Playing 中: End まで一気に進めて停止
+                    let end_ms = self
+                        .state
+                        .clock
+                        .as_ref()
+                        .map(|c| c.full_range().end)
+                        .unwrap_or(0);
                     if let Some(clock) = &mut self.state.clock {
-                        clock.extend_range_end(step_size);
-                        clock.set_seek_to_start_on_end(true);
+                        clock.pause();
+                        clock.seek(end_ms);
                     }
+                    dashboard.reset_charts_for_seek(main_window_id);
+                    self.inject_klines_up_to(end_ms, dashboard, main_window_id);
                     return (Task::none(), None);
                 }
 
@@ -218,25 +245,34 @@ impl ReplayController {
 
             ReplayMessage::CycleSpeed => {
                 self.state.cycle_speed();
+                // clock が存在する場合は初期状態に戻して停止
+                let start_ms = self.state.clock.as_ref().map(|c| c.full_range().start);
+                if let Some(start_ms) = start_ms {
+                    if let Some(clock) = &mut self.state.clock {
+                        clock.pause();
+                        clock.seek(start_ms);
+                    }
+                    dashboard.reset_charts_for_seek(main_window_id);
+                    self.inject_klines_up_to(start_ms, dashboard, main_window_id);
+                }
                 (Task::none(), None)
             }
 
             ReplayMessage::StepBackward => {
-                let step_size = min_timeframe_ms(&self.state.active_streams);
-
                 if self.state.is_playing() {
-                    // Playing 中: range.end を 1 bar 縮小 → 停止 → 新終端位置へシーク
-                    let new_end = if let Some(clock) = &mut self.state.clock {
-                        let new_end = clock.shrink_range_end(step_size);
+                    // Playing 中: 停止して start に戻す
+                    let start_ms = self
+                        .state
+                        .clock
+                        .as_ref()
+                        .map(|c| c.full_range().start)
+                        .unwrap_or(0);
+                    if let Some(clock) = &mut self.state.clock {
                         clock.pause();
-                        clock.seek(new_end);
-                        new_end
-                    } else {
-                        return (Task::none(), None);
-                    };
-
+                        clock.seek(start_ms);
+                    }
                     dashboard.reset_charts_for_seek(main_window_id);
-                    self.inject_klines_up_to(new_end, dashboard, main_window_id);
+                    self.inject_klines_up_to(start_ms, dashboard, main_window_id);
                     return (Task::none(), None);
                 }
 
@@ -385,6 +421,16 @@ impl ReplayController {
             })
             .collect();
 
+        // seek_to_start_on_end が発火すると current_time == range.start になる。
+        // その場合、チャートをリセットして start 時点のデータを再注入する。
+        if dispatch.reached_end {
+            let range_start = self.state.clock.as_ref().map(|c| c.full_range().start);
+            if Some(dispatch.current_time) == range_start {
+                dashboard.reset_charts_for_seek(main_window_id);
+                self.inject_klines_up_to(dispatch.current_time, dashboard, main_window_id);
+            }
+        }
+
         TickOutcome {
             trade_events,
             reached_end: dispatch.reached_end,
@@ -405,5 +451,288 @@ impl ReplayController {
                 dashboard.ingest_replay_klines(stream, klines, main_window_id);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    use iced::window;
+
+    use super::*;
+    use crate::replay::clock::{ClockStatus, StepClock};
+    use crate::screen::dashboard::Dashboard;
+
+    /// B-3 テスト用のヘルパー定数
+    const START_MS: u64 = 1_000_000;
+    const END_MS: u64 = 4_000_000;
+    const STEP_MS: u64 = 1_000_000;
+
+    /// Playing 状態の `ReplayController` を生成する。
+    /// clock は `start_ms` に位置し、status は `Playing`。
+    fn make_playing_controller() -> ReplayController {
+        let mut ctrl = ReplayController::default();
+        let mut clock = StepClock::new(START_MS, END_MS, STEP_MS);
+        clock.play(Instant::now());
+        ctrl.state.clock = Some(clock);
+        ctrl
+    }
+
+    // ── B-3: Playing 中に ⏮ を押したときの挙動 ────────────────────────────────
+
+    /// Playing 中に StepBackward を押すと clock が Paused になること。
+    #[test]
+    fn step_backward_while_playing_pauses_clock() {
+        let mut ctrl = make_playing_controller();
+        let mut dashboard = Dashboard::default();
+        let main_window = window::Id::unique();
+
+        let _ = ctrl.handle_message(ReplayMessage::StepBackward, &mut dashboard, main_window);
+
+        assert_eq!(
+            ctrl.state.clock.as_ref().unwrap().status(),
+            ClockStatus::Paused,
+            "StepBackward while Playing must pause the clock"
+        );
+    }
+
+    /// Playing 中に StepBackward を押すと current_time が range.start に戻ること。
+    #[test]
+    fn step_backward_while_playing_seeks_to_range_start() {
+        let mut ctrl = make_playing_controller();
+
+        // clock を中間まで進める（2 ステップ: now_ms = 3_000_000）
+        {
+            let clock = ctrl.state.clock.as_mut().unwrap();
+            let base = Instant::now();
+            clock.tick(base + Duration::from_millis(200));
+        }
+        assert_ne!(
+            ctrl.state.current_time(),
+            START_MS,
+            "pre-condition: clock must have advanced past start"
+        );
+
+        let mut dashboard = Dashboard::default();
+        let main_window = window::Id::unique();
+
+        let _ = ctrl.handle_message(ReplayMessage::StepBackward, &mut dashboard, main_window);
+
+        assert_eq!(
+            ctrl.state.current_time(),
+            START_MS,
+            "StepBackward while Playing must seek current_time back to range.start"
+        );
+    }
+
+    /// Playing 中に StepBackward を押しても range.end が変化しないこと。
+    #[test]
+    fn step_backward_while_playing_preserves_range_end() {
+        let mut ctrl = make_playing_controller();
+        let mut dashboard = Dashboard::default();
+        let main_window = window::Id::unique();
+
+        let _ = ctrl.handle_message(ReplayMessage::StepBackward, &mut dashboard, main_window);
+
+        assert_eq!(
+            ctrl.state.clock.as_ref().unwrap().full_range().end,
+            END_MS,
+            "StepBackward while Playing must not modify range.end"
+        );
+    }
+
+    /// range.start ではない位置に Paused 状態の `ReplayController` を生成する。
+    fn make_mid_range_paused_controller() -> ReplayController {
+        let mut ctrl = ReplayController::default();
+        let mut clock = StepClock::new(START_MS, END_MS, STEP_MS);
+        // START_MS + STEP_MS (= 2_000_000) に移動して停止
+        clock.seek(START_MS + STEP_MS);
+        ctrl.state.clock = Some(clock);
+        ctrl
+    }
+
+    // ── StepForward while Playing ──────────────────────────────────────────────
+
+    /// Playing 中に ⏭ を押すと clock が Paused になること。
+    #[test]
+    fn step_forward_while_playing_pauses_clock() {
+        let mut ctrl = make_playing_controller();
+        let mut dashboard = Dashboard::default();
+        let main_window = window::Id::unique();
+
+        let _ = ctrl.handle_message(ReplayMessage::StepForward, &mut dashboard, main_window);
+
+        assert_eq!(
+            ctrl.state.clock.as_ref().unwrap().status(),
+            ClockStatus::Paused,
+            "StepForward while Playing must pause the clock"
+        );
+    }
+
+    /// Playing 中に ⏭ を押すと current_time が range.end に移動すること。
+    #[test]
+    fn step_forward_while_playing_seeks_to_range_end() {
+        let mut ctrl = make_playing_controller();
+        let mut dashboard = Dashboard::default();
+        let main_window = window::Id::unique();
+
+        let _ = ctrl.handle_message(ReplayMessage::StepForward, &mut dashboard, main_window);
+
+        assert_eq!(
+            ctrl.state.current_time(),
+            END_MS,
+            "StepForward while Playing must seek current_time to range.end"
+        );
+    }
+
+    /// Playing 中に ⏭ を押しても range.end が変化しないこと。
+    #[test]
+    fn step_forward_while_playing_preserves_range_end() {
+        let mut ctrl = make_playing_controller();
+        let mut dashboard = Dashboard::default();
+        let main_window = window::Id::unique();
+
+        let _ = ctrl.handle_message(ReplayMessage::StepForward, &mut dashboard, main_window);
+
+        assert_eq!(
+            ctrl.state.clock.as_ref().unwrap().full_range().end,
+            END_MS,
+            "StepForward while Playing must not modify range.end"
+        );
+    }
+
+    // ── CycleSpeed ────────────────────────────────────────────────────────────
+
+    /// Playing 中に CycleSpeed を押すと clock が Paused になること。
+    #[test]
+    fn cycle_speed_while_playing_pauses_clock() {
+        let mut ctrl = make_playing_controller();
+        let mut dashboard = Dashboard::default();
+        let main_window = window::Id::unique();
+
+        let _ = ctrl.handle_message(ReplayMessage::CycleSpeed, &mut dashboard, main_window);
+
+        assert_eq!(
+            ctrl.state.clock.as_ref().unwrap().status(),
+            ClockStatus::Paused,
+            "CycleSpeed while Playing must pause the clock"
+        );
+    }
+
+    /// Playing 中に CycleSpeed を押すと current_time が range.start に戻ること。
+    #[test]
+    fn cycle_speed_while_playing_seeks_to_range_start() {
+        let mut ctrl = make_playing_controller();
+
+        // clock を中間まで進める
+        {
+            let clock = ctrl.state.clock.as_mut().unwrap();
+            let base = Instant::now();
+            clock.tick(base + Duration::from_millis(200));
+        }
+
+        let mut dashboard = Dashboard::default();
+        let main_window = window::Id::unique();
+
+        let _ = ctrl.handle_message(ReplayMessage::CycleSpeed, &mut dashboard, main_window);
+
+        assert_eq!(
+            ctrl.state.current_time(),
+            START_MS,
+            "CycleSpeed while Playing must seek current_time back to range.start"
+        );
+    }
+
+    /// Paused 中に CycleSpeed を押すと current_time が range.start に戻ること。
+    #[test]
+    fn cycle_speed_while_paused_seeks_to_range_start() {
+        let mut ctrl = make_mid_range_paused_controller();
+        assert_ne!(
+            ctrl.state.current_time(),
+            START_MS,
+            "pre-condition: clock must not be at start"
+        );
+
+        let mut dashboard = Dashboard::default();
+        let main_window = window::Id::unique();
+
+        let _ = ctrl.handle_message(ReplayMessage::CycleSpeed, &mut dashboard, main_window);
+
+        assert_eq!(
+            ctrl.state.current_time(),
+            START_MS,
+            "CycleSpeed while Paused must seek current_time back to range.start"
+        );
+    }
+
+    // ── StartTimeChanged / EndTimeChanged while clock active ──────────────────
+
+    /// Playing 中に StartTimeChanged を受けると clock が Paused になること。
+    #[test]
+    fn start_time_changed_while_playing_pauses_clock() {
+        let mut ctrl = make_playing_controller();
+        let mut dashboard = Dashboard::default();
+        let main_window = window::Id::unique();
+
+        let _ = ctrl.handle_message(
+            ReplayMessage::StartTimeChanged("2025-01-01 00:00".to_string()),
+            &mut dashboard,
+            main_window,
+        );
+
+        assert_eq!(
+            ctrl.state.clock.as_ref().unwrap().status(),
+            ClockStatus::Paused,
+            "StartTimeChanged while Playing must pause the clock"
+        );
+    }
+
+    /// Playing 中に StartTimeChanged を受けると current_time が range.start に戻ること。
+    #[test]
+    fn start_time_changed_while_playing_seeks_to_range_start() {
+        let mut ctrl = make_playing_controller();
+
+        // clock を中間まで進める
+        {
+            let clock = ctrl.state.clock.as_mut().unwrap();
+            let base = Instant::now();
+            clock.tick(base + Duration::from_millis(200));
+        }
+
+        let mut dashboard = Dashboard::default();
+        let main_window = window::Id::unique();
+
+        let _ = ctrl.handle_message(
+            ReplayMessage::StartTimeChanged("2025-01-01 00:00".to_string()),
+            &mut dashboard,
+            main_window,
+        );
+
+        assert_eq!(
+            ctrl.state.current_time(),
+            START_MS,
+            "StartTimeChanged while Playing must seek current_time back to range.start"
+        );
+    }
+
+    /// Playing 中に EndTimeChanged を受けると clock が Paused になること。
+    #[test]
+    fn end_time_changed_while_playing_pauses_clock() {
+        let mut ctrl = make_playing_controller();
+        let mut dashboard = Dashboard::default();
+        let main_window = window::Id::unique();
+
+        let _ = ctrl.handle_message(
+            ReplayMessage::EndTimeChanged("2025-12-31 00:00".to_string()),
+            &mut dashboard,
+            main_window,
+        );
+
+        assert_eq!(
+            ctrl.state.clock.as_ref().unwrap().status(),
+            ClockStatus::Paused,
+            "EndTimeChanged while Playing must pause the clock"
+        );
     }
 }

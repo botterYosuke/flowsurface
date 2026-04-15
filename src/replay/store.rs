@@ -112,6 +112,20 @@ impl EventStore {
         self.loaded_ranges.entry(stream).or_default().push(range);
     }
 
+    /// 指定 stream の全 loaded_ranges の end を `new_end` まで拡張する。
+    /// `extend_range_end` でクロックの range.end が伸びた際に `is_loaded` が失敗しないよう
+    /// EventStore 側のロード済み範囲を同期させるために使う。データは追加しない。
+    #[allow(dead_code)]
+    pub fn extend_loaded_range_end_to(&mut self, stream: &StreamKind, new_end: u64) {
+        if let Some(ranges) = self.loaded_ranges.get_mut(stream) {
+            for r in ranges.iter_mut() {
+                if r.end < new_end {
+                    r.end = new_end;
+                }
+            }
+        }
+    }
+
     /// stream がどのペインからも参照されなくなったときに呼ぶ。
     #[cfg(test)]
     pub fn drop_stream(&mut self, stream: &StreamKind) {
