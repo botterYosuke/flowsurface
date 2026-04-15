@@ -11,7 +11,9 @@ mod screen;
 use screen::login::{self, LoginScreen};
 mod replay;
 mod replay_api;
-use replay::{ReplayMessage, controller::ReplayController};
+use replay::{
+    ReplayMessage, ReplaySystemEvent, ReplayUserMessage, controller::ReplayController,
+};
 mod style;
 mod version;
 mod widget;
@@ -574,7 +576,9 @@ impl Flowsurface {
                                         );
                                         self.replay.clear_pending_auto_play();
                                         let play_task =
-                                            Task::done(Message::Replay(ReplayMessage::Play));
+                                            Task::done(Message::Replay(ReplayMessage::User(
+                                            ReplayUserMessage::Play,
+                                        )));
                                         return Task::batch([resolve_task, play_task]);
                                     }
 
@@ -599,10 +603,9 @@ impl Flowsurface {
                         Some(dashboard::Event::ReloadReplayKlines {
                             old_stream,
                             new_stream,
-                        }) => Task::done(Message::Replay(ReplayMessage::ReloadKlineStream {
-                            old_stream,
-                            new_stream,
-                        })),
+                        }) => Task::done(Message::Replay(ReplayMessage::System(
+                            ReplaySystemEvent::ReloadKlineStream { old_stream, new_stream },
+                        ))),
                         None => Task::none(),
                     };
 
@@ -615,9 +618,9 @@ impl Flowsurface {
                             event: msg,
                         })
                         .chain(additional_task)
-                        .chain(Task::done(Message::Replay(
-                            ReplayMessage::SyncReplayBuffers,
-                        )));
+                        .chain(Task::done(Message::Replay(ReplayMessage::System(
+                            ReplaySystemEvent::SyncReplayBuffers,
+                        ))));
                 }
             }
             Message::RemoveNotification(index) => {
@@ -841,19 +844,23 @@ impl Flowsurface {
                             .into_iter()
                             .filter_map(|old| {
                                 old.as_kline_stream().map(|(_, tf)| {
-                                    Task::done(Message::Replay(ReplayMessage::ReloadKlineStream {
-                                        old_stream: Some(old),
-                                        new_stream: exchange::adapter::StreamKind::Kline {
-                                            ticker_info,
-                                            timeframe: tf,
+                                    Task::done(Message::Replay(ReplayMessage::System(
+                                        ReplaySystemEvent::ReloadKlineStream {
+                                            old_stream: Some(old),
+                                            new_stream: exchange::adapter::StreamKind::Kline {
+                                                ticker_info,
+                                                timeframe: tf,
+                                            },
                                         },
-                                    }))
+                                    )))
                                 })
                             })
                             .collect();
 
                         let replay_task = if reload_tasks.is_empty() {
-                            Task::done(Message::Replay(ReplayMessage::SyncReplayBuffers))
+                            Task::done(Message::Replay(ReplayMessage::System(
+                                ReplaySystemEvent::SyncReplayBuffers,
+                            )))
                         } else {
                             Task::batch(reload_tasks)
                         };
@@ -929,39 +936,64 @@ impl Flowsurface {
                             reply_tx.send(reply_replay_status(self));
                         }
                         ReplayCommand::Toggle => {
-                            let task = self.update(Message::Replay(ReplayMessage::ToggleMode));
+                            let task = self.update(Message::Replay(ReplayMessage::User(
+                                ReplayUserMessage::ToggleMode,
+                            )));
                             reply_tx.send(reply_replay_status(self));
                             return task;
                         }
                         ReplayCommand::Play { start, end } => {
-                            self.replay.set_range_start(start);
-                            self.replay.set_range_end(end);
-                            let task = self.update(Message::Replay(ReplayMessage::Play));
+                            let main_window_id = self.main_window.id;
+                            let active_id = self
+                                .layout_manager
+                                .active_layout_id()
+                                .expect("No active layout")
+                                .unique;
+                            let dashboard = self
+                                .layout_manager
+                                .get_mut(active_id)
+                                .map(|l| &mut l.dashboard)
+                                .expect("No active dashboard");
+                            let (task, toast) =
+                                self.replay.play_with_range(start, end, dashboard, main_window_id);
+                            if let Some(t) = toast {
+                                self.notifications.push(t);
+                            }
                             reply_tx.send(reply_replay_status(self));
-                            return task;
+                            return task.map(Message::Replay);
                         }
                         ReplayCommand::Pause => {
-                            let task = self.update(Message::Replay(ReplayMessage::Pause));
+                            let task = self.update(Message::Replay(ReplayMessage::User(
+                                ReplayUserMessage::Pause,
+                            )));
                             reply_tx.send(reply_replay_status(self));
                             return task;
                         }
                         ReplayCommand::Resume => {
-                            let task = self.update(Message::Replay(ReplayMessage::Resume));
+                            let task = self.update(Message::Replay(ReplayMessage::User(
+                                ReplayUserMessage::Resume,
+                            )));
                             reply_tx.send(reply_replay_status(self));
                             return task;
                         }
                         ReplayCommand::StepForward => {
-                            let task = self.update(Message::Replay(ReplayMessage::StepForward));
+                            let task = self.update(Message::Replay(ReplayMessage::User(
+                                ReplayUserMessage::StepForward,
+                            )));
                             reply_tx.send(reply_replay_status(self));
                             return task;
                         }
                         ReplayCommand::StepBackward => {
-                            let task = self.update(Message::Replay(ReplayMessage::StepBackward));
+                            let task = self.update(Message::Replay(ReplayMessage::User(
+                                ReplayUserMessage::StepBackward,
+                            )));
                             reply_tx.send(reply_replay_status(self));
                             return task;
                         }
                         ReplayCommand::CycleSpeed => {
-                            let task = self.update(Message::Replay(ReplayMessage::CycleSpeed));
+                            let task = self.update(Message::Replay(ReplayMessage::User(
+                                ReplayUserMessage::CycleSpeed,
+                            )));
                             reply_tx.send(reply_replay_status(self));
                             return task;
                         }
@@ -1095,16 +1127,17 @@ impl Flowsurface {
 
         let mode_label = if is_replay { "REPLAY" } else { "LIVE" };
         let mode_toggle = button(text(mode_label).size(11))
-            .on_press(Message::Replay(ReplayMessage::ToggleMode))
+            .on_press(Message::Replay(ReplayMessage::User(ReplayUserMessage::ToggleMode)))
             .style(move |theme, status| style::button::bordered_toggle(theme, status, is_replay))
             .padding(padding::all(2).left(6).right(6));
 
         let mut start_input = text_input("Start", self.replay.range_input_start()).size(11);
         let mut end_input = text_input("End", self.replay.range_input_end()).size(11);
         if is_replay {
-            start_input =
-                start_input.on_input(|s| Message::Replay(ReplayMessage::StartTimeChanged(s)));
-            end_input = end_input.on_input(|s| Message::Replay(ReplayMessage::EndTimeChanged(s)));
+            start_input = start_input
+                .on_input(|s| Message::Replay(ReplayMessage::User(ReplayUserMessage::StartTimeChanged(s))));
+            end_input = end_input
+                .on_input(|s| Message::Replay(ReplayMessage::User(ReplayUserMessage::EndTimeChanged(s))));
         }
 
         let is_loading = self.replay.is_loading();
@@ -1119,11 +1152,11 @@ impl Flowsurface {
             button(text(play_pause_label).size(12)).padding(padding::all(2).left(4).right(4));
         if is_replay && !is_loading {
             play_pause_btn = play_pause_btn.on_press(if is_playing {
-                Message::Replay(ReplayMessage::Pause)
+                Message::Replay(ReplayMessage::User(ReplayUserMessage::Pause))
             } else if is_paused && !is_at_end {
-                Message::Replay(ReplayMessage::Resume)
+                Message::Replay(ReplayMessage::User(ReplayUserMessage::Resume))
             } else {
-                Message::Replay(ReplayMessage::Play)
+                Message::Replay(ReplayMessage::User(ReplayUserMessage::Play))
             });
         }
 
@@ -1131,14 +1164,16 @@ impl Flowsurface {
         let mut step_back_btn =
             button(text("\u{23EE}").size(12)).padding(padding::all(2).left(4).right(4));
         if is_replay && has_clock && !is_loading {
-            step_back_btn = step_back_btn.on_press(Message::Replay(ReplayMessage::StepBackward));
+            step_back_btn = step_back_btn
+                .on_press(Message::Replay(ReplayMessage::User(ReplayUserMessage::StepBackward)));
         }
 
         // ⏭ StepForward
         let mut step_fwd_btn =
             button(text("\u{23ED}").size(12)).padding(padding::all(2).left(4).right(4));
         if is_replay && !is_loading {
-            step_fwd_btn = step_fwd_btn.on_press(Message::Replay(ReplayMessage::StepForward));
+            step_fwd_btn = step_fwd_btn
+                .on_press(Message::Replay(ReplayMessage::User(ReplayUserMessage::StepForward)));
         }
 
         // Speed button
@@ -1146,7 +1181,8 @@ impl Flowsurface {
         let mut speed_btn =
             button(text(speed_label).size(11)).padding(padding::all(2).left(4).right(4));
         if is_replay && has_clock && !is_loading {
-            speed_btn = speed_btn.on_press(Message::Replay(ReplayMessage::CycleSpeed));
+            speed_btn = speed_btn
+                .on_press(Message::Replay(ReplayMessage::User(ReplayUserMessage::CycleSpeed)));
         }
         let controls = row![step_back_btn, play_pause_btn, step_fwd_btn, speed_btn].spacing(4);
 
@@ -1208,7 +1244,7 @@ impl Flowsurface {
             match key {
                 keyboard::Key::Named(keyboard::key::Named::Escape) => Some(Message::GoBack),
                 keyboard::Key::Named(keyboard::key::Named::F5) => {
-                    Some(Message::Replay(ReplayMessage::ToggleMode))
+                    Some(Message::Replay(ReplayMessage::User(ReplayUserMessage::ToggleMode)))
                 }
                 _ => None,
             }
@@ -1602,12 +1638,16 @@ impl Flowsurface {
                 ticker_info,
                 timeframe: tf,
             };
-            Task::done(Message::Replay(ReplayMessage::ReloadKlineStream {
-                old_stream: Some(old),
-                new_stream,
-            }))
+            Task::done(Message::Replay(ReplayMessage::System(
+                ReplaySystemEvent::ReloadKlineStream {
+                    old_stream: Some(old),
+                    new_stream,
+                },
+            )))
         } else {
-            Task::done(Message::Replay(ReplayMessage::SyncReplayBuffers))
+            Task::done(Message::Replay(ReplayMessage::System(
+                ReplaySystemEvent::SyncReplayBuffers,
+            )))
         };
 
         let task = dashboard
@@ -1733,12 +1773,16 @@ impl Flowsurface {
                 ticker_info,
                 timeframe: tf,
             };
-            Task::done(Message::Replay(ReplayMessage::ReloadKlineStream {
-                old_stream: Some(old),
-                new_stream,
-            }))
+            Task::done(Message::Replay(ReplayMessage::System(
+                ReplaySystemEvent::ReloadKlineStream {
+                    old_stream: Some(old),
+                    new_stream,
+                },
+            )))
         } else {
-            Task::done(Message::Replay(ReplayMessage::SyncReplayBuffers))
+            Task::done(Message::Replay(ReplayMessage::System(
+                ReplaySystemEvent::SyncReplayBuffers,
+            )))
         };
 
         let task = dashboard
@@ -1855,19 +1899,23 @@ impl Flowsurface {
             .into_iter()
             .filter_map(|old| {
                 old.as_kline_stream().map(|(_, tf)| {
-                    Task::done(Message::Replay(ReplayMessage::ReloadKlineStream {
-                        old_stream: Some(old),
-                        new_stream: exchange::adapter::StreamKind::Kline {
-                            ticker_info,
-                            timeframe: tf,
+                    Task::done(Message::Replay(ReplayMessage::System(
+                        ReplaySystemEvent::ReloadKlineStream {
+                            old_stream: Some(old),
+                            new_stream: exchange::adapter::StreamKind::Kline {
+                                ticker_info,
+                                timeframe: tf,
+                            },
                         },
-                    }))
+                    )))
                 })
             })
             .collect();
 
         let replay_task = if reload_tasks.is_empty() {
-            Task::done(Message::Replay(ReplayMessage::SyncReplayBuffers))
+            Task::done(Message::Replay(ReplayMessage::System(
+                ReplaySystemEvent::SyncReplayBuffers,
+            )))
         } else {
             Task::batch(reload_tasks)
         };

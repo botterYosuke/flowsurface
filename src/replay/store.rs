@@ -6,6 +6,7 @@ use exchange::{Kline, Trade};
 
 /// (stream, time) で引ける read-only 履歴データストア。
 /// Range 単位で bulk load される。
+#[derive(Debug)]
 pub struct EventStore {
     klines: HashMap<StreamKind, SortedVec<Kline>>,
     trades: HashMap<StreamKind, SortedVec<Trade>>,
@@ -14,6 +15,7 @@ pub struct EventStore {
 }
 
 /// 時刻順にソートされた Vec。挿入時に維持、クエリは binary search。
+#[derive(Debug)]
 pub struct SortedVec<T> {
     data: Vec<T>,
 }
