@@ -1,5 +1,6 @@
 use std::time::Instant;
 
+use data::UserTimezone;
 use exchange::Trade;
 use exchange::adapter::StreamKind;
 use iced::Task;
@@ -7,34 +8,161 @@ use iced::Task;
 use crate::screen::dashboard::Dashboard;
 use crate::widget::toast::Toast;
 
-use super::{ReplayMessage, ReplayState, loader, min_timeframe_ms, parse_replay_range};
+use super::{
+    ReplayMessage, ReplayMode, ReplayRangeInput, ReplayState, ReplayStatus, loader,
+    min_timeframe_ms, parse_replay_range,
+    store::EventStore,
+};
 
 /// `ReplayState` をラップし、replay ロジックを `main.rs` から分離するコントローラ。
 ///
-/// `Deref<Target = ReplayState>` を実装するため、既存の `replay.is_replay()` 等の
-/// 読み取りメソッドはそのままコンパイルできる。状態変化・副作用を伴う処理は
-/// [`ReplayController::handle_message`] と [`ReplayController::tick`] に集約する。
+/// `main.rs` は公開メソッドのみを経由して状態を読み書きする。
+/// 内部状態への直接アクセスは一切提供しない。
 #[derive(Default)]
 pub struct ReplayController {
-    pub state: ReplayState,
-}
-
-impl std::ops::Deref for ReplayController {
-    type Target = ReplayState;
-    fn deref(&self) -> &Self::Target {
-        &self.state
-    }
-}
-
-impl std::ops::DerefMut for ReplayController {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.state
-    }
+    state: ReplayState,
 }
 
 impl From<ReplayState> for ReplayController {
     fn from(state: ReplayState) -> Self {
         Self { state }
+    }
+}
+
+impl ReplayController {
+    /// 永続化された設定からコントローラを復元する（アプリ起動時）。
+    pub fn from_saved(
+        mode: ReplayMode,
+        range_start: String,
+        range_end: String,
+        pending_auto_play: bool,
+    ) -> Self {
+        use std::collections::HashSet;
+        Self {
+            state: ReplayState {
+                mode,
+                range_input: ReplayRangeInput {
+                    start: range_start,
+                    end: range_end,
+                },
+                clock: None,
+                event_store: EventStore::new(),
+                active_streams: HashSet::new(),
+                pending_auto_play,
+            },
+        }
+    }
+}
+
+// ── 公開 getter / setter（main.rs 向け） ──────────────────────────────────────
+
+impl ReplayController {
+    /// リプレイモードかどうか
+    pub fn is_replay(&self) -> bool {
+        self.state.is_replay()
+    }
+
+    /// 再生中かどうか
+    pub fn is_playing(&self) -> bool {
+        self.state.is_playing()
+    }
+
+    /// 一時停止中かどうか
+    pub fn is_paused(&self) -> bool {
+        self.state.is_paused()
+    }
+
+    /// ロード中（Waiting 状態）かどうか
+    pub fn is_loading(&self) -> bool {
+        self.state.is_loading()
+    }
+
+    /// クロックが存在するかどうか（UI の有効化判定に使用）
+    pub fn has_clock(&self) -> bool {
+        self.state.clock.is_some()
+    }
+
+    /// 現在の仮想時刻がリプレイ終端に達しているかどうか
+    pub fn is_at_end(&self) -> bool {
+        self.state
+            .clock
+            .as_ref()
+            .is_some_and(|c| c.now_ms() >= c.full_range().end)
+    }
+
+    /// 現在の再生モード（永続化用）
+    pub fn mode(&self) -> ReplayMode {
+        self.state.mode
+    }
+
+    /// 現在の速度ラベル（"1x", "2x", etc.）
+    pub fn speed_label(&self) -> String {
+        self.state.speed_label()
+    }
+
+    /// 範囲入力の開始テキスト
+    pub fn range_input_start(&self) -> &str {
+        &self.state.range_input.start
+    }
+
+    /// 範囲入力の終了テキスト
+    pub fn range_input_end(&self) -> &str {
+        &self.state.range_input.end
+    }
+
+    /// auto-play フラグが立っているかどうか
+    pub fn is_auto_play_pending(&self) -> bool {
+        self.state.pending_auto_play
+    }
+
+    /// auto-play フラグをクリアする
+    pub fn clear_pending_auto_play(&mut self) {
+        self.state.pending_auto_play = false;
+    }
+
+    /// 範囲入力の開始テキストを設定する
+    pub fn set_range_start(&mut self, s: String) {
+        self.state.range_input.start = s;
+    }
+
+    /// 範囲入力の終了テキストを設定する
+    pub fn set_range_end(&mut self, s: String) {
+        self.state.range_input.end = s;
+    }
+
+    /// セッションが利用不可のとき呼ぶ
+    pub fn on_session_unavailable(&mut self) {
+        self.state.on_session_unavailable();
+    }
+
+    /// 現在の状態を API レスポンス用に変換
+    pub fn to_status(&self) -> ReplayStatus {
+        self.state.to_status()
+    }
+
+    /// 現在時刻の表示文字列を生成する（ヘッダー表示用）
+    pub fn format_current_time(&self, timezone: UserTimezone) -> String {
+        super::format_current_time(&self.state, timezone)
+    }
+
+    /// アクティブな kline ストリームを収集する（mid-replay 銘柄変更用）。
+    /// `Kline` 種別のみを返す。
+    pub fn active_kline_streams(&self) -> Vec<StreamKind> {
+        self.state
+            .active_streams
+            .iter()
+            .filter(|s| matches!(s, StreamKind::Kline { .. }))
+            .copied()
+            .collect()
+    }
+
+    /// 全 active_streams をデバッグ文字列リストで返す（API 診断用）。
+    pub fn active_stream_debug_labels(&self) -> Vec<String> {
+        self.state
+            .active_streams
+            .iter()
+            .map(|s| format!("{s:?}"))
+            .collect()
     }
 }
 
@@ -72,31 +200,13 @@ impl ReplayController {
 
             ReplayMessage::StartTimeChanged(s) => {
                 self.state.range_input.start = s;
-                // clock が存在する場合は初期状態に戻して停止
-                let start_ms = self.state.clock.as_ref().map(|c| c.full_range().start);
-                if let Some(start_ms) = start_ms {
-                    if let Some(clock) = &mut self.state.clock {
-                        clock.pause();
-                        clock.seek(start_ms);
-                    }
-                    dashboard.reset_charts_for_seek(main_window_id);
-                    self.inject_klines_up_to(start_ms, dashboard, main_window_id);
-                }
+                self.handle_range_input_change(dashboard, main_window_id);
                 (Task::none(), None)
             }
 
             ReplayMessage::EndTimeChanged(s) => {
                 self.state.range_input.end = s;
-                // clock が存在する場合は初期状態に戻して停止
-                let start_ms = self.state.clock.as_ref().map(|c| c.full_range().start);
-                if let Some(start_ms) = start_ms {
-                    if let Some(clock) = &mut self.state.clock {
-                        clock.pause();
-                        clock.seek(start_ms);
-                    }
-                    dashboard.reset_charts_for_seek(main_window_id);
-                    self.inject_klines_up_to(start_ms, dashboard, main_window_id);
-                }
+                self.handle_range_input_change(dashboard, main_window_id);
                 (Task::none(), None)
             }
 
@@ -134,10 +244,17 @@ impl ReplayController {
                 }
 
                 // 各 kline ストリームに対して load_klines を発行
+                // ストリーム固有の timeframe で pre-history window を計算する（D1 と 1m が混在する場合、
+                // min_timeframe_ms だと D1 バーの timestamp がウィンドウ外になる）。
                 let kline_tasks: Vec<Task<ReplayMessage>> = kline_targets
                     .into_iter()
                     .map(|(_, stream)| {
-                        let range = super::compute_load_range(start_ms, end_ms, step_size_ms);
+                        let stream_step_ms = stream
+                            .as_kline_stream()
+                            .map(|(_, tf)| tf.to_milliseconds())
+                            .unwrap_or(step_size_ms);
+                        let range =
+                            super::compute_load_range(start_ms, end_ms, stream_step_ms);
                         Task::perform(loader::load_klines(stream, range), |result| match result {
                             Ok(r) => {
                                 ReplayMessage::KlinesLoadCompleted(r.stream, r.range, r.klines)
@@ -157,11 +274,9 @@ impl ReplayController {
             }
 
             ReplayMessage::KlinesLoadCompleted(stream, range, klines) => {
-                // (D) 空 klines は "未ロード" と同義 — EventStore に登録しない
-                if klines.is_empty() {
-                    return (Task::none(), None);
-                }
-
+                // 空 klines でも EventStore に登録してストリームをロード済みとマークする。
+                // klines が空 = データなし（市場休場・範囲外）であり「ロード未完了」ではない。
+                // 登録しないと active_streams に残ったまま try_resume_from_waiting が永遠に失敗する。
                 let now = Instant::now();
                 self.state
                     .on_klines_loaded(stream, range, klines.clone(), now);
@@ -244,17 +359,8 @@ impl ReplayController {
             }
 
             ReplayMessage::CycleSpeed => {
+                // 速度変更のみ。シークやリセットは行わない（Playing 中は即時反映される）。
                 self.state.cycle_speed();
-                // clock が存在する場合は初期状態に戻して停止
-                let start_ms = self.state.clock.as_ref().map(|c| c.full_range().start);
-                if let Some(start_ms) = start_ms {
-                    if let Some(clock) = &mut self.state.clock {
-                        clock.pause();
-                        clock.seek(start_ms);
-                    }
-                    dashboard.reset_charts_for_seek(main_window_id);
-                    self.inject_klines_up_to(start_ms, dashboard, main_window_id);
-                }
                 (Task::none(), None)
             }
 
@@ -315,7 +421,9 @@ impl ReplayController {
             }
 
             ReplayMessage::DataLoadFailed(err) => {
-                self.state.clock = None;
+                // clock だけでなく event_store / active_streams もリセットして残留状態を除去する。
+                // これらが残ると次回 Play 時に古いデータが混入する可能性がある。
+                self.reset_session();
                 (
                     Task::none(),
                     Some(Toast::error(format!("Replay data load failed: {err}"))),
@@ -363,7 +471,12 @@ impl ReplayController {
                 dashboard.reset_charts_for_seek(main_window_id);
 
                 // 新 stream の klines を再ロード
-                let range = super::compute_load_range(start_ms, end_ms, step_size_ms);
+                // ストリーム固有の timeframe で pre-history window を計算する
+                let stream_step_ms = new_stream
+                    .as_kline_stream()
+                    .map(|(_, tf)| tf.to_milliseconds())
+                    .unwrap_or(step_size_ms);
+                let range = super::compute_load_range(start_ms, end_ms, stream_step_ms);
                 let task =
                     Task::perform(
                         loader::load_klines(new_stream, range),
@@ -421,24 +534,45 @@ impl ReplayController {
             })
             .collect();
 
-        // seek_to_start_on_end が発火すると current_time == range.start になる。
-        // その場合、チャートをリセットして start 時点のデータを再注入する。
-        if dispatch.reached_end {
-            let range_start = self.state.clock.as_ref().map(|c| c.full_range().start);
-            if Some(dispatch.current_time) == range_start {
-                dashboard.reset_charts_for_seek(main_window_id);
-                self.inject_klines_up_to(dispatch.current_time, dashboard, main_window_id);
-            }
-        }
-
         TickOutcome {
             trade_events,
             reached_end: dispatch.reached_end,
         }
     }
 
-    /// A-1: `start_ms..=target_ms` の klines を全 active_streams からチャートに注入する。
-    /// StepForward / StepBackward の重複コードを統一。
+    /// `StartTimeChanged` / `EndTimeChanged` で共通化された範囲変更後処理。
+    /// clock が存在する場合は先頭に戻して停止し、チャートを先頭時点にリセットする。
+    fn handle_range_input_change(
+        &mut self,
+        dashboard: &mut Dashboard,
+        main_window_id: iced::window::Id,
+    ) {
+        let start_ms = self.state.clock.as_ref().map(|c| c.full_range().start);
+        if let Some(start_ms) = start_ms {
+            if let Some(clock) = &mut self.state.clock {
+                clock.pause();
+                clock.seek(start_ms);
+            }
+            dashboard.reset_charts_for_seek(main_window_id);
+            self.inject_klines_up_to(start_ms, dashboard, main_window_id);
+        }
+    }
+
+    /// clock / event_store / active_streams をまとめてリセットする。
+    /// `DataLoadFailed` 時に呼ぶことで次回 Play 時に残留状態が混入しないようにする。
+    fn reset_session(&mut self) {
+        use std::collections::HashSet;
+        self.state.clock = None;
+        self.state.event_store = super::store::EventStore::new();
+        self.state.active_streams = HashSet::new();
+    }
+
+    /// `0..=target_ms` の klines を全 active_streams からチャートに注入する。
+    /// StepForward / StepBackward / range_input_change で共通利用。
+    ///
+    /// NOTE: 範囲が `0..` から始まるのは意図的。`KlinesLoadCompleted` 時に
+    /// pre-history バー（start_ms 前）も EventStore に格納されており、Seek 後に
+    /// これらを含めて再注入しないとチャートに履歴バーが表示されない。
     fn inject_klines_up_to(
         &self,
         target_ms: u64,
@@ -604,9 +738,9 @@ mod tests {
 
     // ── CycleSpeed ────────────────────────────────────────────────────────────
 
-    /// Playing 中に CycleSpeed を押すと clock が Paused になること。
+    /// Playing 中に CycleSpeed を押しても ClockStatus が変わらないこと（Playing のまま）。
     #[test]
-    fn cycle_speed_while_playing_pauses_clock() {
+    fn cycle_speed_while_playing_keeps_status() {
         let mut ctrl = make_playing_controller();
         let mut dashboard = Dashboard::default();
         let main_window = window::Id::unique();
@@ -615,14 +749,14 @@ mod tests {
 
         assert_eq!(
             ctrl.state.clock.as_ref().unwrap().status(),
-            ClockStatus::Paused,
-            "CycleSpeed while Playing must pause the clock"
+            ClockStatus::Playing,
+            "CycleSpeed must not change ClockStatus — speed only"
         );
     }
 
-    /// Playing 中に CycleSpeed を押すと current_time が range.start に戻ること。
+    /// Playing 中に CycleSpeed を押しても current_time が変化しないこと。
     #[test]
-    fn cycle_speed_while_playing_seeks_to_range_start() {
+    fn cycle_speed_while_playing_does_not_seek() {
         let mut ctrl = make_playing_controller();
 
         // clock を中間まで進める
@@ -631,6 +765,7 @@ mod tests {
             let base = Instant::now();
             clock.tick(base + Duration::from_millis(200));
         }
+        let time_before = ctrl.state.current_time();
 
         let mut dashboard = Dashboard::default();
         let main_window = window::Id::unique();
@@ -639,20 +774,16 @@ mod tests {
 
         assert_eq!(
             ctrl.state.current_time(),
-            START_MS,
-            "CycleSpeed while Playing must seek current_time back to range.start"
+            time_before,
+            "CycleSpeed must not seek — current_time unchanged"
         );
     }
 
-    /// Paused 中に CycleSpeed を押すと current_time が range.start に戻ること。
+    /// Paused 中に CycleSpeed を押しても current_time が変化しないこと。
     #[test]
-    fn cycle_speed_while_paused_seeks_to_range_start() {
+    fn cycle_speed_while_paused_does_not_seek() {
         let mut ctrl = make_mid_range_paused_controller();
-        assert_ne!(
-            ctrl.state.current_time(),
-            START_MS,
-            "pre-condition: clock must not be at start"
-        );
+        let time_before = ctrl.state.current_time();
 
         let mut dashboard = Dashboard::default();
         let main_window = window::Id::unique();
@@ -661,8 +792,8 @@ mod tests {
 
         assert_eq!(
             ctrl.state.current_time(),
-            START_MS,
-            "CycleSpeed while Paused must seek current_time back to range.start"
+            time_before,
+            "CycleSpeed while Paused must not seek"
         );
     }
 

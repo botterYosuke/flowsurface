@@ -39,6 +39,9 @@ impl SortedVec<Trade> {
     pub fn insert_sorted(&mut self, items: Vec<Trade>) {
         self.data.extend(items);
         self.data.sort_by_key(|t| t.time);
+        // DESIGN: 同一ミリ秒の trade は先着 1 件のみ保持する。
+        // リプレイは視覚化目的のため、ms 精度の trade 完全再現は非ゴール。
+        // より高精度が必要な場合は (time, price, qty) の複合キーでの dedup に変更すること。
         self.data.dedup_by_key(|t| t.time);
     }
 
@@ -112,20 +115,6 @@ impl EventStore {
         self.loaded_ranges.entry(stream).or_default().push(range);
     }
 
-    /// 指定 stream の全 loaded_ranges の end を `new_end` まで拡張する。
-    /// `extend_range_end` でクロックの range.end が伸びた際に `is_loaded` が失敗しないよう
-    /// EventStore 側のロード済み範囲を同期させるために使う。データは追加しない。
-    #[allow(dead_code)]
-    pub fn extend_loaded_range_end_to(&mut self, stream: &StreamKind, new_end: u64) {
-        if let Some(ranges) = self.loaded_ranges.get_mut(stream) {
-            for r in ranges.iter_mut() {
-                if r.end < new_end {
-                    r.end = new_end;
-                }
-            }
-        }
-    }
-
     /// stream がどのペインからも参照されなくなったときに呼ぶ。
     #[cfg(test)]
     pub fn drop_stream(&mut self, stream: &StreamKind) {
@@ -145,58 +134,7 @@ impl EventStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use exchange::Volume;
-    use exchange::unit::MinTicksize;
-    use exchange::unit::price::Price;
-    use exchange::unit::qty::Qty;
-
-    fn dummy_trade(time: u64) -> Trade {
-        Trade {
-            time,
-            is_sell: false,
-            price: Price::from_f32_lossy(100.0),
-            qty: Qty::from_f32_lossy(1.0),
-        }
-    }
-
-    fn dummy_kline(time: u64) -> Kline {
-        Kline::new(
-            time,
-            100.0,
-            101.0,
-            99.0,
-            100.5,
-            Volume::empty_total(),
-            MinTicksize::from(0.01),
-        )
-    }
-
-    fn trade_stream() -> StreamKind {
-        use exchange::adapter::Exchange;
-        use exchange::{Ticker, TickerInfo};
-        StreamKind::Trades {
-            ticker_info: TickerInfo::new(
-                Ticker::new("BTCUSDT", Exchange::BinanceLinear),
-                0.01,
-                0.001,
-                Some(1.0),
-            ),
-        }
-    }
-
-    fn kline_stream() -> StreamKind {
-        use exchange::adapter::Exchange;
-        use exchange::{Ticker, TickerInfo, Timeframe};
-        StreamKind::Kline {
-            ticker_info: TickerInfo::new(
-                Ticker::new("BTCUSDT", Exchange::BinanceLinear),
-                0.01,
-                0.001,
-                Some(1.0),
-            ),
-            timeframe: Timeframe::M1,
-        }
-    }
+    use crate::replay::testutil::{dummy_kline, dummy_trade, kline_stream, trade_stream};
 
     #[test]
     fn empty_store_returns_empty_slice_for_trades() {

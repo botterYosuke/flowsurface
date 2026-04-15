@@ -58,16 +58,8 @@ pub fn dispatch_tick(
     // 2. clock を 1 ステップ進める
     let range = clock.tick(wall_now);
     if range.is_empty() {
-        // 通常の空レンジ (start == end): Paused clock や未発火ステップ — reached_end = false
-        // 逆転レンジ (start > end): seek_to_start_on_end 発火時 — clock は Paused になっており
-        //   最終ステップの emit はスキップされるが reached_end = true を伝播して Toast を発行する。
-        let reached_end = range.start > range.end && clock.status() == ClockStatus::Paused;
-        return DispatchResult {
-            current_time: clock.now_ms(),
-            trade_events: vec![],
-            kline_events: vec![],
-            reached_end,
-        };
+        // 空レンジ (start == end): Paused clock や未発火ステップ — reached_end = false
+        return DispatchResult::empty(clock.now_ms());
     }
 
     // 3. イベント抽出
@@ -91,48 +83,11 @@ pub fn dispatch_tick(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use exchange::Volume;
-    use exchange::unit::MinTicksize;
-    use exchange::unit::price::Price;
-    use exchange::unit::qty::Qty;
+    use crate::replay::testutil::{dummy_kline, dummy_trade, trade_stream};
     use std::time::Duration;
 
     fn t(base: Instant, ms: u64) -> Instant {
         base + Duration::from_millis(ms)
-    }
-
-    fn dummy_trade(time: u64) -> Trade {
-        Trade {
-            time,
-            is_sell: false,
-            price: Price::from_f32_lossy(100.0),
-            qty: Qty::from_f32_lossy(1.0),
-        }
-    }
-
-    fn dummy_kline(time: u64) -> Kline {
-        Kline::new(
-            time,
-            100.0,
-            101.0,
-            99.0,
-            100.5,
-            Volume::empty_total(),
-            MinTicksize::from(0.01),
-        )
-    }
-
-    fn trade_stream() -> StreamKind {
-        use exchange::adapter::Exchange;
-        use exchange::{Ticker, TickerInfo};
-        StreamKind::Trades {
-            ticker_info: TickerInfo::new(
-                Ticker::new("BTCUSDT", Exchange::BinanceLinear),
-                0.01,
-                0.001,
-                Some(1.0),
-            ),
-        }
     }
 
     fn make_store_with_data(stream: StreamKind, range: std::ops::Range<u64>) -> EventStore {

@@ -11,7 +11,7 @@ mod screen;
 use screen::login::{self, LoginScreen};
 mod replay;
 mod replay_api;
-use replay::{ReplayMessage, ReplayState, controller::ReplayController};
+use replay::{ReplayMessage, controller::ReplayController};
 mod style;
 mod version;
 mod widget;
@@ -223,17 +223,7 @@ impl Flowsurface {
                 let has_valid_range = replay::parse_replay_range(&range_start, &range_end).is_ok();
                 let pending_auto_play =
                     replay_mode == replay::ReplayMode::Replay && has_valid_range;
-                ReplayController::from(ReplayState {
-                    mode: replay_mode,
-                    range_input: replay::ReplayRangeInput {
-                        start: range_start,
-                        end: range_end,
-                    },
-                    clock: None,
-                    event_store: replay::store::EventStore::new(),
-                    active_streams: std::collections::HashSet::new(),
-                    pending_auto_play,
-                })
+                ReplayController::from_saved(replay_mode, range_start, range_end, pending_auto_play)
             },
         };
 
@@ -301,7 +291,7 @@ impl Flowsurface {
                 }
                 // 再ログイン失敗 → ログイン画面を表示（e2e-mock ではスキップ）
                 let main_window_id = self.main_window.id;
-                if self.replay.pending_auto_play
+                if self.replay.is_auto_play_pending()
                     && self
                         .active_dashboard()
                         .has_tachibana_stream_pane(main_window_id)
@@ -573,7 +563,7 @@ impl Flowsurface {
                                     };
 
                                     // (2) 全ペイン Ready かつ pending_auto_play が立っているか判定
-                                    if self.replay.pending_auto_play
+                                    if self.replay.is_auto_play_pending()
                                         && self.replay.is_replay()
                                         && self
                                             .active_dashboard()
@@ -582,7 +572,7 @@ impl Flowsurface {
                                         log::info!(
                                             "[auto-play] All panes ready — firing ReplayMessage::Play"
                                         );
-                                        self.replay.pending_auto_play = false;
+                                        self.replay.clear_pending_auto_play();
                                         let play_task =
                                             Task::done(Message::Replay(ReplayMessage::Play));
                                         return Task::batch([resolve_task, play_task]);
@@ -820,15 +810,7 @@ impl Flowsurface {
                         // Live モードでは空 Vec になり、末尾で SyncReplayBuffers にフォールバックする。
                         let old_kline_streams: Vec<exchange::adapter::StreamKind> =
                             if self.replay.is_replay() {
-                                self.replay
-                                    .state
-                                    .active_streams
-                                    .iter()
-                                    .filter(|s| {
-                                        matches!(s, exchange::adapter::StreamKind::Kline { .. })
-                                    })
-                                    .copied()
-                                    .collect()
+                                self.replay.active_kline_streams()
                             } else {
                                 vec![]
                             };
@@ -890,7 +872,7 @@ impl Flowsurface {
                     None => {}
                 }
 
-                if is_metadata_update && self.replay.pending_auto_play {
+                if is_metadata_update && self.replay.is_auto_play_pending() {
                     let main_window_id = self.main_window.id;
                     self.active_dashboard_mut()
                         .refresh_waiting_panes(main_window_id);
@@ -952,8 +934,8 @@ impl Flowsurface {
                             return task;
                         }
                         ReplayCommand::Play { start, end } => {
-                            self.replay.range_input.start = start;
-                            self.replay.range_input.end = end;
+                            self.replay.set_range_start(start);
+                            self.replay.set_range_end(end);
                             let task = self.update(Message::Replay(ReplayMessage::Play));
                             reply_tx.send(reply_replay_status(self));
                             return task;
@@ -1105,7 +1087,7 @@ impl Flowsurface {
     }
 
     fn view_replay_header(&self) -> Element<'_, Message> {
-        let time_display = text(replay::format_current_time(&self.replay, self.timezone))
+        let time_display = text(self.replay.format_current_time(self.timezone))
             .font(style::AZERET_MONO)
             .size(12);
 
@@ -1117,8 +1099,8 @@ impl Flowsurface {
             .style(move |theme, status| style::button::bordered_toggle(theme, status, is_replay))
             .padding(padding::all(2).left(6).right(6));
 
-        let mut start_input = text_input("Start", &self.replay.range_input.start).size(11);
-        let mut end_input = text_input("End", &self.replay.range_input.end).size(11);
+        let mut start_input = text_input("Start", self.replay.range_input_start()).size(11);
+        let mut end_input = text_input("End", self.replay.range_input_end()).size(11);
         if is_replay {
             start_input =
                 start_input.on_input(|s| Message::Replay(ReplayMessage::StartTimeChanged(s)));
@@ -1128,7 +1110,9 @@ impl Flowsurface {
         let is_loading = self.replay.is_loading();
         let is_playing = self.replay.is_playing();
         let is_paused = self.replay.is_paused();
-        let has_clock = self.replay.clock.is_some();
+        let has_clock = self.replay.has_clock();
+        // 終端で Paused の場合、▶ は Resume ではなく Play（先頭から再スタート）
+        let is_at_end = self.replay.is_at_end();
 
         let play_pause_label = if is_playing { "\u{23F8}" } else { "\u{25B6}" };
         let mut play_pause_btn =
@@ -1136,7 +1120,7 @@ impl Flowsurface {
         if is_replay && !is_loading {
             play_pause_btn = play_pause_btn.on_press(if is_playing {
                 Message::Replay(ReplayMessage::Pause)
-            } else if is_paused {
+            } else if is_paused && !is_at_end {
                 Message::Replay(ReplayMessage::Resume)
             } else {
                 Message::Replay(ReplayMessage::Play)
@@ -1371,12 +1355,7 @@ impl Flowsurface {
         let main_window_id = self.main_window.id;
         let dashboard = self.active_dashboard();
         let pending_streams: Vec<String> = Vec::new();
-        let trade_buffer_streams: Vec<String> = self
-            .replay
-            .active_streams
-            .iter()
-            .map(|s| format!("{s:?}"))
-            .collect();
+        let trade_buffer_streams: Vec<String> = self.replay.active_stream_debug_labels();
 
         let panes: Vec<serde_json::Value> = dashboard
             .iter_all_panes(main_window_id)
@@ -1856,13 +1835,7 @@ impl Flowsurface {
         // mid-replay での銘柄変更: Message::Sidebar 経路と同じく active_streams の旧 kline stream を
         // 先に取得し、ReloadKlineStream で pause + 再ロードする。
         let old_kline_streams: Vec<exchange::adapter::StreamKind> = if self.replay.is_replay() {
-            self.replay
-                .state
-                .active_streams
-                .iter()
-                .filter(|s| matches!(s, exchange::adapter::StreamKind::Kline { .. }))
-                .copied()
-                .collect()
+            self.replay.active_kline_streams()
         } else {
             vec![]
         };
@@ -2491,12 +2464,12 @@ impl Flowsurface {
         });
 
         let replay_cfg = data::ReplayConfig {
-            mode: match self.replay.mode {
+            mode: match self.replay.mode() {
                 replay::ReplayMode::Live => "live".into(),
                 replay::ReplayMode::Replay => "replay".into(),
             },
-            range_start: self.replay.range_input.start.clone(),
-            range_end: self.replay.range_input.end.clone(),
+            range_start: self.replay.range_input_start().to_string(),
+            range_end: self.replay.range_input_end().to_string(),
         };
 
         let state = data::State::from_parts(

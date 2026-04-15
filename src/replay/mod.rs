@@ -3,6 +3,8 @@ pub mod controller;
 pub mod dispatcher;
 pub mod loader;
 pub mod store;
+#[cfg(test)]
+pub(crate) mod testutil;
 
 use std::collections::HashSet;
 use std::ops::Range;
@@ -100,18 +102,18 @@ pub struct ReplayStatus {
 /// リプレイモードの状態を管理する
 pub struct ReplayState {
     /// ライブ / リプレイの切替
-    pub mode: ReplayMode,
+    mode: ReplayMode,
     /// リプレイ範囲の設定（UI入力）
-    pub range_input: ReplayRangeInput,
+    range_input: ReplayRangeInput,
     /// ステップ時計。Play 開始後 Some になる。
-    pub clock: Option<StepClock>,
+    clock: Option<StepClock>,
     /// 履歴データストア。リプレイ開始時に bulk load される。
-    pub event_store: EventStore,
+    event_store: EventStore,
     /// 現在アクティブなストリーム集合（dispatch_tick に渡す）。
-    pub active_streams: HashSet<StreamKind>,
+    active_streams: HashSet<StreamKind>,
     /// 起動時 fixture 復元の結果として次の「全ペイン Ready」で Play を発火する。
     /// 一度発火したら false に戻す。永続化しない。
-    pub pending_auto_play: bool,
+    pending_auto_play: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,8 +124,8 @@ pub enum ReplayMode {
 
 #[derive(Default)]
 pub struct ReplayRangeInput {
-    pub start: String,
-    pub end: String,
+    start: String,
+    end: String,
 }
 
 #[derive(Debug, Clone)]
