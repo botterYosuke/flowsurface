@@ -11,7 +11,7 @@ mod screen;
 use screen::login::{self, LoginScreen};
 mod replay;
 mod replay_api;
-use replay::{ReplayMessage, ReplayState, controller::ReplayController};
+use replay::{ReplayMessage, controller::ReplayController};
 mod style;
 mod version;
 mod widget;
@@ -223,17 +223,7 @@ impl Flowsurface {
                 let has_valid_range = replay::parse_replay_range(&range_start, &range_end).is_ok();
                 let pending_auto_play =
                     replay_mode == replay::ReplayMode::Replay && has_valid_range;
-                ReplayController::from(ReplayState {
-                    mode: replay_mode,
-                    range_input: replay::ReplayRangeInput {
-                        start: range_start,
-                        end: range_end,
-                    },
-                    clock: None,
-                    event_store: replay::store::EventStore::new(),
-                    active_streams: std::collections::HashSet::new(),
-                    pending_auto_play,
-                })
+                ReplayController::from_saved(replay_mode, range_start, range_end, pending_auto_play)
             },
         };
 
@@ -301,7 +291,7 @@ impl Flowsurface {
                 }
                 // 再ログイン失敗 → ログイン画面を表示（e2e-mock ではスキップ）
                 let main_window_id = self.main_window.id;
-                if self.replay.pending_auto_play
+                if self.replay.is_auto_play_pending()
                     && self
                         .active_dashboard()
                         .has_tachibana_stream_pane(main_window_id)
@@ -573,7 +563,7 @@ impl Flowsurface {
                                     };
 
                                     // (2) 全ペイン Ready かつ pending_auto_play が立っているか判定
-                                    if self.replay.pending_auto_play
+                                    if self.replay.is_auto_play_pending()
                                         && self.replay.is_replay()
                                         && self
                                             .active_dashboard()
@@ -582,7 +572,7 @@ impl Flowsurface {
                                         log::info!(
                                             "[auto-play] All panes ready — firing ReplayMessage::Play"
                                         );
-                                        self.replay.pending_auto_play = false;
+                                        self.replay.clear_pending_auto_play();
                                         let play_task =
                                             Task::done(Message::Replay(ReplayMessage::Play));
                                         return Task::batch([resolve_task, play_task]);
@@ -815,6 +805,16 @@ impl Flowsurface {
                     Some(dashboard::sidebar::Action::TickerSelected(ticker_info, content)) => {
                         let main_window_id = self.main_window.id;
 
+                        // mid-replay での銘柄変更: active_streams にある旧 kline stream を取得してから
+                        // switch を実行し、ReloadKlineStream で pause + active_streams 更新 + 再ロードする。
+                        // Live モードでは空 Vec になり、末尾で SyncReplayBuffers にフォールバックする。
+                        let old_kline_streams: Vec<exchange::adapter::StreamKind> =
+                            if self.replay.is_replay() {
+                                self.replay.active_kline_streams()
+                            } else {
+                                vec![]
+                            };
+
                         let task = {
                             if let Some(kind) = content {
                                 self.active_dashboard_mut().init_focused_pane(
@@ -828,18 +828,43 @@ impl Flowsurface {
                             }
                         };
 
-                        // review 🟡 #4: mid-replay で heatmap-only pane を選択した場合、
-                        // init_focused_pane は Task::none() を返すため Message::Dashboard 末尾の
-                        // SyncReplayBuffers chain が発火しない。ここで明示的に chain する。
-                        // Replay モードでない場合は SyncReplayBuffers ハンドラ側で no-op。
-                        return task
-                            .map(move |msg| Message::Dashboard {
+                        // mid-replay で kline stream がある場合は ReloadKlineStream を即時発火する。
+                        // これにより: clock.pause() → active_streams 更新 → clock.seek(start) →
+                        // reset_charts_for_seek() → 新銘柄の klines 再ロードが行われる。
+                        // kline stream が無い場合（Heatmap only 等）は SyncReplayBuffers にフォールバック。
+                        //
+                        // NOTE: replay_task は dashboard の非同期タスク（kline フェッチ）完了を待たず
+                        // 並列で即時実行する。.chain() だと Tachibana 等の認証待ちタスクが長期ブロック
+                        // した場合に clock.seek(start) が実行されず current_time が変わらない不具合が
+                        // 発生するため Task::batch で並列実行に変更した。
+                        let reload_tasks: Vec<Task<Message>> = old_kline_streams
+                            .into_iter()
+                            .filter_map(|old| {
+                                old.as_kline_stream().map(|(_, tf)| {
+                                    Task::done(Message::Replay(ReplayMessage::ReloadKlineStream {
+                                        old_stream: Some(old),
+                                        new_stream: exchange::adapter::StreamKind::Kline {
+                                            ticker_info,
+                                            timeframe: tf,
+                                        },
+                                    }))
+                                })
+                            })
+                            .collect();
+
+                        let replay_task = if reload_tasks.is_empty() {
+                            Task::done(Message::Replay(ReplayMessage::SyncReplayBuffers))
+                        } else {
+                            Task::batch(reload_tasks)
+                        };
+
+                        return Task::batch([
+                            task.map(move |msg| Message::Dashboard {
                                 layout_id: None,
                                 event: msg,
-                            })
-                            .chain(Task::done(Message::Replay(
-                                ReplayMessage::SyncReplayBuffers,
-                            )));
+                            }),
+                            replay_task,
+                        ]);
                     }
                     Some(dashboard::sidebar::Action::ErrorOccurred(err)) => {
                         self.notifications.push(Toast::error(err.to_string()));
@@ -847,7 +872,7 @@ impl Flowsurface {
                     None => {}
                 }
 
-                if is_metadata_update && self.replay.pending_auto_play {
+                if is_metadata_update && self.replay.is_auto_play_pending() {
                     let main_window_id = self.main_window.id;
                     self.active_dashboard_mut()
                         .refresh_waiting_panes(main_window_id);
@@ -909,8 +934,8 @@ impl Flowsurface {
                             return task;
                         }
                         ReplayCommand::Play { start, end } => {
-                            self.replay.range_input.start = start;
-                            self.replay.range_input.end = end;
+                            self.replay.set_range_start(start);
+                            self.replay.set_range_end(end);
                             let task = self.update(Message::Replay(ReplayMessage::Play));
                             reply_tx.send(reply_replay_status(self));
                             return task;
@@ -1062,7 +1087,7 @@ impl Flowsurface {
     }
 
     fn view_replay_header(&self) -> Element<'_, Message> {
-        let time_display = text(replay::format_current_time(&self.replay, self.timezone))
+        let time_display = text(self.replay.format_current_time(self.timezone))
             .font(style::AZERET_MONO)
             .size(12);
 
@@ -1074,8 +1099,8 @@ impl Flowsurface {
             .style(move |theme, status| style::button::bordered_toggle(theme, status, is_replay))
             .padding(padding::all(2).left(6).right(6));
 
-        let mut start_input = text_input("Start", &self.replay.range_input.start).size(11);
-        let mut end_input = text_input("End", &self.replay.range_input.end).size(11);
+        let mut start_input = text_input("Start", self.replay.range_input_start()).size(11);
+        let mut end_input = text_input("End", self.replay.range_input_end()).size(11);
         if is_replay {
             start_input =
                 start_input.on_input(|s| Message::Replay(ReplayMessage::StartTimeChanged(s)));
@@ -1085,7 +1110,9 @@ impl Flowsurface {
         let is_loading = self.replay.is_loading();
         let is_playing = self.replay.is_playing();
         let is_paused = self.replay.is_paused();
-        let has_clock = self.replay.clock.is_some();
+        let has_clock = self.replay.has_clock();
+        // 終端で Paused の場合、▶ は Resume ではなく Play（先頭から再スタート）
+        let is_at_end = self.replay.is_at_end();
 
         let play_pause_label = if is_playing { "\u{23F8}" } else { "\u{25B6}" };
         let mut play_pause_btn =
@@ -1093,7 +1120,7 @@ impl Flowsurface {
         if is_replay && !is_loading {
             play_pause_btn = play_pause_btn.on_press(if is_playing {
                 Message::Replay(ReplayMessage::Pause)
-            } else if is_paused {
+            } else if is_paused && !is_at_end {
                 Message::Replay(ReplayMessage::Resume)
             } else {
                 Message::Replay(ReplayMessage::Play)
@@ -1328,12 +1355,7 @@ impl Flowsurface {
         let main_window_id = self.main_window.id;
         let dashboard = self.active_dashboard();
         let pending_streams: Vec<String> = Vec::new();
-        let trade_buffer_streams: Vec<String> = self
-            .replay
-            .active_streams
-            .iter()
-            .map(|s| format!("{s:?}"))
-            .collect();
+        let trade_buffer_streams: Vec<String> = self.replay.active_stream_debug_labels();
 
         let panes: Vec<serde_json::Value> = dashboard
             .iter_all_panes(main_window_id)
@@ -1527,6 +1549,28 @@ impl Flowsurface {
         };
 
         let main_window_id = self.main_window.id;
+
+        // リプレイ中は mutable borrow の前に旧 kline stream を確保する。
+        // init_focused_pane は pane の streams を書き換えるため、先に取得しておく必要がある。
+        let old_kline_stream_for_replay = if self.replay.is_replay() {
+            self.active_dashboard()
+                .iter_all_panes(main_window_id)
+                .find(|(_, p, _)| *p == pg_pane)
+                .and_then(|(_, _, state)| {
+                    state
+                        .streams
+                        .ready_iter()
+                        .and_then(|mut it| {
+                            it.find(|s| {
+                                matches!(s, exchange::adapter::StreamKind::Kline { .. })
+                            })
+                        })
+                        .copied()
+                })
+        } else {
+            None
+        };
+
         let dashboard = self.active_dashboard_mut();
 
         // 既存コンテンツの kind を保ったまま ticker を差し替える。
@@ -1548,15 +1592,31 @@ impl Flowsurface {
             })
             .unwrap_or(data::layout::pane::ContentKind::CandlestickChart);
 
+        // リプレイ中は ReloadKlineStream で clock を Paused に遷移させる。
+        // active_streams の旧 stream を除去し新 stream を登録、klines を再ロードするため
+        // SyncReplayBuffers ではなく ReloadKlineStream を chain する。
+        let replay_task = if let Some(old) = old_kline_stream_for_replay
+            && let Some((_, tf)) = old.as_kline_stream()
+        {
+            let new_stream = exchange::adapter::StreamKind::Kline {
+                ticker_info,
+                timeframe: tf,
+            };
+            Task::done(Message::Replay(ReplayMessage::ReloadKlineStream {
+                old_stream: Some(old),
+                new_stream,
+            }))
+        } else {
+            Task::done(Message::Replay(ReplayMessage::SyncReplayBuffers))
+        };
+
         let task = dashboard
             .init_focused_pane(main_window_id, ticker_info, kind)
             .map(move |msg| Message::Dashboard {
                 layout_id: None,
                 event: msg,
             })
-            .chain(Task::done(Message::Replay(
-                ReplayMessage::SyncReplayBuffers,
-            )));
+            .chain(replay_task);
 
         // focus を元に戻す
         let dashboard = self.active_dashboard_mut();
@@ -1614,9 +1674,10 @@ impl Flowsurface {
             );
         };
 
-        // 対象ペインの現在の ticker_info と kind を取得
+        // 対象ペインの現在の ticker_info・kind・旧 kline stream を取得する。
+        // init_focused_pane は pane の streams を書き換えるため、mutable borrow の前に取得する。
         let main_window_id = self.main_window.id;
-        let (ticker_info, kind) = {
+        let (ticker_info, kind, old_kline_stream_for_replay) = {
             let dashboard = self.active_dashboard();
             let Some((_, _, state)) = dashboard
                 .iter_all_panes(main_window_id)
@@ -1635,7 +1696,21 @@ impl Flowsurface {
                     Task::none(),
                 );
             };
-            (ti, state.content.kind())
+            // リプレイ中は旧 kline stream を保存（ReloadKlineStream で active_streams を更新するため）
+            let old_kline = if self.replay.is_replay() {
+                state
+                    .streams
+                    .ready_iter()
+                    .and_then(|mut it| {
+                        it.find(|s| {
+                            matches!(s, exchange::adapter::StreamKind::Kline { .. })
+                        })
+                    })
+                    .copied()
+            } else {
+                None
+            };
+            (ti, state.content.kind(), old_kline)
         };
 
         // settings.selected_basis を書き換えてから init_focused_pane を呼ぶ。
@@ -1652,15 +1727,27 @@ impl Flowsurface {
             state.settings.selected_basis = Some(data::chart::Basis::Time(tf));
         }
 
+        // リプレイ中は ReloadKlineStream で clock を Paused に遷移させる。
+        let replay_task = if let Some(old) = old_kline_stream_for_replay {
+            let new_stream = exchange::adapter::StreamKind::Kline {
+                ticker_info,
+                timeframe: tf,
+            };
+            Task::done(Message::Replay(ReplayMessage::ReloadKlineStream {
+                old_stream: Some(old),
+                new_stream,
+            }))
+        } else {
+            Task::done(Message::Replay(ReplayMessage::SyncReplayBuffers))
+        };
+
         let task = dashboard
             .init_focused_pane(main_window_id, ticker_info, kind)
             .map(move |msg| Message::Dashboard {
                 layout_id: None,
                 event: msg,
             })
-            .chain(Task::done(Message::Replay(
-                ReplayMessage::SyncReplayBuffers,
-            )));
+            .chain(replay_task);
 
         let dashboard = self.active_dashboard_mut();
         dashboard.focus = prev_focus;
@@ -1744,6 +1831,15 @@ impl Flowsurface {
         };
 
         let main_window_id = self.main_window.id;
+
+        // mid-replay での銘柄変更: Message::Sidebar 経路と同じく active_streams の旧 kline stream を
+        // 先に取得し、ReloadKlineStream で pause + 再ロードする。
+        let old_kline_streams: Vec<exchange::adapter::StreamKind> = if self.replay.is_replay() {
+            self.replay.active_kline_streams()
+        } else {
+            vec![]
+        };
+
         let dashboard = self.active_dashboard_mut();
         let prev_focus = dashboard.focus;
         dashboard.focus = Some((window_id, pg_pane));
@@ -1755,14 +1851,37 @@ impl Flowsurface {
             dashboard.switch_tickers_in_group(main_window_id, ticker_info)
         };
 
-        let task = task
-            .map(move |msg| Message::Dashboard {
+        let reload_tasks: Vec<Task<Message>> = old_kline_streams
+            .into_iter()
+            .filter_map(|old| {
+                old.as_kline_stream().map(|(_, tf)| {
+                    Task::done(Message::Replay(ReplayMessage::ReloadKlineStream {
+                        old_stream: Some(old),
+                        new_stream: exchange::adapter::StreamKind::Kline {
+                            ticker_info,
+                            timeframe: tf,
+                        },
+                    }))
+                })
+            })
+            .collect();
+
+        let replay_task = if reload_tasks.is_empty() {
+            Task::done(Message::Replay(ReplayMessage::SyncReplayBuffers))
+        } else {
+            Task::batch(reload_tasks)
+        };
+
+        // replay_task は dashboard の非同期タスク完了を待たず並列で即時実行する（.chain → Task::batch）。
+        // .chain() だと Tachibana 等の認証待ちタスクが長期ブロックした場合に clock.seek(start) が
+        // 実行されず current_time が変わらない不具合が発生するため並列実行に変更した。
+        let task = Task::batch([
+            task.map(move |msg| Message::Dashboard {
                 layout_id: None,
                 event: msg,
-            })
-            .chain(Task::done(Message::Replay(
-                ReplayMessage::SyncReplayBuffers,
-            )));
+            }),
+            replay_task,
+        ]);
 
         let dashboard = self.active_dashboard_mut();
         dashboard.focus = prev_focus;
@@ -2345,12 +2464,12 @@ impl Flowsurface {
         });
 
         let replay_cfg = data::ReplayConfig {
-            mode: match self.replay.mode {
+            mode: match self.replay.mode() {
                 replay::ReplayMode::Live => "live".into(),
                 replay::ReplayMode::Replay => "replay".into(),
             },
-            range_start: self.replay.range_input.start.clone(),
-            range_end: self.replay.range_input.end.clone(),
+            range_start: self.replay.range_input_start().to_string(),
+            range_end: self.replay.range_input_end().to_string(),
         };
 
         let state = data::State::from_parts(

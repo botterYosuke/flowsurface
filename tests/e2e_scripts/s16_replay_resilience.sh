@@ -26,11 +26,13 @@ for i in $(seq 1 20); do
   curl -s -X POST "$API/replay/speed" > /dev/null
 done
 
-# 最終的に Playing 状態を維持しているか（speed は Playing 状態に影響しない）
+# 新仕様: CycleSpeed は Paused + range.start リセットを伴うため、連打後は Paused になる。
+# Resume して Playing に戻してから状態を確認する。
+curl -s -X POST "$API/replay/resume" > /dev/null
 wait_status Playing 10 || true
 FINAL_STATUS=$(jqn "$(curl -s "$API/replay/status")" "d.status")
 [ "$FINAL_STATUS" = "Playing" ] \
-  && pass "TC-S16-01: speed 20 連打後 status=Playing" \
+  && pass "TC-S16-01: speed 20 連打後 Resume → status=Playing" \
   || fail "TC-S16-01" "status=$FINAL_STATUS (Playing 期待)"
 
 stop_app
@@ -49,9 +51,9 @@ MIDNIGHT_MINUS_1=$(node -e "
 ")
 MIDNIGHT_PLUS_1=$(node -e "
   const now = new Date();
-  const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 1, 0));
+  const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 3, 0));
   const pad = n => String(n).padStart(2,'0');
-  console.log(d.getUTCFullYear()+'-'+pad(d.getUTCMonth()+1)+'-'+pad(d.getUTCDate())+' 01:00');
+  console.log(d.getUTCFullYear()+'-'+pad(d.getUTCMonth()+1)+'-'+pad(d.getUTCDate())+' 03:00');
 ")
 echo "  range: $MIDNIGHT_MINUS_1 → $MIDNIGHT_PLUS_1"
 

@@ -3,6 +3,8 @@ pub mod controller;
 pub mod dispatcher;
 pub mod loader;
 pub mod store;
+#[cfg(test)]
+pub(crate) mod testutil;
 
 use std::collections::HashSet;
 use std::ops::Range;
@@ -100,18 +102,18 @@ pub struct ReplayStatus {
 /// リプレイモードの状態を管理する
 pub struct ReplayState {
     /// ライブ / リプレイの切替
-    pub mode: ReplayMode,
+    mode: ReplayMode,
     /// リプレイ範囲の設定（UI入力）
-    pub range_input: ReplayRangeInput,
+    range_input: ReplayRangeInput,
     /// ステップ時計。Play 開始後 Some になる。
-    pub clock: Option<StepClock>,
+    clock: Option<StepClock>,
     /// 履歴データストア。リプレイ開始時に bulk load される。
-    pub event_store: EventStore,
+    event_store: EventStore,
     /// 現在アクティブなストリーム集合（dispatch_tick に渡す）。
-    pub active_streams: HashSet<StreamKind>,
+    active_streams: HashSet<StreamKind>,
     /// 起動時 fixture 復元の結果として次の「全ペイン Ready」で Play を発火する。
     /// 一度発火したら false に戻す。永続化しない。
-    pub pending_auto_play: bool,
+    pending_auto_play: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,8 +124,8 @@ pub enum ReplayMode {
 
 #[derive(Default)]
 pub struct ReplayRangeInput {
-    pub start: String,
-    pub end: String,
+    start: String,
+    end: String,
 }
 
 #[derive(Debug, Clone)]
@@ -573,8 +575,7 @@ mod tests {
 
     #[test]
     fn to_status_replay_playing() {
-        let mut state = ReplayState::default();
-        state.mode = ReplayMode::Replay;
+        let mut state = ReplayState { mode: ReplayMode::Replay, ..Default::default() };
         let base = Instant::now();
         // step_size=500, step_delay=BASE_STEP_DELAY_MS(100ms) → 3 steps at +300ms → now_ms = 1500
         let mut clock = StepClock::new(0, 5_000, 500);
@@ -593,8 +594,7 @@ mod tests {
 
     #[test]
     fn to_status_replay_loading() {
-        let mut state = ReplayState::default();
-        state.mode = ReplayMode::Replay;
+        let mut state = ReplayState { mode: ReplayMode::Replay, ..Default::default() };
         let base = Instant::now();
         let mut clock = StepClock::new(0, 1_000, 60_000);
         clock.play(base);
@@ -607,8 +607,7 @@ mod tests {
 
     #[test]
     fn to_status_replay_paused() {
-        let mut state = ReplayState::default();
-        state.mode = ReplayMode::Replay;
+        let mut state = ReplayState { mode: ReplayMode::Replay, ..Default::default() };
         let clock = StepClock::new(0, 1_000, 60_000);
         // clock starts Paused by default
         state.clock = Some(clock);
@@ -619,7 +618,7 @@ mod tests {
 
     #[test]
     fn to_status_includes_range_input() {
-        let mut state = ReplayState {
+        let state = ReplayState {
             mode: ReplayMode::Replay,
             range_input: ReplayRangeInput {
                 start: "2026-04-10 09:00".to_string(),
@@ -647,8 +646,7 @@ mod tests {
 
     #[test]
     fn to_status_replay_serializes_all_fields() {
-        let mut state = ReplayState::default();
-        state.mode = ReplayMode::Replay;
+        let mut state = ReplayState { mode: ReplayMode::Replay, ..Default::default() };
         let base = Instant::now();
         // step_size=500, step_delay=100ms → 3 steps at +300ms → now_ms=1500
         let mut clock = StepClock::new(0, 5_000, 500);
@@ -672,9 +670,11 @@ mod tests {
 
     #[test]
     fn toggle_replay_to_live_clears_pending_auto_play() {
-        let mut state = ReplayState::default();
-        state.mode = ReplayMode::Replay;
-        state.pending_auto_play = true;
+        let mut state = ReplayState {
+            mode: ReplayMode::Replay,
+            pending_auto_play: true,
+            ..Default::default()
+        };
 
         state.toggle_mode(); // Replay → Live
 
@@ -683,16 +683,14 @@ mod tests {
 
     #[test]
     fn replay_play_message_clears_pending_auto_play() {
-        let mut state = ReplayState::default();
-        state.pending_auto_play = true;
+        let mut state = ReplayState { pending_auto_play: true, ..Default::default() };
         state.on_manual_play_requested();
         assert!(!state.pending_auto_play);
     }
 
     #[test]
     fn session_restore_failure_clears_pending_auto_play() {
-        let mut state = ReplayState::default();
-        state.pending_auto_play = true;
+        let mut state = ReplayState { pending_auto_play: true, ..Default::default() };
         state.on_session_unavailable();
         assert!(!state.pending_auto_play);
     }
@@ -764,8 +762,7 @@ mod tests {
 
     #[test]
     fn format_current_time_uses_clock_time_in_replay() {
-        let mut state = ReplayState::default();
-        state.mode = ReplayMode::Replay;
+        let mut state = ReplayState { mode: ReplayMode::Replay, ..Default::default() };
 
         // 2025-04-01 06:00:00 UTC = 1743487200000 ms
         let target_ms = 1_743_487_200_000u64;

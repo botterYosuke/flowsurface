@@ -109,8 +109,10 @@ fi
 stop_app
 
 # ── TC-S18-03: ペイン CRUD サイクル 20 回（Playing 中）→ Playing 維持 ───
+# 1x 再生で M1 は約 10 bar/秒。20 サイクル × 1.5 秒 ≈ 30 秒の間に
+# 2h range (120 bars) が終端到達するため、6h range (360 bars) を使用する。
 echo "  [TC-S18-03] Playing 中 split→close × 20 サイクル..."
-setup_single_pane "BinanceLinear:BTCUSDT" "M1" "$(utc_offset -3)" "$(utc_offset -1)"
+setup_single_pane "BinanceLinear:BTCUSDT" "M1" "$(utc_offset -7)" "$(utc_offset -1)"
 start_app
 
 if ! wait_playing 30; then

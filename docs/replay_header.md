@@ -1,7 +1,7 @@
 # リプレイ機能 仕様書
 
-**最終更新**: 2026-04-14
-**対象バージョン**: `sasa/step` ブランチ (Phase 1〜8 + Tachibana Phase 1〜3 + R3 アーキテクチャ刷新 + Fixture 直接起動 + Auto-play タイムアウト廃止 完了)
+**最終更新**: 2026-04-15
+**対象バージョン**: `sasa/develop` ブランチ (Phase 1〜8 + Tachibana Phase 1〜3 + R3 アーキテクチャ刷新 + Fixture 直接起動 + Auto-play タイムアウト廃止 + R4-1 Dead Code 除去 + R4-2 フィールド非公開化 + R4-5 テストヘルパー共通化 完了)
 **関連ドキュメント**:
 - [docs/plan/replay_redesign.md](plan/replay_redesign.md) — R1〜R3 リファクタ計画と実装ログ
 - [docs/plan/replay_bar_step_loop.md](plan/replay_bar_step_loop.md) — StepClock / EventStore / dispatch_tick 設計
@@ -142,32 +142,52 @@ YYYY-MM-DD HH:MM    (UTC として解釈)
 
 ### 4.1 ReplayState ([src/replay/mod.rs](../src/replay/mod.rs))
 
+`ReplayState` の全フィールドはプライベート。外部からは以下の公開メソッドのみアクセス可能。
+
 ```rust
 pub struct ReplayState {
-    pub mode: ReplayMode,
-    pub range_input: ReplayRangeInput,
+    mode: ReplayMode,
+    range_input: ReplayRangeInput,
     /// バーステップクロック。Play 開始後 Some になる。
-    pub clock: Option<StepClock>,
-    pub event_store: EventStore,
-    pub active_streams: HashSet<StreamKind>,
+    clock: Option<StepClock>,
+    event_store: EventStore,
+    active_streams: HashSet<StreamKind>,
     /// 起動時 fixture 復元の結果として次の「全ペイン Ready」で Play を自動発火する。
     /// 一度発火したら false に戻す。永続化しない。
-    pub pending_auto_play: bool,
+    pending_auto_play: bool,
 }
 
 pub enum ReplayMode { Live, Replay }
 
 pub struct ReplayRangeInput {
-    pub start: String,
-    pub end: String,
+    start: String,
+    end: String,
 }
 ```
+
+**公開メソッド（抜粋）**:
+
+| メソッド | 概要 |
+|---|---|
+| `is_replay() -> bool` | Replay モードかどうか |
+| `is_playing() -> bool` | Playing 状態かどうか |
+| `is_paused() -> bool` | Paused 状態かどうか |
+| `is_loading() -> bool` | Waiting 状態かどうか |
+| `current_time() -> u64` | 現在の仮想時刻（ms）。clock が None なら 0 |
+| `speed_label() -> String` | `"1x"` / `"2x"` 等の表示用文字列 |
+| `toggle_mode()` | Live ↔ Replay 切替。Replay→Live 時は全状態をリセット |
+| `start(start_ms, end_ms, step_size_ms)` | Play 開始時に clock を Waiting で初期化 |
+| `on_klines_loaded(...)` | KlinesLoadCompleted を EventStore に反映し、全 stream 完了で Playing 復帰 |
+| `cycle_speed()` | 速度を次の段階に循環（クロックの status/位置は変更しない） |
+| `to_status() -> ReplayStatus` | HTTP API レスポンス用に変換 |
 
 - `clock` は `Play` 押下で `Some` になり、`Live` 復帰で `None` に戻る
 - `event_store` は stream ごとにロード済みの kline / trades を保持する（play 開始時に初期化）
 - `active_streams` は再生中の全 `StreamKind` の集合
 - `toggle_mode()` で Replay → Live に戻す際は `clock = None`, `event_store = EventStore::new()`, `active_streams = HashSet::new()`, `range_input = default`, `pending_auto_play = false` にリセット
 - `pending_auto_play` は **永続化しない**（再起動のたびに起動時ロジックで再評価する）
+
+**ReplayController との関係**: `ReplayController` が `ReplayState` をラップし、`handle_message()` / `tick()` を主エントリポイントとする。`Deref<Target=ReplayState>` を実装しているため、外部からは `controller.is_replay()` 等の読み取りメソッドを直接呼べる。
 
 ### 4.2 StepClock ([src/replay/clock.rs](../src/replay/clock.rs))
 
@@ -176,7 +196,7 @@ pub struct StepClock {
     now_ms: u64,                    // 現在の仮想時刻（常にバー境界値）
     next_step_at: Option<Instant>,  // 次のステップを発火する wall 時刻
     step_size_ms: u64,              // 1 ステップで進む仮想時刻幅（min active timeframe ms）
-    base_step_delay_ms: u64,        // 1x speed での wall delay (= BASE_STEP_DELAY_MS = 1000ms)
+    base_step_delay_ms: u64,        // 1x speed での wall delay (= BASE_STEP_DELAY_MS = 100ms)
     speed: f32,                     // 1.0 | 2.0 | 5.0 | 10.0
     status: ClockStatus,
     range: Range<u64>,              // リプレイ範囲 (start_ms, end_ms)
@@ -196,9 +216,11 @@ pub enum ClockStatus {
 - `pause()`: `Paused` に遷移、`next_step_at = None`
 - `set_waiting()`: `Waiting` に遷移（データロード待ち）
 - `resume_from_waiting(wall_now)`: `Waiting → Playing` に復帰
-- `seek(target_ms)`: `now_ms` を指定値（step_size 境界にスナップ）に設定し `Paused` で停止
-- `tick(wall_now) -> Range<u64>`: `wall_now >= next_step_at` のとき `now_ms` を 1 ステップ進め、emit 範囲 `[prev_ms, new_ms)` を返す。まだ発火タイミングでなければ空 Range を返す
-- `step_delay_ms()`: `base_step_delay_ms / speed` (ms)。例: 2x なら 500ms/bar
+- `seek(target_ms)`: `now_ms` を指定値（step_size 境界にスナップ）に設定する。ステータスは変更しない（`seek` 単体では Paused にならない）
+- `set_speed(speed)`: speed を更新する。`speed <= 0` は `pause()` と同義
+- `set_step_size(step_size_ms)`: active streams 変更時に最小 timeframe を更新し、`now_ms` を新 step_size の倍数に floor 整列
+- `tick(wall_now) -> Range<u64>`: `wall_now >= next_step_at` のとき `now_ms` を 1 ステップ進め、emit 範囲 `[prev_ms, new_ms)` を返す。まだ発火タイミングでなければ空 Range を返す。終端（`range.end`）到達時は自動的に `Paused` に遷移する
+- `step_delay_ms()`: `base_step_delay_ms / speed` (ms)。例: 2x なら 50ms/bar
 
 **現在時刻の参照**: `clock.now_ms()` は常にバー境界値を返す（連続補間なし）。
 
@@ -207,6 +229,7 @@ pub enum ClockStatus {
 ```rust
 pub struct EventStore {
     // stream ごとに SortedVec<Trade> + SortedVec<Kline> を保持（内部実装）
+    // loaded_ranges: HashMap<StreamKind, Vec<Range<u64>>> でロード済み範囲を管理
 }
 
 impl EventStore {
@@ -221,6 +244,9 @@ pub struct LoadedData {
     pub klines: Vec<Kline>,
     pub trades: Vec<Trade>,
 }
+```
+
+**`SortedVec` の dedup 動作**: `insert_sorted` は `sort_by_key(|t| t.time)` → `dedup_by_key(|t| t.time)` で同一ミリ秒の 2 件目以降を消す。リプレイは視覚化目的のため ms 精度の完全再現は非ゴール（高頻度 trade の消失は許容範囲内）。
 ```
 
 - `klines_in` / `trades_in` は **半開区間** `[start, end)` を返す（`time >= start && time < end`）
@@ -388,14 +414,29 @@ enum Message {
 ### 6.5 StepForward / StepBackward
 
 ```
-[StepForward]
-  ├─ Paused 以外（Playing / Waiting）の場合は no-op
+[StepForward — Playing 中]
+  ├─ clock.pause()
+  ├─ clock.seek(range.end)                               ← current_time を End まで一気に移動
+  ├─ dashboard.reset_charts_for_seek(main_window)         ← チャートをクリア
+  └─ inject_klines_up_to(range.end)                      ← End 時点までのデータを再注入
+     range.end は変更しない（ユーザー設定の終了時刻を保持）
+     kline 再フェッチは行わない — EventStore から再構成
+
+[StepForward — Paused 中]
   ├─ new_time = current_time + min_timeframe_ms(active_streams)
   ├─ new_time > range.end の場合は no-op（範囲終端を超える）
   ├─ clock.seek(new_time)
   └─ inject_klines_up_to(new_time): 0..new_time+1 の klines を全 active_streams から注入
 
-[StepBackward]
+[StepBackward — Playing 中]
+  ├─ clock.pause()
+  ├─ clock.seek(range.start)                              ← current_time を start に戻す
+  ├─ dashboard.reset_charts_for_seek(main_window)         ← チャートをクリア
+  └─ inject_klines_up_to(range.start)                    ← start 時点のデータを再注入
+     range.end は変更しない（ユーザー設定の終了時刻を保持）
+     kline 再フェッチは行わない — EventStore から再構成
+
+[StepBackward — Paused / Waiting 中]
   ├─ 全 active_streams の klines_in(stream, 0..current_time) で
   │   current_time より小さい最大の kline.time を探す
   ├─ new_time = compute_step_backward_target(prev_time, current_time, start_ms)
@@ -403,10 +444,58 @@ enum Message {
   ├─ clock.seek(new_time) + clock.pause()
   ├─ dashboard.reset_charts_for_seek(main_window) でチャートをクリア
   └─ inject_klines_up_to(new_time): 0..new_time+1 の klines を全 active_streams から注入
-     (kline 再フェッチは行わない — EventStore から再構成)
+     kline 再フェッチは行わない — EventStore から再構成
 ```
 
-### 6.6 Live 復帰
+### 6.6 ユーザー操作による初期状態リセット
+
+以下の操作を受けたとき、clock が Some（リプレイ進行中または終了後）ならば **初期状態（range.start）に戻して停止** する。
+
+#### 共通フロー操作（EventStore から再構成）
+
+```
+操作: CycleSpeed / StartTimeChanged / EndTimeChanged
+
+共通フロー（clock が Some の場合）:
+  ├─ clock.pause()
+  ├─ clock.seek(range.start)
+  ├─ dashboard.reset_charts_for_seek(main_window)
+  └─ inject_klines_up_to(range.start)
+     kline 再フェッチは行わない — EventStore から再構成
+
+CycleSpeed の場合は上記に加えて速度の循環変更も行う。
+StartTimeChanged / EndTimeChanged は range_input の更新も行う（clock は再作成しない）。
+clock が None の場合（Play 前）は入力更新または速度変更のみ、リセットは行わない。
+```
+
+#### 銘柄変更による初期状態リセット（ReloadKlineStream 経由）
+
+Sidebar または Pane API 経由で銘柄を変更したとき、kline stream がある場合は `ReloadKlineStream` で同等のリセットが行われる。
+**clock の状態（Playing / Paused / Waiting）によらず**常に初期状態リセットが実行される。
+
+```
+操作: 銘柄変更（Sidebar / Pane API）
+      ※ Playing 中・Paused 中・Waiting 中・replay 終了後のすべてで適用
+
+kline stream あり（ReloadKlineStream フロー）:
+  ├─ active_streams: 旧 stream を除去し新 stream を登録
+  ├─ clock.pause()            ← Playing / Waiting → Paused に強制遷移
+  │     Waiting 遷移はしない（ロード完了後の自動再生を防ぐため）
+  ├─ clock.set_step_size(new_min_timeframe)
+  ├─ clock.seek(range.start)
+  ├─ dashboard.reset_charts_for_seek(main_window)
+  └─ loader::load_klines(new_stream, range) — 新銘柄のデータを再フェッチ
+     再生再開はしない（ユーザーが明示的に ▶ を押すまで Paused を維持）
+
+kline stream なし（Heatmap only 等 — SyncReplayBuffers フロー）:
+  └─ clock.set_step_size(min_timeframe) のみ（clock.seek / pause は行わない）
+
+clock が None の場合（Play 前）は no-op。
+```
+
+> **実装上の注意**: `ReloadKlineStream` は dashboard の非同期 kline フェッチ（`init_focused_pane` が返すタスク）と **並列（Task::batch）** で即時発火する。`.chain()` で繋ぐと Tachibana 等の認証待ちフェッチが長期ブロックした場合に `clock.seek(range.start)` が実行されず `current_time` が変わらない不具合が発生する。
+
+### 6.7 Live 復帰
 
 ```
 [ReplayMessage::ToggleMode (Replay → Live)]
@@ -453,7 +542,8 @@ pub fn dispatch_tick(
 
 - `Pause`: `clock.pause()` — `status = Paused`, `next_step_at = None`
 - `Resume`: `clock.play(wall_now)` — `status = Playing`, `next_step_at` 再設定
-- `CycleSpeed`: `SPEEDS = [1.0, 2.0, 5.0, 10.0]` を `(i+1) % 4` で循環、`clock.set_speed(next)` を呼ぶ
+- `CycleSpeed`: `SPEEDS = [1.0, 2.0, 5.0, 10.0]` を `(i+1) % 4` で循環、`clock.set_speed(next)` を呼ぶ。
+  clock が Some の場合は §6.6 の「初期状態リセット」フローを実行する（pause + seek to start）。
 - `speed_label()`: `if speed == floor(speed) { "Nx" } else { "N.Nx" }` を返す
 
 ### 7.3 Waiting 状態の自動解除
@@ -787,7 +877,7 @@ curl -X POST http://127.0.0.1:9876/api/app/save
 | 定数 | 値 | 定義箇所 | 意味 |
 |---|---|---|---|
 | `SPEEDS` | `[1.0, 2.0, 5.0, 10.0]` | [src/replay/mod.rs](../src/replay/mod.rs) | 再生速度テーブル |
-| `BASE_STEP_DELAY_MS` | `1_000` | [src/replay/clock.rs](../src/replay/clock.rs) | 1x speed での wall delay (ms/bar) |
+| `BASE_STEP_DELAY_MS` | `100` | [src/replay/clock.rs](../src/replay/clock.rs) | 1x speed での wall delay (ms/bar)。1x で 100ms ≒ 10bar/s |
 | `PRE_START_HISTORY_BARS` | `300` | [src/replay/mod.rs](../src/replay/mod.rs) | リプレイ開始前のコンテキスト用 kline 本数 |
 | API port (default) | `9876` | [src/replay_api.rs](../src/replay_api.rs) | `FLOWSURFACE_API_PORT` で上書き |
 | HTTP buffer size | `8192` | [src/replay_api.rs](../src/replay_api.rs) | リクエスト読み取りバッファ |
@@ -852,10 +942,11 @@ curl -X POST http://127.0.0.1:9876/api/app/save
 |---|---|
 | [src/replay/mod.rs](../src/replay/mod.rs) | `ReplayState` / `ReplayMessage` / `ReplayMode` / `ReplayStatus` / `parse_replay_range` / `format_current_time` / `SPEEDS` / `pending_auto_play` 管理 |
 | [src/replay/clock.rs](../src/replay/clock.rs) | `StepClock` / `ClockStatus` / `play` / `pause` / `seek` / `tick` / `set_waiting` / `resume_from_waiting` / `BASE_STEP_DELAY_MS` |
-| [src/replay/store.rs](../src/replay/store.rs) | `EventStore` / `LoadedData` / `ingest_loaded` / `is_loaded` / `klines_in` / `trades_in` |
+| [src/replay/store.rs](../src/replay/store.rs) | `EventStore` / `LoadedData` / `SortedVec` / `ingest_loaded` / `is_loaded` / `klines_in` / `trades_in` |
 | [src/replay/controller.rs](../src/replay/controller.rs) | `ReplayController` / `TickOutcome` / `handle_message` / `tick` — `ReplayMessage` ハンドラと Tick ループを main.rs から分離 |
 | [src/replay/dispatcher.rs](../src/replay/dispatcher.rs) | `dispatch_tick` / `DispatchResult` |
 | [src/replay/loader.rs](../src/replay/loader.rs) | `load_klines` / `KlineLoadResult` / `fetch_all_klines` |
+| [src/replay/testutil.rs](../src/replay/testutil.rs) | テスト共通ヘルパー (`#[cfg(test)]`)。`dummy_trade` / `dummy_kline` / `trade_stream` / `kline_stream` を提供。`dispatcher.rs` / `store.rs` / `loader.rs` の各テストモジュールで使用 |
 | [src/replay_api.rs](../src/replay_api.rs) | HTTP サーバー (`tokio::net::TcpListener` + 手動パース) / `ApiCommand` / `PaneCommand` / `ReplySender` / ルーティング |
 | [src/main.rs](../src/main.rs) | `Flowsurface` への `replay` フィールド、起動時 `pending_auto_play` 初期化、`Message::Replay` / `Message::ReplayApi` ハンドラ、auto-play ゲート（`ResolveStreams` + `Tick`）、`view_replay_header()`、`subscription()`、`handle_pane_api()` |
 | [src/screen/dashboard.rs](../src/screen/dashboard.rs) | `prepare_replay()` / `rebuild_for_live()` / `collect_trade_streams()` / `ingest_replay_klines()` / `ingest_trades()` / `all_panes_have_ready_streams()` |
@@ -867,8 +958,10 @@ curl -X POST http://127.0.0.1:9876/api/app/save
 
 - `src/replay/mod.rs`: `parse_replay_range` / `to_status` / `pending_auto_play` / `toggle_mode` リセット等
 - `src/replay/store.rs`: `ingest_loaded` / `is_loaded` / `klines_in` / `trades_in` 動作検証
-- `src/replay/clock.rs`: `ClockStatus` 遷移 / `tick` ステップ計算 / `seek` スナップ
+- `src/replay/clock.rs`: `ClockStatus` 遷移 / `tick` ステップ計算 / `seek` スナップ / catch-up / `set_step_size` 再整列
+- `src/replay/controller.rs`: `StepForward` / `StepBackward` (Playing / Paused) / `StartTimeChanged` / `EndTimeChanged` の clock 状態遷移
 - `src/replay/dispatcher.rs`: `dispatch_tick` のスライス抽出 / Waiting 検出 / 終端判定
+- `src/replay/testutil.rs`: テストヘルパー（`#[cfg(test)]`）— `dummy_trade` / `dummy_kline` / `trade_stream` / `kline_stream`
 - `src/replay/loader.rs`: `EventStore` 直接操作で loader 動作を検証
 - `src/chart/kline.rs`: `ingest_historical_klines` / `reset_for_seek`
 - `src/screen/dashboard.rs`: `all_panes_have_ready_streams` の true/false 条件
@@ -896,6 +989,9 @@ curl -X POST http://127.0.0.1:9876/api/app/save
 | Tachibana Phase 1〜3 | 立花証券 D1 対応 | [docs/tachibana_spec.md §8](tachibana_spec.md) / [docs/plan/archive/tachibana_replay.md](plan/archive/tachibana_replay.md) |
 | **R3: アーキテクチャ刷新** | `PlaybackState` / `FireStatus` / `process_tick` / `ReplayKlineBuffer` / `TradeBuffer` を全廃し、`StepClock` + `EventStore` + `dispatch_tick` に置き換え | [docs/plan/replay_redesign.md](plan/replay_redesign.md) |
 | **Fixture 直接起動** | `pending_auto_play` / `all_panes_have_ready_streams` を追加し、`saved-state.json` の replay 構成で自動 Play | [docs/plan/replay_fixture_direct_boot.md](plan/replay_fixture_direct_boot.md) |
+| **R4-1: Dead Code 除去** | `SPEED_INSTANT` 定数・`extend_range_end()` / `set_seek_to_start_on_end()` / `seek_to_start_on_end` フィールド（`clock.rs`）と `extend_loaded_range_end_to()`（`store.rs`）を削除。`#[allow(dead_code)]` 全消去 | [docs/plan/replay_refactoring.md](plan/replay_refactoring.md) |
+| **R4-2: フィールド非公開化** | `ReplayState` の全フィールドを `pub` → private 化。外部アクセスは公開メソッド経由に統一 | [docs/plan/replay_refactoring.md](plan/replay_refactoring.md) |
+| **R4-5: テストヘルパー共通化** | `src/replay/testutil.rs` を作成し、各テストモジュールの重複ヘルパーを統一 | [docs/plan/replay_refactoring.md](plan/replay_refactoring.md) |
 
 ### 15.2 R3 刷新の設計判断
 

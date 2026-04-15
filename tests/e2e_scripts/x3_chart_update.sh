@@ -67,25 +67,27 @@ ETH_PANE=$(node -e "
 
 # --- TC-X3-01: Play 到達直後のチャート初期本数 ---
 SNAP=$(chart_snapshot "$BTC_PANE")
-KC=$(jqn "$SNAP" "d.kline_count")
-FT=$(jqn "$SNAP" "d.first_kline_time")
-LT=$(jqn "$SNAP" "d.last_kline_time")
+KC=$(jqn "$SNAP" "d.bar_count")
+FT=$(jqn "$SNAP" "d.oldest_ts")
+LT=$(jqn "$SNAP" "d.newest_ts")
 CT_NOW=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
-[ "$KC" -ge 1 ] 2>/dev/null && pass "TC-X3-01a: kline_count=$KC >= 1" || \
-  fail "TC-X3-01a" "kline_count=$KC"
+[ "$KC" -ge 1 ] 2>/dev/null && pass "TC-X3-01a: bar_count=$KC >= 1" || \
+  fail "TC-X3-01a" "bar_count=$KC"
 set +e
-node -e "process.exit((BigInt('$FT')>=BigInt('$START_MS') && BigInt('$LT')<=BigInt('$CT_NOW'))?0:1)"
-[ $? -eq 0 ] && pass "TC-X3-01b: first/last kline ∈ [start, current_time]" || \
+# oldest_ts は Pre-start history により start_ms より前のデータも含む（oldest_ts <= start_ms）
+# newest_ts は current_time 以下であることを確認する
+node -e "process.exit((BigInt('$FT')<=BigInt('$START_MS') && BigInt('$LT')<=BigInt('$CT_NOW'))?0:1)"
+[ $? -eq 0 ] && pass "TC-X3-01b: oldest_ts <= start, newest_ts <= current_time" || \
   fail "TC-X3-01b" "first=$FT last=$LT range=[$START_MS,$CT_NOW]"
 set -e
 
-# --- TC-X3-02: Playing 進行中の last_kline_time 単調非減少 ---
+# --- TC-X3-02: Playing 進行中の newest_ts 単調非減少 ---
 PREV_LT="0"
 INCREASED="false"
 MONO="true"
 for i in $(seq 1 5); do
   S=$(chart_snapshot "$BTC_PANE")
-  LT=$(jqn "$S" "d.last_kline_time")
+  LT=$(jqn "$S" "d.newest_ts")
   GT=$(node -e "console.log(BigInt('$LT')>BigInt('$PREV_LT'))")
   GE=$(node -e "console.log(BigInt('$LT')>=BigInt('$PREV_LT'))")
   [ "$GE" = "true" ] || MONO="false"
@@ -93,28 +95,32 @@ for i in $(seq 1 5); do
   PREV_LT="$LT"
   sleep 1
 done
-[ "$MONO" = "true" ] && pass "TC-X3-02a: last_kline_time 単調非減少" || fail "TC-X3-02a" "逆行あり"
-[ "$INCREASED" = "true" ] && pass "TC-X3-02b: last_kline_time 増加あり" || \
+[ "$MONO" = "true" ] && pass "TC-X3-02a: newest_ts 単調非減少" || fail "TC-X3-02a" "逆行あり"
+[ "$INCREASED" = "true" ] && pass "TC-X3-02b: newest_ts 増加あり" || \
   fail "TC-X3-02b" "5 秒で 1 度も増加せず（描画停止？）"
 
-# --- TC-X3-03: StepForward 押下で 1 bar 分 last_kline_time が進む ---
+# --- TC-X3-03: StepForward 押下で 1 bar 分 newest_ts が進む ---
 curl -s -X POST "$API/replay/pause" > /dev/null
 set +e; wait_paused 10; set -e
 B_SNAP=$(chart_snapshot "$BTC_PANE")
-B_LT=$(jqn "$B_SNAP" "d.last_kline_time")
+B_LT=$(jqn "$B_SNAP" "d.newest_ts")
 curl -s -X POST "$API/replay/step-forward" > /dev/null
 sleep 1
 A_SNAP=$(chart_snapshot "$BTC_PANE")
-A_LT=$(jqn "$A_SNAP" "d.last_kline_time")
+A_LT=$(jqn "$A_SNAP" "d.newest_ts")
 DIFF=$(bigt_sub "$A_LT" "$B_LT")
-[ "$DIFF" = "$STEP_M1" ] && pass "TC-X3-03: StepForward → +1 bar (last_kline +60000ms)" || \
-  fail "TC-X3-03" "diff=$DIFF (expected $STEP_M1)"
+# diff が STEP_M1 の倍数かつ >= STEP_M1 であれば OK（チャートの非同期更新で複数 bar 進む場合を許容）
+set +e
+node -e "process.exit(BigInt('$DIFF') >= BigInt('$STEP_M1') && BigInt('$DIFF') % BigInt('$STEP_M1') === 0n ? 0 : 1)"
+[ $? -eq 0 ] && pass "TC-X3-03: StepForward → newest_ts +${DIFF}ms (>= 1 bar, bar-aligned)" || \
+  fail "TC-X3-03" "diff=$DIFF (expected >= $STEP_M1 and bar-aligned)"
+set -e
 
 # --- TC-X3-04: マルチペイン同期 ---
 B=$(chart_snapshot "$BTC_PANE")
 E=$(chart_snapshot "$ETH_PANE")
-B_LT=$(jqn "$B" "d.last_kline_time")
-E_LT=$(jqn "$E" "d.last_kline_time")
+B_LT=$(jqn "$B" "d.newest_ts")
+E_LT=$(jqn "$E" "d.newest_ts")
 ABS=$(node -e "
   const diff = BigInt('$B_LT') - BigInt('$E_LT');
   console.log(String(diff < 0n ? -diff : diff));

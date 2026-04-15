@@ -58,18 +58,21 @@ BARS=$(node -e "console.log(String(BigInt('$DELTA') / BigInt('$STEP_M1')))")
 [[ $BARS -ge 1 && $BARS -le 500 ]] && pass "TC-S9-02: 5x で 5 秒に ${BARS} bar 前進" || \
   fail "TC-S9-02" "${BARS} bar (expected 1-500, delta=$DELTA)"
 
-# --- TC-S9-03: Playing 中の StepForward の挙動を確定 ---
+# --- TC-S9-03: Playing 中の StepForward は End まで一気に進んで Paused になる ---
 curl -s -X POST "$API/replay/resume" > /dev/null
-PRE_PLAYING=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
+sleep 0.3
 curl -s -X POST "$API/replay/step-forward" > /dev/null
-POST_PLAYING=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
-DELTA_P=$(bigt_sub "$POST_PLAYING" "$PRE_PLAYING")
-set +e
-node -e "process.exit(BigInt('$DELTA_P') > BigInt('$STEP_M1') ? 1 : 0)"
-RC=$?
-set -e
-[ $RC -eq 0 ] && pass "TC-S9-03: Playing 中 StepForward は no-op (delta=$DELTA_P)" || \
-  fail "TC-S9-03" "Playing 中 Step が ${DELTA_P}ms 進めた（仕様違反）"
+sleep 0.3
+STATUS_AFTER=$(jqn "$(curl -s "$API/replay/status")" "d.status")
+CT_AFTER=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
+END_TIME_MS=$(node -e "console.log(new Date('${END}:00Z').getTime())")
+[ "$STATUS_AFTER" = "Paused" ] \
+  && pass "TC-S9-03a: Playing 中 StepForward → Paused" \
+  || fail "TC-S9-03a" "status=$STATUS_AFTER (expected Paused)"
+IS_AT_END=$(node -e "console.log(BigInt('$CT_AFTER') >= BigInt('$END_TIME_MS') - BigInt('120000'))")
+[ "$IS_AT_END" = "true" ] \
+  && pass "TC-S9-03b: Playing 中 StepForward → End 近傍到達 (ct=$CT_AFTER)" \
+  || fail "TC-S9-03b" "ct=$CT_AFTER not near end=$END_TIME_MS"
 
 # --- TC-S9-04: StepBackward を連続 5 回 → 単調減少 ---
 curl -s -X POST "$API/replay/pause" > /dev/null

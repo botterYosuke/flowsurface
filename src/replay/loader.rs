@@ -72,34 +72,11 @@ async fn fetch_all_klines(
 #[cfg(test)]
 mod tests {
     use super::super::store::{EventStore, LoadedData};
-    use exchange::adapter::{Exchange, StreamKind};
+    use crate::replay::testutil::{kline_stream, trade_stream};
     use exchange::unit::MinTicksize;
     use exchange::unit::price::Price;
     use exchange::unit::qty::Qty;
-    use exchange::{Ticker, TickerInfo, Timeframe, Trade, Volume};
-
-    fn trade_stream() -> StreamKind {
-        StreamKind::Trades {
-            ticker_info: TickerInfo::new(
-                Ticker::new("BTCUSDT", Exchange::BinanceLinear),
-                0.01,
-                0.001,
-                Some(1.0),
-            ),
-        }
-    }
-
-    fn kline_stream() -> StreamKind {
-        StreamKind::Kline {
-            ticker_info: TickerInfo::new(
-                Ticker::new("BTCUSDT", Exchange::BinanceLinear),
-                0.01,
-                0.001,
-                Some(1.0),
-            ),
-            timeframe: Timeframe::M1,
-        }
-    }
+    use exchange::{Timeframe, Trade, Volume};
 
     fn dummy_trades(n: usize, start_ms: u64, step_ms: u64) -> Vec<Trade> {
         (0..n)

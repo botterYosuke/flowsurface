@@ -37,10 +37,14 @@ pub fn dispatch_tick(
     wall_now: Instant,
 ) -> DispatchResult {
     // 1. 全 active_streams の full replay range が loaded か確認
+    // Paused 状態では Waiting に遷移させない — mid-replay で銘柄/timeframe を変更した際に
+    // clock が Paused のまま保たれ、ロード完了後の自動再生 (try_resume_from_waiting) を防ぐ。
     let full_range = clock.full_range();
     for stream in active_streams {
         if !store.is_loaded(stream, full_range.clone()) {
-            clock.set_waiting();
+            if clock.status() == ClockStatus::Playing {
+                clock.set_waiting();
+            }
             return DispatchResult::empty(clock.now_ms());
         }
     }
@@ -54,6 +58,7 @@ pub fn dispatch_tick(
     // 2. clock を 1 ステップ進める
     let range = clock.tick(wall_now);
     if range.is_empty() {
+        // 空レンジ (start == end): Paused clock や未発火ステップ — reached_end = false
         return DispatchResult::empty(clock.now_ms());
     }
 
@@ -78,48 +83,11 @@ pub fn dispatch_tick(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use exchange::Volume;
-    use exchange::unit::MinTicksize;
-    use exchange::unit::price::Price;
-    use exchange::unit::qty::Qty;
+    use crate::replay::testutil::{dummy_kline, dummy_trade, trade_stream};
     use std::time::Duration;
 
     fn t(base: Instant, ms: u64) -> Instant {
         base + Duration::from_millis(ms)
-    }
-
-    fn dummy_trade(time: u64) -> Trade {
-        Trade {
-            time,
-            is_sell: false,
-            price: Price::from_f32_lossy(100.0),
-            qty: Qty::from_f32_lossy(1.0),
-        }
-    }
-
-    fn dummy_kline(time: u64) -> Kline {
-        Kline::new(
-            time,
-            100.0,
-            101.0,
-            99.0,
-            100.5,
-            Volume::empty_total(),
-            MinTicksize::from(0.01),
-        )
-    }
-
-    fn trade_stream() -> StreamKind {
-        use exchange::adapter::Exchange;
-        use exchange::{Ticker, TickerInfo};
-        StreamKind::Trades {
-            ticker_info: TickerInfo::new(
-                Ticker::new("BTCUSDT", Exchange::BinanceLinear),
-                0.01,
-                0.001,
-                Some(1.0),
-            ),
-        }
     }
 
     fn make_store_with_data(stream: StreamKind, range: std::ops::Range<u64>) -> EventStore {

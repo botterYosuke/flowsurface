@@ -4,10 +4,6 @@ use std::time::{Duration, Instant};
 /// 1x speed での wall delay (ms/bar)
 pub const BASE_STEP_DELAY_MS: u64 = 100;
 
-/// 瞬間再生速度（for ループそのまま、1 tick で range.end まで完走）。
-#[allow(dead_code)]
-pub const SPEED_INSTANT: f32 = f32::INFINITY;
-
 /// バーステップ離散クロック。
 /// `tick()` を各フレームで呼び、発火タイミングなら 1 ステップ進めて emit range を返す。
 pub struct StepClock {
@@ -198,6 +194,9 @@ impl StepClock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 瞬間再生速度（テスト専用）: 1 tick で range.end まで完走する。
+    const SPEED_INSTANT: f32 = f32::INFINITY;
 
     fn t(base: Instant, ms: u64) -> Instant {
         base + Duration::from_millis(ms)
