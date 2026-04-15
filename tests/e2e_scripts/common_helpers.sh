@@ -264,14 +264,12 @@ wait_tachibana_session() {
 }
 
 # 速度を 1x→10x に上げる（speed は 1x→2x→5x→10x→1x のサイクル）
-# 新仕様: CycleSpeed は pause + seek(range.start) を伴うため、
-# 3 回のサイクル後は Paused 状態になる。Resume して Playing に戻す。
+# R4-3-2 以降: CycleSpeed は speed ラベルのサイクルのみ。pause/seek 副作用なし。
+# 3 回サイクルで 10x に到達。Playing/Paused 状態は変化しない。
 speed_to_10x() {
   curl -s -X POST "$API/replay/speed" > /dev/null
   curl -s -X POST "$API/replay/speed" > /dev/null
   curl -s -X POST "$API/replay/speed" > /dev/null
-  curl -s -X POST "$API/replay/resume" > /dev/null
-  wait_status Playing 10 || true
 }
 
 # 単一ペイン saved-state.json を書き込む

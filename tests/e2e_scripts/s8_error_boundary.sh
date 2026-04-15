@@ -63,27 +63,31 @@ HAS_ERR=$(has_notification "Start time")
 [ "$HAS_ERR" = "true" ] && pass "TC-S8-05c: エラートーストが発火" || \
   fail "TC-S8-05c" "start>end の toast が発火していない"
 
-# --- TC-S8-06: 未来日時 → 受理 → プリフェッチ完了するが EventStore 空 → Step 無効 ---
+# --- TC-S8-06: 未来日時 → 受理 → R4-6 以降: 空 klines でも Playing 開始 → クラッシュしない ---
+# R4-6 でも「空 klines = stream 登録済み」とみなすよう変更したため、
+# 未来日時でもプリフェッチ完了後に Playing に遷移する。これは意図した動作変更。
 FUTURE_START="2030-01-01 00:00"
 FUTURE_END="2030-01-01 06:00"
+FUTURE_START_MS=$(node -e "console.log(new Date('${FUTURE_START}:00Z').getTime())")
+FUTURE_END_MS=$(node -e "console.log(new Date('${FUTURE_END}:00Z').getTime())")
 CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$API/replay/play" \
   -H "Content-Type: application/json" \
   -d "{\"start\":\"$FUTURE_START\",\"end\":\"$FUTURE_END\"}")
 [ "$CODE" = "200" ] && pass "TC-S8-06a: 未来日時 → HTTP 200" || fail "TC-S8-06a" "code=$CODE"
 sleep 30
 ST6=$(jqn "$(curl -s "$API/replay/status")" "d.status")
-[ "$ST6" != "Playing" ] && pass "TC-S8-06b: 未来日時 → Playing にならない (status=$ST6)" || \
-  fail "TC-S8-06b" "想定外に Playing 到達"
-PRE6=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
-curl -s -X POST "$API/replay/step-forward" > /dev/null
-sleep 1
-POST6=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
-if [ "$PRE6" = "null" ] && [ "$POST6" = "null" ]; then
-  pass "TC-S8-06c: clock 未起動のまま Step 無効"
+# R4-6 以降: 空 klines でも stream 登録 → Playing に遷移 (Loading ハングは発生しない)
+[[ "$ST6" = "Playing" || "$ST6" = "Paused" ]] && \
+  pass "TC-S8-06b: 未来日時でも Playing/Paused に遷移 (Loading ハングなし, status=$ST6)" || \
+  fail "TC-S8-06b" "status=$ST6 (expected Playing or Paused — Loading ハングの疑い)"
+CT6=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
+if [ "$CT6" != "null" ] && [ -n "$CT6" ]; then
+  IN_RANGE=$(node -e "console.log(BigInt('$CT6') >= BigInt('$FUTURE_START_MS') && BigInt('$CT6') <= BigInt('$FUTURE_END_MS'))")
+  [ "$IN_RANGE" = "true" ] \
+    && pass "TC-S8-06c: current_time=$CT6 は future range 内（clock 正常起動）" \
+    || fail "TC-S8-06c" "current_time=$CT6 は range [$FUTURE_START_MS, $FUTURE_END_MS] 外"
 else
-  EQ6=$(bigt_eq "$PRE6" "$POST6")
-  [ "$EQ6" = "true" ] && pass "TC-S8-06c: 空 EventStore → Step 無効" || \
-    fail "TC-S8-06c" "想定外の前進 pre=$PRE6 post=$POST6"
+  fail "TC-S8-06c" "current_time が null（clock 未起動）"
 fi
 
 # --- TC-S8-07: 不正なフォーマット → 400 ---
