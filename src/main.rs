@@ -846,10 +846,15 @@ impl Flowsurface {
                             }
                         };
 
-                        // mid-replay で kline stream がある場合は ReloadKlineStream を chain する。
+                        // mid-replay で kline stream がある場合は ReloadKlineStream を即時発火する。
                         // これにより: clock.pause() → active_streams 更新 → clock.seek(start) →
                         // reset_charts_for_seek() → 新銘柄の klines 再ロードが行われる。
                         // kline stream が無い場合（Heatmap only 等）は SyncReplayBuffers にフォールバック。
+                        //
+                        // NOTE: replay_task は dashboard の非同期タスク（kline フェッチ）完了を待たず
+                        // 並列で即時実行する。.chain() だと Tachibana 等の認証待ちタスクが長期ブロック
+                        // した場合に clock.seek(start) が実行されず current_time が変わらない不具合が
+                        // 発生するため Task::batch で並列実行に変更した。
                         let reload_tasks: Vec<Task<Message>> = old_kline_streams
                             .into_iter()
                             .filter_map(|old| {
@@ -871,12 +876,13 @@ impl Flowsurface {
                             Task::batch(reload_tasks)
                         };
 
-                        return task
-                            .map(move |msg| Message::Dashboard {
+                        return Task::batch([
+                            task.map(move |msg| Message::Dashboard {
                                 layout_id: None,
                                 event: msg,
-                            })
-                            .chain(replay_task);
+                            }),
+                            replay_task,
+                        ]);
                     }
                     Some(dashboard::sidebar::Action::ErrorOccurred(err)) => {
                         self.notifications.push(Toast::error(err.to_string()));
@@ -1893,12 +1899,16 @@ impl Flowsurface {
             Task::batch(reload_tasks)
         };
 
-        let task = task
-            .map(move |msg| Message::Dashboard {
+        // replay_task は dashboard の非同期タスク完了を待たず並列で即時実行する（.chain → Task::batch）。
+        // .chain() だと Tachibana 等の認証待ちタスクが長期ブロックした場合に clock.seek(start) が
+        // 実行されず current_time が変わらない不具合が発生するため並列実行に変更した。
+        let task = Task::batch([
+            task.map(move |msg| Message::Dashboard {
                 layout_id: None,
                 event: msg,
-            })
-            .chain(replay_task);
+            }),
+            replay_task,
+        ]);
 
         let dashboard = self.active_dashboard_mut();
         dashboard.focus = prev_focus;

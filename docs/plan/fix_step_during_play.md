@@ -297,3 +297,32 @@ if self.state.is_playing() {
 
 - `cargo test`: 187 tests passed ✅
 - `cargo clippy -- -D warnings`: 警告・エラーなし ✅
+
+---
+
+## バグ修正（2026-04-15）
+
+### B-4: リプレイ終了後に銘柄変更しても current_time がリセットされない
+
+**ブランチ**: `sasa/develop`  
+**対象ファイル**: `src/main.rs`
+
+#### 現象
+
+リプレイが終端到達で Paused になった後、銘柄変更を行うと `current_time` が `start_time` に戻らず `end_time` 付近のまま固定される。
+
+#### 根本原因
+
+`Message::Sidebar(TickerSelected)` ハンドラおよび `pane_api_sidebar_select_ticker` で `Task::chain()` を使用していたため、`ReloadKlineStream`（`clock.seek(start_ms)` を含む）が非同期の kline フェッチ完了を待ってブロックされ、Tachibana セッションなし時は無限にブロックされていた。
+
+#### 修正内容
+
+`Task::chain(replay_task)` → `Task::batch([dashboard_task, replay_task])` に変更。`replay_task` は `Task::done` であるため即座に実行される。
+
+#### E2E テスト追加
+
+- ✅ `tests/e2e_scripts/s26_ticker_change_after_replay_end.sh` 作成（3 TC）
+  - TC-A: 終端到達後に銘柄変更 → `current_time` が `start_time` にリセットされる
+  - TC-B: 銘柄変更後も `status=Paused`（自動再生なし）
+  - TC-C: Resume → `Playing` に遷移できる
+- ✅ `s26` 全 TC パス（PASS 3 / FAIL 0）

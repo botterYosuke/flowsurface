@@ -423,7 +423,9 @@ enum Message {
 
 ### 6.6 ユーザー操作による初期状態リセット
 
-以下の操作を受けたとき、clock が Some（リプレイ進行中）ならば **初期状態（range.start）に戻して停止** する。
+以下の操作を受けたとき、clock が Some（リプレイ進行中または終了後）ならば **初期状態（range.start）に戻して停止** する。
+
+#### 共通フロー操作（EventStore から再構成）
 
 ```
 操作: CycleSpeed / StartTimeChanged / EndTimeChanged
@@ -439,6 +441,33 @@ CycleSpeed の場合は上記に加えて速度の循環変更も行う。
 StartTimeChanged / EndTimeChanged は range_input の更新も行う（clock は再作成しない）。
 clock が None の場合（Play 前）は入力更新または速度変更のみ、リセットは行わない。
 ```
+
+#### 銘柄変更による初期状態リセット（ReloadKlineStream 経由）
+
+Sidebar または Pane API 経由で銘柄を変更したとき、kline stream がある場合は `ReloadKlineStream` で同等のリセットが行われる。
+**clock の状態（Playing / Paused / Waiting）によらず**常に初期状態リセットが実行される。
+
+```
+操作: 銘柄変更（Sidebar / Pane API）
+      ※ Playing 中・Paused 中・Waiting 中・replay 終了後のすべてで適用
+
+kline stream あり（ReloadKlineStream フロー）:
+  ├─ active_streams: 旧 stream を除去し新 stream を登録
+  ├─ clock.pause()            ← Playing / Waiting → Paused に強制遷移
+  │     Waiting 遷移はしない（ロード完了後の自動再生を防ぐため）
+  ├─ clock.set_step_size(new_min_timeframe)
+  ├─ clock.seek(range.start)
+  ├─ dashboard.reset_charts_for_seek(main_window)
+  └─ loader::load_klines(new_stream, range) — 新銘柄のデータを再フェッチ
+     再生再開はしない（ユーザーが明示的に ▶ を押すまで Paused を維持）
+
+kline stream なし（Heatmap only 等 — SyncReplayBuffers フロー）:
+  └─ clock.set_step_size(min_timeframe) のみ（clock.seek / pause は行わない）
+
+clock が None の場合（Play 前）は no-op。
+```
+
+> **実装上の注意**: `ReloadKlineStream` は dashboard の非同期 kline フェッチ（`init_focused_pane` が返すタスク）と **並列（Task::batch）** で即時発火する。`.chain()` で繋ぐと Tachibana 等の認証待ちフェッチが長期ブロックした場合に `clock.seek(range.start)` が実行されず `current_time` が変わらない不具合が発生する。
 
 ### 6.7 Live 復帰
 
