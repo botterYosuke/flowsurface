@@ -313,10 +313,19 @@ impl ReplayController {
                     })
                     .collect();
 
+                // 既存セッションの速度設定を引き継ぐ（リセット時に 1x に戻らないよう）
+                let previous_speed = match &self.state.session {
+                    ReplaySession::Loading { clock, .. } | ReplaySession::Active { clock, .. } => {
+                        clock.speed()
+                    }
+                    ReplaySession::Idle => 1.0,
+                };
+
                 if pending_count == 0 {
                     // kline chart 無し: 即座に Playing へ
                     use super::clock::StepClock;
                     let mut clock = StepClock::new(start_ms, end_ms, step_size_ms);
+                    clock.set_speed(previous_speed);
                     clock.play(Instant::now());
                     self.state.session = ReplaySession::Active {
                         clock,
@@ -327,6 +336,7 @@ impl ReplayController {
                 } else {
                     use super::clock::StepClock;
                     let mut clock = StepClock::new(start_ms, end_ms, step_size_ms);
+                    clock.set_speed(previous_speed);
                     clock.set_waiting();
                     self.state.session = ReplaySession::Loading {
                         clock,
