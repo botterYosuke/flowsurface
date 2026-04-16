@@ -855,6 +855,35 @@ impl Flowsurface {
                     Some(dashboard::sidebar::Action::TickerSelected(ticker_info, content)) => {
                         let main_window_id = self.main_window.id;
 
+                        if let Some(kind) = content {
+                            // チャート種類付き選択: フォーカスペインを Split して新ペインに表示する。
+                            // 新ペインを追加するだけなので既存ストリームを reload しない。
+                            // SyncReplayBuffers のみ発火してバッファを同期する。
+                            match self
+                                .active_dashboard_mut()
+                                .split_focused_and_init(main_window_id, ticker_info, kind)
+                            {
+                                Some(task) => {
+                                    let replay_task = Task::done(Message::Replay(
+                                        ReplayMessage::System(ReplaySystemEvent::SyncReplayBuffers),
+                                    ));
+                                    return Task::batch([
+                                        task.map(move |msg| Message::Dashboard {
+                                            layout_id: None,
+                                            event: msg,
+                                        }),
+                                        replay_task,
+                                    ]);
+                                }
+                                None => {
+                                    // フォーカスなし（ペイン複数）: テーブルを閉じる
+                                    self.sidebar.hide_tickers_table();
+                                    return Task::none();
+                                }
+                            }
+                        }
+
+                        // content = None: 銘柄のみ切り替え（既存フロー）
                         // mid-replay での銘柄変更: active_streams にある旧 kline stream を取得してから
                         // switch を実行し、ReloadKlineStream で pause + active_streams 更新 + 再ロードする。
                         // Live モードでは空 Vec になり、末尾で SyncReplayBuffers にフォールバックする。
@@ -865,18 +894,9 @@ impl Flowsurface {
                                 vec![]
                             };
 
-                        let task = {
-                            if let Some(kind) = content {
-                                self.active_dashboard_mut().init_focused_pane(
-                                    main_window_id,
-                                    ticker_info,
-                                    kind,
-                                )
-                            } else {
-                                self.active_dashboard_mut()
-                                    .switch_tickers_in_group(main_window_id, ticker_info)
-                            }
-                        };
+                        let task = self
+                            .active_dashboard_mut()
+                            .switch_tickers_in_group(main_window_id, ticker_info);
 
                         // mid-replay で kline stream がある場合は ReloadKlineStream を即時発火する。
                         // これにより: clock.pause() → active_streams 更新 → clock.seek(start) →
@@ -1871,7 +1891,9 @@ impl Flowsurface {
     fn parse_content_kind(s: &str) -> Option<data::layout::pane::ContentKind> {
         use data::layout::pane::ContentKind;
         match s {
-            "CandlestickChart" | "Candlestick Chart" => Some(ContentKind::CandlestickChart),
+            "CandlestickChart" | "Candlestick Chart" | "KlineChart" => {
+                Some(ContentKind::CandlestickChart)
+            }
             "HeatmapChart" | "Heatmap Chart" => Some(ContentKind::HeatmapChart),
             "ShaderHeatmap" | "Shader Heatmap" => Some(ContentKind::ShaderHeatmap),
             "FootprintChart" | "Footprint Chart" => Some(ContentKind::FootprintChart),
@@ -1885,10 +1907,8 @@ impl Flowsurface {
 
     /// Sidebar::TickerSelected 経路のハンドラ（Phase 8 Fix 4 検証用）。
     /// `main.rs::Message::Sidebar` ハンドラと同じタスク構成を踏む:
-    /// - `kind == None` → `switch_tickers_in_group`
-    /// - `kind == Some(kind)` → `init_focused_pane`
-    /// - 最後に `SyncReplayBuffers` を chain（heatmap-only で init_focused_pane が Task::none() を
-    ///   返す経路でも sync が発火することを保証）
+    /// - `kind == None` → `switch_tickers_in_group` + ReloadKlineStream
+    /// - `kind == Some(kind)` → `split_focused_and_init`（新ペイン追加）+ SyncReplayBuffers のみ
     fn pane_api_sidebar_select_ticker(
         &mut self,
         pane_id: uuid::Uuid,
@@ -1938,8 +1958,44 @@ impl Flowsurface {
 
         let main_window_id = self.main_window.id;
 
-        // mid-replay での銘柄変更: Message::Sidebar 経路と同じく active_streams の旧 kline stream を
-        // 先に取得し、ReloadKlineStream で pause + 再ロードする。
+        // kind == Some → split_focused_and_init 経路（Message::Sidebar と同じ新フロー）
+        if let Some(kind) = kind {
+            let dashboard = self.active_dashboard_mut();
+            dashboard.focus = Some((window_id, pg_pane));
+
+            let task = match dashboard.split_focused_and_init(main_window_id, ticker_info, kind) {
+                Some(split_task) => {
+                    let sync_task = Task::done(Message::Replay(ReplayMessage::System(
+                        ReplaySystemEvent::SyncReplayBuffers,
+                    )));
+                    Task::batch([
+                        split_task.map(move |msg| Message::Dashboard {
+                            layout_id: None,
+                            event: msg,
+                        }),
+                        sync_task,
+                    ])
+                }
+                None => {
+                    // フォーカスなし・複数ペイン → split 不可。フォーカスを元に戻す。
+                    let dashboard = self.active_dashboard_mut();
+                    dashboard.focus = None;
+                    Task::none()
+                }
+            };
+
+            let ok = serde_json::json!({
+                "ok": true,
+                "action": "sidebar-select-ticker",
+                "pane_id": pane_id.to_string(),
+                "ticker": ticker_str,
+                "kind": kind_str,
+            });
+            return (ok.to_string(), task);
+        }
+
+        // kind == None → switch_tickers_in_group 経路（旧フロー）
+        // mid-replay での銘柄変更: active_streams の旧 kline stream を取得して ReloadKlineStream する。
         let old_kline_streams: Vec<exchange::adapter::StreamKind> = if self.replay.is_replay() {
             self.replay.active_kline_streams()
         } else {
@@ -1950,12 +2006,7 @@ impl Flowsurface {
         let prev_focus = dashboard.focus;
         dashboard.focus = Some((window_id, pg_pane));
 
-        // main.rs::Message::Sidebar と同じ分岐
-        let task = if let Some(kind) = kind {
-            dashboard.init_focused_pane(main_window_id, ticker_info, kind)
-        } else {
-            dashboard.switch_tickers_in_group(main_window_id, ticker_info)
-        };
+        let task = dashboard.switch_tickers_in_group(main_window_id, ticker_info);
 
         let reload_tasks: Vec<Task<Message>> = old_kline_streams
             .into_iter()
@@ -1983,8 +2034,6 @@ impl Flowsurface {
         };
 
         // replay_task は dashboard の非同期タスク完了を待たず並列で即時実行する（.chain → Task::batch）。
-        // .chain() だと Tachibana 等の認証待ちタスクが長期ブロックした場合に clock.seek(start) が
-        // 実行されず current_time が変わらない不具合が発生するため並列実行に変更した。
         let task = Task::batch([
             task.map(move |msg| Message::Dashboard {
                 layout_id: None,

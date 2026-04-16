@@ -1080,6 +1080,39 @@ impl Dashboard {
         )))
     }
 
+    /// フォーカスペインを Horizontal Split し、新ペインに ticker_info + content_kind を設定する。
+    /// Split 成功時は Some(Task)、フォーカスなし（ペイン数 > 1）・Split 失敗時は None を返す。
+    pub fn split_focused_and_init(
+        &mut self,
+        main_window: window::Id,
+        ticker_info: TickerInfo,
+        content_kind: ContentKind,
+    ) -> Option<Task<Message>> {
+        // フォーカスが無く唯一ペインがある場合は自動フォーカス（init_focused_pane と同じ挙動）
+        if self.focus.is_none()
+            && self.panes.len() == 1
+            && let Some((pane_id, _)) = self.panes.iter().next()
+        {
+            self.focus = Some((main_window, *pane_id));
+        }
+
+        let (window, focused_pane) = self.focus?;
+
+        // Horizontal Split
+        let (new_pane, _) = self.panes.split(
+            pane_grid::Axis::Horizontal,
+            focused_pane,
+            pane::State::new(),
+        )?;
+
+        // フォーカスを新ペインへ移動
+        self.focus = Some((window, new_pane));
+
+        // 新ペインに銘柄とチャート種類を設定
+        let task = self.init_pane(main_window, window, new_pane, ticker_info, content_kind);
+        Some(task)
+    }
+
     pub fn switch_tickers_in_group(
         &mut self,
         main_window: window::Id,
@@ -1805,6 +1838,159 @@ mod tests {
         let dashboard = Dashboard::default();
         // Default dashboard has no streams
         assert!(!dashboard.has_tachibana_stream_pane(main_window));
+    }
+
+    // --- split_focused_and_init tests ---
+
+    fn make_ticker_info() -> exchange::TickerInfo {
+        exchange::TickerInfo::new(
+            exchange::Ticker::new("BTCUSDT", exchange::adapter::Exchange::BinanceLinear),
+            0.1,
+            0.001,
+            None,
+        )
+    }
+
+    fn single_pane_dashboard() -> Dashboard {
+        Dashboard::from_config(
+            Configuration::Pane(pane::State::default()),
+            vec![],
+            uuid::Uuid::new_v4(),
+        )
+    }
+
+    #[test]
+    fn split_focused_and_init_returns_none_when_no_focus_and_multiple_panes() {
+        // Dashboard::default() already has 5 panes and focus == None
+        let mut dashboard = Dashboard::default();
+        let main_window = window::Id::unique();
+        let pane_count_before = dashboard.panes.len();
+        assert!(pane_count_before > 1);
+        assert!(dashboard.focus.is_none());
+
+        let result = dashboard.split_focused_and_init(
+            main_window,
+            make_ticker_info(),
+            data::layout::pane::ContentKind::CandlestickChart,
+        );
+
+        assert!(result.is_none());
+        assert_eq!(dashboard.panes.len(), pane_count_before, "pane count must not change");
+    }
+
+    #[test]
+    fn split_focused_and_init_auto_focuses_and_splits_when_single_pane_no_focus() {
+        let mut dashboard = single_pane_dashboard();
+        let main_window = window::Id::unique();
+        assert_eq!(dashboard.panes.len(), 1);
+        assert!(dashboard.focus.is_none());
+
+        let result = dashboard.split_focused_and_init(
+            main_window,
+            make_ticker_info(),
+            data::layout::pane::ContentKind::CandlestickChart,
+        );
+
+        assert!(result.is_some());
+        assert_eq!(dashboard.panes.len(), 2);
+        assert!(dashboard.focus.is_some());
+    }
+
+    #[test]
+    fn split_focused_and_init_splits_focused_pane_and_moves_focus() {
+        let mut dashboard = Dashboard::default();
+        let main_window = window::Id::unique();
+        let first_pane = *dashboard.panes.iter().next().map(|(p, _)| p).unwrap();
+        let pane_count_before = dashboard.panes.len();
+        dashboard.focus = Some((main_window, first_pane));
+
+        let result = dashboard.split_focused_and_init(
+            main_window,
+            make_ticker_info(),
+            data::layout::pane::ContentKind::CandlestickChart,
+        );
+
+        assert!(result.is_some());
+        assert_eq!(dashboard.panes.len(), pane_count_before + 1);
+        // Focus must have moved to the newly created pane
+        let (_, focused) = dashboard.focus.unwrap();
+        assert_ne!(focused, first_pane, "focus should move to the new pane");
+    }
+
+    #[test]
+    fn split_focused_and_init_preserves_original_pane_count_when_focus_window_differs() {
+        // フォーカスが popout ウィンドウにある状態で split → panes 数が +1 されること
+        let mut dashboard = single_pane_dashboard();
+        let main_window = window::Id::unique();
+        let popout_window = window::Id::unique();
+        let pane_id = *dashboard.panes.iter().next().map(|(p, _)| p).unwrap();
+        dashboard.focus = Some((popout_window, pane_id));
+        let pane_count_before = dashboard.panes.len();
+
+        let result = dashboard.split_focused_and_init(
+            main_window,
+            make_ticker_info(),
+            data::layout::pane::ContentKind::CandlestickChart,
+        );
+
+        assert!(result.is_some());
+        assert_eq!(
+            dashboard.panes.len(),
+            pane_count_before + 1,
+            "pane count must increase by 1 even when focus is on a popout window"
+        );
+    }
+
+    #[test]
+    fn split_focused_and_init_focus_window_matches_original_focus_window() {
+        // split 後の focus.0 が split 前と同じ window::Id を指すこと
+        let mut dashboard = single_pane_dashboard();
+        let main_window = window::Id::unique();
+        let popout_window = window::Id::unique();
+        let pane_id = *dashboard.panes.iter().next().map(|(p, _)| p).unwrap();
+        dashboard.focus = Some((popout_window, pane_id));
+
+        let result = dashboard.split_focused_and_init(
+            main_window,
+            make_ticker_info(),
+            data::layout::pane::ContentKind::CandlestickChart,
+        );
+
+        assert!(result.is_some());
+        let (focus_window, _) = dashboard.focus.unwrap();
+        assert_eq!(
+            focus_window, popout_window,
+            "focus window must remain the same after split"
+        );
+        assert_ne!(focus_window, main_window);
+    }
+
+    #[test]
+    fn split_focused_and_init_returns_some_twice_in_succession() {
+        // 2 回連続で呼んだとき、1 回目・2 回目ともに Some を返し、ペイン数が毎回 +1 されること
+        let mut dashboard = single_pane_dashboard();
+        let main_window = window::Id::unique();
+        assert_eq!(dashboard.panes.len(), 1);
+        assert!(dashboard.focus.is_none());
+
+        // 1 回目: focus なし・ペイン 1 → auto-focus して split
+        let result1 = dashboard.split_focused_and_init(
+            main_window,
+            make_ticker_info(),
+            data::layout::pane::ContentKind::CandlestickChart,
+        );
+        assert!(result1.is_some(), "1 回目は Some を返すこと");
+        assert_eq!(dashboard.panes.len(), 2, "1 回目後 pane count = 2");
+        assert!(dashboard.focus.is_some(), "1 回目後 focus が設定されていること");
+
+        // 2 回目: focus あり → そのまま split
+        let result2 = dashboard.split_focused_and_init(
+            main_window,
+            make_ticker_info(),
+            data::layout::pane::ContentKind::CandlestickChart,
+        );
+        assert!(result2.is_some(), "2 回目も Some を返すこと");
+        assert_eq!(dashboard.panes.len(), 3, "2 回目後 pane count = 3");
     }
 
     // compile-time: clear_chart_for_replay returns (), not Vec<...>
