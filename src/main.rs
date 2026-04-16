@@ -1131,72 +1131,79 @@ impl Flowsurface {
             .style(move |theme, status| style::button::bordered_toggle(theme, status, is_replay))
             .padding(padding::all(2).left(6).right(6));
 
-        let mut start_input = text_input("Start", self.replay.range_input_start()).size(11);
-        let mut end_input = text_input("End", self.replay.range_input_end()).size(11);
+        let mut header = row![time_display, mode_toggle];
+
         if is_replay {
-            start_input = start_input
-                .on_input(|s| Message::Replay(ReplayMessage::User(ReplayUserMessage::StartTimeChanged(s))));
-            end_input = end_input
-                .on_input(|s| Message::Replay(ReplayMessage::User(ReplayUserMessage::EndTimeChanged(s))));
-        }
+            let start_input = text_input("Start", self.replay.range_input_start())
+                .size(11)
+                .on_input(|s| {
+                    Message::Replay(ReplayMessage::User(ReplayUserMessage::StartTimeChanged(s)))
+                });
+            let end_input = text_input("End", self.replay.range_input_end())
+                .size(11)
+                .on_input(|s| {
+                    Message::Replay(ReplayMessage::User(ReplayUserMessage::EndTimeChanged(s)))
+                });
 
-        let is_loading = self.replay.is_loading();
-        let is_playing = self.replay.is_playing();
-        let is_paused = self.replay.is_paused();
-        let has_clock = self.replay.has_clock();
-        // 終端で Paused の場合、▶ は Resume ではなく Play（先頭から再スタート）
-        let is_at_end = self.replay.is_at_end();
+            let is_loading = self.replay.is_loading();
+            let is_playing = self.replay.is_playing();
+            let is_paused = self.replay.is_paused();
+            let has_clock = self.replay.has_clock();
+            // 終端で Paused の場合、▶ は Resume ではなく Play（先頭から再スタート）
+            let is_at_end = self.replay.is_at_end();
 
-        let play_pause_label = if is_playing { "\u{23F8}" } else { "\u{25B6}" };
-        let mut play_pause_btn =
-            button(text(play_pause_label).size(12)).padding(padding::all(2).left(4).right(4));
-        if is_replay && !is_loading {
-            play_pause_btn = play_pause_btn.on_press(if is_playing {
-                Message::Replay(ReplayMessage::User(ReplayUserMessage::Pause))
-            } else if is_paused && !is_at_end {
-                Message::Replay(ReplayMessage::User(ReplayUserMessage::Resume))
-            } else {
-                Message::Replay(ReplayMessage::User(ReplayUserMessage::Play))
-            });
-        }
+            let play_pause_label = if is_playing { "\u{23F8}" } else { "\u{25B6}" };
+            let mut play_pause_btn =
+                button(text(play_pause_label).size(12)).padding(padding::all(2).left(4).right(4));
+            if !is_loading {
+                play_pause_btn = play_pause_btn.on_press(if is_playing {
+                    Message::Replay(ReplayMessage::User(ReplayUserMessage::Pause))
+                } else if is_paused && !is_at_end {
+                    Message::Replay(ReplayMessage::User(ReplayUserMessage::Resume))
+                } else {
+                    Message::Replay(ReplayMessage::User(ReplayUserMessage::Play))
+                });
+            }
 
-        // ⏮ StepBackward
-        let mut step_back_btn =
-            button(text("\u{23EE}").size(12)).padding(padding::all(2).left(4).right(4));
-        if is_replay && has_clock && !is_loading {
-            step_back_btn = step_back_btn
-                .on_press(Message::Replay(ReplayMessage::User(ReplayUserMessage::StepBackward)));
-        }
+            // ⏮ StepBackward
+            let mut step_back_btn =
+                button(text("\u{23EE}").size(12)).padding(padding::all(2).left(4).right(4));
+            if has_clock && !is_loading {
+                step_back_btn = step_back_btn.on_press(Message::Replay(ReplayMessage::User(
+                    ReplayUserMessage::StepBackward,
+                )));
+            }
 
-        // ⏭ StepForward
-        let mut step_fwd_btn =
-            button(text("\u{23ED}").size(12)).padding(padding::all(2).left(4).right(4));
-        if is_replay && !is_loading {
-            step_fwd_btn = step_fwd_btn
-                .on_press(Message::Replay(ReplayMessage::User(ReplayUserMessage::StepForward)));
-        }
+            // ⏭ StepForward
+            let mut step_fwd_btn =
+                button(text("\u{23ED}").size(12)).padding(padding::all(2).left(4).right(4));
+            if !is_loading {
+                step_fwd_btn = step_fwd_btn.on_press(Message::Replay(ReplayMessage::User(
+                    ReplayUserMessage::StepForward,
+                )));
+            }
 
-        // Speed button
-        let speed_label = self.replay.speed_label();
-        let mut speed_btn =
-            button(text(speed_label).size(11)).padding(padding::all(2).left(4).right(4));
-        if is_replay && has_clock && !is_loading {
-            speed_btn = speed_btn
-                .on_press(Message::Replay(ReplayMessage::User(ReplayUserMessage::CycleSpeed)));
-        }
-        let controls = row![step_back_btn, play_pause_btn, step_fwd_btn, speed_btn].spacing(4);
+            // Speed button
+            let speed_label = self.replay.speed_label();
+            let mut speed_btn =
+                button(text(speed_label).size(11)).padding(padding::all(2).left(4).right(4));
+            if has_clock && !is_loading {
+                speed_btn = speed_btn.on_press(Message::Replay(ReplayMessage::User(
+                    ReplayUserMessage::CycleSpeed,
+                )));
+            }
+            let controls =
+                row![step_back_btn, play_pause_btn, step_fwd_btn, speed_btn].spacing(4);
 
-        let mut header = row![
-            time_display,
-            mode_toggle,
-            start_input.width(140),
-            text("~").size(11),
-            end_input.width(140),
-            controls,
-        ];
+            header = header
+                .push(start_input.width(140))
+                .push(text("~").size(11))
+                .push(end_input.width(140))
+                .push(controls);
 
-        if is_loading {
-            header = header.push(text("Loading...").size(11));
+            if is_loading {
+                header = header.push(text("Loading...").size(11));
+            }
         }
 
         header
@@ -1255,7 +1262,6 @@ impl Flowsurface {
             return Subscription::batch(vec![window_events, sidebar, tick, hotkeys, replay_api]);
         }
 
-        log::info!("[e2e-live] Live mode: building market subscriptions");
         let exchange_streams = self
             .active_dashboard()
             .market_subscriptions()

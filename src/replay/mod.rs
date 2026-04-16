@@ -192,7 +192,8 @@ impl Default for ReplayState {
 }
 
 impl ReplayState {
-    /// モードをトグルする。Replay→Live の場合は状態をリセットする。
+    /// モードをトグルする。Replay→Live の場合はセッションをリセットする。
+    /// range_input は保持する（Live → Replay 再切替時に日付が復元されるようにするため）。
     pub fn toggle_mode(&mut self) {
         match self.mode {
             ReplayMode::Live => {
@@ -201,7 +202,6 @@ impl ReplayState {
             ReplayMode::Replay => {
                 self.mode = ReplayMode::Live;
                 self.session = ReplaySession::Idle;
-                self.range_input = ReplayRangeInput::default();
                 self.pending_auto_play = false;
             }
         }
@@ -457,7 +457,7 @@ mod tests {
     }
 
     #[test]
-    fn toggle_mode_switches_replay_to_live_and_resets() {
+    fn toggle_mode_switches_replay_to_live_and_resets_session_but_preserves_range() {
         let mut state = ReplayState::default();
         state.toggle_mode(); // Live → Replay
         state.range_input.start = "2026-04-01 09:00".to_string();
@@ -466,9 +466,24 @@ mod tests {
         state.toggle_mode(); // Replay → Live
         assert_eq!(state.mode, ReplayMode::Live);
         assert!(!state.is_replay());
-        assert!(state.range_input.start.is_empty());
-        assert!(state.range_input.end.is_empty());
+        // range_input は保持される（Live → Replay 再切替時に日付が復元されるようにするため）
+        assert_eq!(state.range_input.start, "2026-04-01 09:00");
+        assert_eq!(state.range_input.end, "2026-04-01 15:00");
         assert!(matches!(state.session, ReplaySession::Idle));
+    }
+
+    #[test]
+    fn toggle_mode_live_to_replay_restores_range_input() {
+        let mut state = ReplayState::default();
+        state.toggle_mode(); // Live → Replay
+        state.range_input.start = "2026-04-10 04:49".to_string();
+        state.range_input.end = "2026-04-15 06:49".to_string();
+        state.toggle_mode(); // Replay → Live（range は保持）
+
+        state.toggle_mode(); // Live → Replay 再切替
+        assert!(state.is_replay());
+        assert_eq!(state.range_input.start, "2026-04-10 04:49");
+        assert_eq!(state.range_input.end, "2026-04-15 06:49");
     }
 
     // ── ReplaySession 状態表現 ─────────────────────────────────────────
