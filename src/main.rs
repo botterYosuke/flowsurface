@@ -1124,11 +1124,19 @@ impl Flowsurface {
             .size(12);
 
         let is_replay = self.replay.is_replay();
+        let is_playing = self.replay.is_playing();
 
-        let mode_label = if is_replay { "REPLAY" } else { "LIVE" };
+        let is_highlighted = if is_replay { is_playing } else { true };
+        let mode_label = if is_replay {
+            if is_playing { "● REPLAY" } else { "REPLAY" }
+        } else {
+            "● LIVE"
+        };
         let mode_toggle = button(text(mode_label).size(11))
             .on_press(Message::Replay(ReplayMessage::User(ReplayUserMessage::ToggleMode)))
-            .style(move |theme, status| style::button::bordered_toggle(theme, status, is_replay))
+            .style(move |theme, status| {
+                style::button::bordered_toggle_highlighted(theme, status, is_replay, is_highlighted)
+            })
             .padding(padding::all(2).left(6).right(6));
 
         let mut header = row![time_display, mode_toggle];

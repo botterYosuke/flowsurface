@@ -252,32 +252,43 @@ pub mod button {
     }
 
     pub fn bordered_toggle(theme: &Theme, status: Status, is_active: bool) -> Style {
+        bordered_toggle_highlighted(theme, status, is_active, false)
+    }
+
+    pub fn bordered_toggle_highlighted(
+        theme: &Theme,
+        status: Status,
+        is_active: bool,
+        is_highlighted: bool,
+    ) -> Style {
         let palette = theme.extended_palette();
 
-        iced::widget::button::Style {
-            text_color: if is_active {
+        Style {
+            text_color: if is_highlighted {
+                palette.success.strong.color
+            } else if is_active {
                 palette.secondary.strong.color
             } else {
                 palette.secondary.base.color
             },
-            border: iced::Border {
+            border: Border {
                 radius: 3.0.into(),
                 width: if is_active { 2.0 } else { 1.0 },
                 color: palette.background.weak.color,
             },
             background: match status {
-                iced::widget::button::Status::Active => {
+                Status::Active => {
                     if is_active {
                         Some(palette.background.base.color.into())
                     } else {
                         Some(palette.background.weakest.color.into())
                     }
                 }
-                iced::widget::button::Status::Pressed => {
+                Status::Pressed => {
                     Some(palette.background.weakest.color.into())
                 }
-                iced::widget::button::Status::Hovered => Some(palette.background.weak.color.into()),
-                iced::widget::button::Status::Disabled => {
+                Status::Hovered => Some(palette.background.weak.color.into()),
+                Status::Disabled => {
                     if is_active {
                         None
                     } else {
