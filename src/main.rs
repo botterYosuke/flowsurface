@@ -1047,6 +1047,7 @@ impl Flowsurface {
                     tickers_table,
                     self.timezone,
                     self.replay.is_replay(),
+                    &self.theme.0,
                 )
                 .map(move |msg| Message::Dashboard {
                     layout_id: None,
@@ -1096,7 +1097,7 @@ impl Flowsurface {
         } else {
             container(
                 dashboard
-                    .view_window(id, &self.main_window, tickers_table, self.timezone)
+                    .view_window(id, &self.main_window, tickers_table, self.timezone, &self.theme.0)
                     .map(move |msg| Message::Dashboard {
                         layout_id: None,
                         event: msg,

@@ -11,6 +11,7 @@ use crate::{
     connector::{
         ResolvedStream,
         fetcher::{self, FetchedData, InfoKind},
+        order as order_connector,
     },
     screen::dashboard::tickers_table::TickersTable,
     style,
@@ -30,7 +31,7 @@ use exchange::{
 };
 
 use iced::{
-    Element, Length, Subscription, Task, Vector,
+    Element, Length, Subscription, Task, Theme, Vector,
     widget::{
         PaneGrid, center, container,
         pane_grid::{self, Configuration},
@@ -53,6 +54,39 @@ pub enum Message {
     },
     ResolveStreams(uuid::Uuid, Vec<PersistStreamKind>),
     RequestPalette,
+    // ── 注文 API 応答メッセージ ───────────────────────────────────────────────
+    OrderNewResult {
+        pane_id: uuid::Uuid,
+        result: Result<exchange::adapter::tachibana::NewOrderResponse, String>,
+    },
+    OrderModifyResult {
+        pane_id: uuid::Uuid,
+        /// 訂正・取消成功時の注文番号
+        result: Result<String, String>,
+    },
+    OrdersListResult {
+        pane_id: uuid::Uuid,
+        result: Result<Vec<exchange::adapter::tachibana::OrderRecord>, String>,
+    },
+    OrderDetailResult {
+        pane_id: uuid::Uuid,
+        order_num: String,
+        result: Result<Vec<exchange::adapter::tachibana::ExecutionRecord>, String>,
+    },
+    BuyingPowerResult {
+        pane_id: uuid::Uuid,
+        result: Result<
+            (
+                exchange::adapter::tachibana::BuyingPowerResponse,
+                exchange::adapter::tachibana::MarginPowerResponse,
+            ),
+            String,
+        >,
+    },
+    HoldingsResult {
+        pane_id: uuid::Uuid,
+        result: Result<u64, String>,
+    },
 }
 
 pub struct Dashboard {
@@ -61,6 +95,8 @@ pub struct Dashboard {
     pub popout: HashMap<window::Id, (pane_grid::State<pane::State>, WindowSpec)>,
     pub streams: UniqueStreams,
     layout_id: uuid::Uuid,
+    /// 本日営業日 (YYYYMMDD)。初回注文成功時に NewOrderResponse.eig_day から取得する。
+    eig_day: Option<String>,
 }
 
 impl Default for Dashboard {
@@ -71,6 +107,7 @@ impl Default for Dashboard {
             streams: UniqueStreams::default(),
             popout: HashMap::new(),
             layout_id: uuid::Uuid::new_v4(),
+            eig_day: None,
         }
     }
 }
@@ -143,6 +180,7 @@ impl Dashboard {
             streams: UniqueStreams::default(),
             popout,
             layout_id,
+            eig_day: None,
         }
     }
 
@@ -415,6 +453,81 @@ impl Dashboard {
                                     }),
                                 );
                             }
+                            // ── 注文関連 Effect ──────────────────────────────────────
+                            pane::Effect::SubmitNewOrder(req) => {
+                                let pane_id = state.unique_id();
+                                Task::perform(
+                                    order_connector::submit_new_order(req),
+                                    move |result| Message::OrderNewResult { pane_id, result },
+                                )
+                            }
+                            pane::Effect::SubmitCorrectOrder(req) => {
+                                let pane_id = state.unique_id();
+                                Task::perform(
+                                    order_connector::submit_correct_order(req),
+                                    move |result| Message::OrderModifyResult {
+                                        pane_id,
+                                        result: result.map(|r| r.order_number),
+                                    },
+                                )
+                            }
+                            pane::Effect::SubmitCancelOrder(req) => {
+                                let pane_id = state.unique_id();
+                                Task::perform(
+                                    order_connector::submit_cancel_order(req),
+                                    move |result| Message::OrderModifyResult {
+                                        pane_id,
+                                        result: result.map(|r| r.order_number),
+                                    },
+                                )
+                            }
+                            pane::Effect::FetchOrders => {
+                                let pane_id = state.unique_id();
+                                let eig_day = self.eig_day_or_today();
+                                Task::perform(
+                                    order_connector::fetch_orders(eig_day),
+                                    move |result| Message::OrdersListResult { pane_id, result },
+                                )
+                            }
+                            pane::Effect::FetchOrderDetail(order_num, detail_eig_day) => {
+                                let pane_id = state.unique_id();
+                                Task::perform(
+                                    order_connector::fetch_order_detail(
+                                        order_num.clone(),
+                                        detail_eig_day,
+                                    ),
+                                    move |result| Message::OrderDetailResult {
+                                        pane_id,
+                                        order_num,
+                                        result,
+                                    },
+                                )
+                            }
+                            pane::Effect::FetchBuyingPower => {
+                                let pane_id = state.unique_id();
+                                Task::perform(order_connector::fetch_buying_power(), move |result| {
+                                    Message::BuyingPowerResult { pane_id, result }
+                                })
+                            }
+                            pane::Effect::FetchHoldings { issue_code } => {
+                                let pane_id = state.unique_id();
+                                Task::perform(
+                                    order_connector::fetch_holdings(issue_code),
+                                    move |result| Message::HoldingsResult { pane_id, result },
+                                )
+                            }
+                            pane::Effect::SyncIssueToOrderEntry {
+                                issue_code,
+                                issue_name,
+                                tick_size,
+                            } => {
+                                self.sync_issue_to_order_entry(
+                                    main_window.id,
+                                    issue_code,
+                                    issue_name,
+                                    tick_size,
+                                )
+                            }
                         };
                         return (task, None);
                     }
@@ -453,9 +566,129 @@ impl Dashboard {
             Message::Notification(toast) => {
                 return (Task::none(), Some(Event::Notification(toast)));
             }
+            // ── 注文 API 応答ハンドラ ─────────────────────────────────────────
+            Message::OrderNewResult { pane_id, result } => {
+                use panel::order_entry::OrderSuccess;
+                let order_result = match result {
+                    Ok(ref resp) => {
+                        // 初回注文成功時に営業日を保存
+                        if !resp.eig_day.is_empty() {
+                            self.eig_day = Some(resp.eig_day.clone());
+                        }
+                        Ok(OrderSuccess {
+                            order_num: resp.order_number.clone(),
+                            warning: if resp.warning_code == "0" || resp.warning_code.is_empty() {
+                                None
+                            } else {
+                                Some(resp.warning_text.clone())
+                            },
+                        })
+                    }
+                    Err(e) => Err(e),
+                };
+                if let Some(state) = self.get_mut_pane_state_by_uuid(main_window.id, pane_id)
+                    && let pane::Content::OrderEntry(panel) = &mut state.content
+                {
+                    panel.update(panel::order_entry::Message::OrderCompleted(order_result));
+                }
+            }
+            Message::OrderModifyResult { pane_id, result } => {
+                if let Some(state) = self.get_mut_pane_state_by_uuid(main_window.id, pane_id)
+                    && let pane::Content::OrderList(panel) = &mut state.content
+                {
+                    panel.update(panel::order_list::Message::ModifyCompleted(result));
+                }
+            }
+            Message::OrdersListResult { pane_id, result } => {
+                if let Some(state) = self.get_mut_pane_state_by_uuid(main_window.id, pane_id)
+                    && let pane::Content::OrderList(panel) = &mut state.content
+                {
+                    match result {
+                        Ok(orders) => {
+                            panel.update(panel::order_list::Message::OrdersUpdated(orders));
+                        }
+                        Err(e) => {
+                            panel.update(panel::order_list::Message::ModifyCompleted(Err(e)));
+                        }
+                    }
+                }
+            }
+            Message::OrderDetailResult {
+                pane_id,
+                order_num,
+                result,
+            } => {
+                if let Some(state) = self.get_mut_pane_state_by_uuid(main_window.id, pane_id)
+                    && let pane::Content::OrderList(panel) = &mut state.content
+                    && let Ok(executions) = result
+                {
+                    panel.update(panel::order_list::Message::ExecutionsUpdated {
+                        order_num,
+                        executions,
+                    });
+                }
+            }
+            Message::BuyingPowerResult { pane_id, result } => {
+                if let Some(state) = self.get_mut_pane_state_by_uuid(main_window.id, pane_id)
+                    && let pane::Content::BuyingPower(panel) = &mut state.content
+                {
+                    match result {
+                        Ok((cash, margin)) => {
+                            panel.update(panel::buying_power::Message::BuyingPowerUpdated {
+                                cash_buying_power: cash.cash_buying_power,
+                                nisa_growth_buying_power: cash.nisa_growth_buying_power,
+                                shortage_flag: cash.shortage_flag,
+                            });
+                            panel.update(panel::buying_power::Message::MarginPowerUpdated {
+                                margin_new_order_power: margin.margin_new_order_power,
+                                maintenance_margin_rate: margin.maintenance_margin_rate,
+                                margin_call_flag: margin.margin_call_flag,
+                            });
+                        }
+                        Err(e) => {
+                            panel.update(panel::buying_power::Message::FetchFailed(e));
+                        }
+                    }
+                }
+            }
+            Message::HoldingsResult { pane_id, result } => {
+                if let Some(state) = self.get_mut_pane_state_by_uuid(main_window.id, pane_id)
+                    && let pane::Content::OrderEntry(panel) = &mut state.content
+                {
+                    panel.update(panel::order_entry::Message::HoldingsUpdated(result.ok()));
+                }
+            }
         }
 
         (Task::none(), None)
+    }
+
+    /// 営業日を返す。未取得の場合は今日の日付 (YYYYMMDD) をローカル時計から生成する。
+    fn eig_day_or_today(&self) -> String {
+        self.eig_day.clone().unwrap_or_else(|| {
+            let now = chrono::Local::now();
+            now.format("%Y%m%d").to_string()
+        })
+    }
+
+    /// 全 OrderEntry パネルに銘柄情報を同期する（LinkGroup と独立した単方向連動）。
+    fn sync_issue_to_order_entry(
+        &mut self,
+        main_window: window::Id,
+        issue_code: String,
+        issue_name: String,
+        tick_size: Option<f64>,
+    ) -> Task<Message> {
+        for (_, _, state) in self.iter_all_panes_mut(main_window) {
+            if let pane::Content::OrderEntry(panel) = &mut state.content {
+                panel.update(panel::order_entry::Message::SyncIssue {
+                    issue_code: issue_code.clone(),
+                    issue_name: issue_name.clone(),
+                    tick_size,
+                });
+            }
+        }
+        Task::none()
     }
 
     fn new_pane(
@@ -668,6 +901,7 @@ impl Dashboard {
         tickers_table: &'a TickersTable,
         timezone: UserTimezone,
         is_replay: bool,
+        theme: &'a Theme,
     ) -> Element<'a, Message> {
         let mut pane_grid = PaneGrid::new(&self.panes, |id, pane, maximized| {
             let is_focused = self.focus == Some((main_window.id, id));
@@ -681,6 +915,7 @@ impl Dashboard {
                 timezone,
                 tickers_table,
                 is_replay,
+                theme,
             )
         })
         .min_size(240)
@@ -705,6 +940,7 @@ impl Dashboard {
         main_window: &'a Window,
         tickers_table: &'a TickersTable,
         timezone: UserTimezone,
+        theme: &'a Theme,
     ) -> Element<'a, Message> {
         if let Some((state, _)) = self.popout.get(&window) {
             let content = container(
@@ -720,6 +956,7 @@ impl Dashboard {
                         timezone,
                         tickers_table,
                         false, // popout windows don't support replay
+                        theme,
                     )
                 })
                 .on_click(pane::Message::PaneClicked),

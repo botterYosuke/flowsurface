@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod fetcher;
+pub mod order;
 pub mod proxy;
 pub mod stream;
 
