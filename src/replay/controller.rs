@@ -264,6 +264,32 @@ impl ReplayController {
                     }
                 };
 
+                // 大きすぎる範囲の早期検出（チャートクリア前に検証）
+                {
+                    const MAX_LOAD_PAGES: u64 = 100;
+                    const PAGE_SIZE: u64 = 1000;
+                    let preview = dashboard.peek_kline_streams(main_window_id);
+                    for (_, stream) in preview.iter() {
+                        let Some((_, tf)) = stream.as_kline_stream() else { continue };
+                        let step_ms = tf.to_milliseconds().max(1);
+                        let range = super::compute_load_range(start_ms, end_ms, step_ms);
+                        let estimated_klines =
+                            range.end.saturating_sub(range.start) / step_ms;
+                        let estimated_pages = estimated_klines.div_ceil(PAGE_SIZE);
+                        if estimated_pages > MAX_LOAD_PAGES {
+                            return (
+                                Task::none(),
+                                Some(Toast::error(format!(
+                                    "Replay range too large: ~{estimated_pages} API pages for \
+                                     {tf:?} chart. Max ~{MAX_LOAD_PAGES} pages \
+                                     (~{} bars). Please shorten the range.",
+                                    MAX_LOAD_PAGES * PAGE_SIZE
+                                ))),
+                            );
+                        }
+                    }
+                }
+
                 // ペイン content をクリアし、kline ストリームを収集
                 let kline_targets = dashboard.prepare_replay(main_window_id);
 

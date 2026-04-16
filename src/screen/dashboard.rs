@@ -1350,6 +1350,23 @@ impl Dashboard {
 
     /// リプレイ用にペインの content をクリアし、各ペインの kline StreamKind + pane_id を返す。
     /// settings / streams はそのまま保持する。
+    /// Kline ストリームを収集する（チャートはクリアしない）。
+    /// Play バリデーション用。
+    pub fn peek_kline_streams(&self, main_window: window::Id) -> Vec<(uuid::Uuid, StreamKind)> {
+        let mut kline_targets = Vec::new();
+        for (_, _, state) in self.iter_all_panes(main_window) {
+            let pane_id = state.unique_id();
+            if let Some(streams) = state.streams.ready_iter() {
+                for stream in streams {
+                    if matches!(stream, StreamKind::Kline { .. }) {
+                        kline_targets.push((pane_id, *stream));
+                    }
+                }
+            }
+        }
+        kline_targets
+    }
+
     pub fn prepare_replay(&mut self, main_window: window::Id) -> Vec<(uuid::Uuid, StreamKind)> {
         let mut kline_targets = Vec::new();
 
