@@ -19,6 +19,7 @@ pub enum Message {
     ToggleSidebarMenu(Option<sidebar::Menu>),
     SetSidebarPosition(sidebar::Position),
     TickersTable(super::tickers_table::Message),
+    OrderPaneSelected(data::layout::pane::ContentKind),
 }
 
 pub struct Sidebar {
@@ -32,6 +33,7 @@ pub enum Action {
         Option<data::layout::pane::ContentKind>,
     ),
     ErrorOccurred(data::InternalError),
+    OpenOrderPane(data::layout::pane::ContentKind),
 }
 
 impl Sidebar {
@@ -55,13 +57,23 @@ impl Sidebar {
     pub fn update(&mut self, message: Message) -> (Task<Message>, Option<Action>) {
         match message {
             Message::ToggleSidebarMenu(menu) => {
-                self.set_menu(menu.filter(|&m| !self.is_menu_active(m)));
+                let new_menu = menu.filter(|&m| !self.is_menu_active(m));
+                self.set_menu(new_menu);
+                // 注文パネルが開いたらティッカーテーブルを閉じる
+                if new_menu == Some(sidebar::Menu::Order) {
+                    self.tickers_table.is_shown = false;
+                }
             }
             Message::SetSidebarPosition(position) => {
                 self.state.position = position;
             }
             Message::TickersTable(msg) => {
                 let action = self.tickers_table.update(msg);
+
+                // ティッカーテーブルが開いたら注文パネルを閉じる
+                if self.tickers_table.is_shown && self.is_menu_active(sidebar::Menu::Order) {
+                    self.set_menu(None);
+                }
 
                 match action {
                     Some(tickers_table::Action::TickerSelected(ticker_info, content)) => {
@@ -82,12 +94,19 @@ impl Sidebar {
                     None => {}
                 }
             }
+            Message::OrderPaneSelected(kind) => {
+                self.set_menu(None);
+                return (Task::none(), Some(Action::OpenOrderPane(kind)));
+            }
         }
 
         (Task::none(), None)
     }
 
     pub fn view(&self, audio_volume: Option<f32>) -> Element<'_, Message> {
+        use data::layout::pane::ContentKind;
+        use iced::widget::button;
+
         let state = &self.state;
 
         let tooltip_position = if state.position == sidebar::Position::Left {
@@ -97,8 +116,9 @@ impl Sidebar {
         };
 
         let is_table_open = self.tickers_table.is_shown;
+        let is_order_open = self.is_menu_active(sidebar::Menu::Order);
 
-        let nav_buttons = self.nav_buttons(is_table_open, audio_volume, tooltip_position);
+        let nav_buttons = self.nav_buttons(is_table_open, is_order_open, audio_volume, tooltip_position);
 
         let tickers_table = if is_table_open {
             column![responsive(move |size| self
@@ -110,11 +130,27 @@ impl Sidebar {
             column![]
         };
 
+        let order_panel = if is_order_open {
+            use iced::widget::text;
+            column![
+                button(text("Order Entry"))
+                    .on_press(Message::OrderPaneSelected(ContentKind::OrderEntry)),
+                button(text("Order List"))
+                    .on_press(Message::OrderPaneSelected(ContentKind::OrderList)),
+                button(text("Buying Power"))
+                    .on_press(Message::OrderPaneSelected(ContentKind::BuyingPower)),
+            ]
+            .width(140)
+            .spacing(4)
+        } else {
+            column![]
+        };
+
         match state.position {
-            sidebar::Position::Left => row![nav_buttons, tickers_table],
-            sidebar::Position::Right => row![tickers_table, nav_buttons],
+            sidebar::Position::Left => row![nav_buttons, tickers_table, order_panel],
+            sidebar::Position::Right => row![order_panel, tickers_table, nav_buttons],
         }
-        .spacing(if is_table_open { 8 } else { 4 })
+        .spacing(if is_table_open || is_order_open { 8 } else { 4 })
         .into()
     }
 
@@ -125,6 +161,7 @@ impl Sidebar {
     fn nav_buttons(
         &self,
         is_table_open: bool,
+        is_order_open: bool,
         audio_volume: Option<f32>,
         tooltip_position: TooltipPosition,
     ) -> iced::widget::Column<'_, Message> {
@@ -172,6 +209,20 @@ impl Sidebar {
             )
         };
 
+        let order_pane_button = {
+            button_with_tooltip(
+                icon_text(Icon::Edit, 14)
+                    .width(24)
+                    .align_x(Alignment::Center),
+                Message::ToggleSidebarMenu(Some(sidebar::Menu::Order)),
+                None,
+                tooltip_position,
+                move |theme, status| {
+                    crate::style::button::transparent(theme, status, is_order_open)
+                },
+            )
+        };
+
         let audio_btn = {
             let is_active = self.is_menu_active(sidebar::Menu::Audio);
 
@@ -192,6 +243,7 @@ impl Sidebar {
 
         column![
             ticker_search_button,
+            order_pane_button,
             layout_modal_button,
             audio_btn,
             space::vertical(),

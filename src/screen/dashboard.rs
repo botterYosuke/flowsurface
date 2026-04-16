@@ -87,6 +87,8 @@ pub enum Message {
         pane_id: uuid::Uuid,
         result: Result<u64, String>,
     },
+    /// 仮想約定通知（REPLAYモード）。main.rs の on_tick() から届く。
+    VirtualOrderFilled(crate::replay::virtual_exchange::FillEvent),
 }
 
 pub struct Dashboard {
@@ -97,6 +99,9 @@ pub struct Dashboard {
     layout_id: uuid::Uuid,
     /// 本日営業日 (YYYYMMDD)。初回注文成功時に NewOrderResponse.eig_day から取得する。
     eig_day: Option<String>,
+    /// REPLAYモード中かどうか。main.rs から replay 状態切替時にシンクされる。
+    /// update() 内で Effect ハンドラが参照できるよう、view() 引数とは別に保持する。
+    pub is_replay: bool,
 }
 
 impl Default for Dashboard {
@@ -108,6 +113,7 @@ impl Default for Dashboard {
             popout: HashMap::new(),
             layout_id: uuid::Uuid::new_v4(),
             eig_day: None,
+            is_replay: false,
         }
     }
 }
@@ -135,6 +141,8 @@ pub enum Event {
     SwitchTickersInGroup {
         ticker_info: TickerInfo,
     },
+    /// REPLAYモードで仮想注文が送信されたとき、main.rs の VirtualExchangeEngine に渡す。
+    SubmitVirtualOrder(crate::replay::virtual_exchange::VirtualOrder),
 }
 
 impl Dashboard {
@@ -185,6 +193,7 @@ impl Dashboard {
             popout,
             layout_id,
             eig_day: None,
+            is_replay: false,
         }
     }
 
@@ -407,6 +416,8 @@ impl Dashboard {
                     return (self.merge_pane(main_window), None);
                 }
                 pane::Message::PaneEvent(pane, local) => {
+                    // is_replay をコピーしておく（可変借用と同時参照できないため）
+                    let is_replay = self.is_replay;
                     if let Some(state) = self.get_mut_pane(main_window.id, window, pane) {
                         let Some(effect) = state.update(local) else {
                             return (Task::none(), None);
@@ -464,31 +475,56 @@ impl Dashboard {
                             }
                             // ── 注文関連 Effect ──────────────────────────────────────
                             pane::Effect::SubmitNewOrder(req) => {
-                                let pane_id = state.unique_id();
-                                Task::perform(
-                                    order_connector::submit_new_order(req),
-                                    move |result| Message::OrderNewResult { pane_id, result },
-                                )
+                                if is_replay {
+                                    // REPLAYモードでは実際の発注をブロック
+                                    log::warn!(
+                                        "REPLAY中の発注はブロックされました（新規注文）: {:?}",
+                                        req
+                                    );
+                                    Task::none()
+                                } else {
+                                    let pane_id = state.unique_id();
+                                    Task::perform(
+                                        order_connector::submit_new_order(req),
+                                        move |result| Message::OrderNewResult { pane_id, result },
+                                    )
+                                }
                             }
                             pane::Effect::SubmitCorrectOrder(req) => {
-                                let pane_id = state.unique_id();
-                                Task::perform(
-                                    order_connector::submit_correct_order(req),
-                                    move |result| Message::OrderModifyResult {
-                                        pane_id,
-                                        result: result.map(|r| r.order_number),
-                                    },
-                                )
+                                if is_replay {
+                                    log::warn!(
+                                        "REPLAY中の発注はブロックされました（訂正注文）: {:?}",
+                                        req
+                                    );
+                                    Task::none()
+                                } else {
+                                    let pane_id = state.unique_id();
+                                    Task::perform(
+                                        order_connector::submit_correct_order(req),
+                                        move |result| Message::OrderModifyResult {
+                                            pane_id,
+                                            result: result.map(|r| r.order_number),
+                                        },
+                                    )
+                                }
                             }
                             pane::Effect::SubmitCancelOrder(req) => {
-                                let pane_id = state.unique_id();
-                                Task::perform(
-                                    order_connector::submit_cancel_order(req),
-                                    move |result| Message::OrderModifyResult {
-                                        pane_id,
-                                        result: result.map(|r| r.order_number),
-                                    },
-                                )
+                                if is_replay {
+                                    log::warn!(
+                                        "REPLAY中の発注はブロックされました（取消注文）: {:?}",
+                                        req
+                                    );
+                                    Task::none()
+                                } else {
+                                    let pane_id = state.unique_id();
+                                    Task::perform(
+                                        order_connector::submit_cancel_order(req),
+                                        move |result| Message::OrderModifyResult {
+                                            pane_id,
+                                            result: result.map(|r| r.order_number),
+                                        },
+                                    )
+                                }
                             }
                             pane::Effect::FetchOrders => {
                                 let pane_id = state.unique_id();
@@ -536,6 +572,10 @@ impl Dashboard {
                                     issue_name,
                                     tick_size,
                                 )
+                            }
+                            pane::Effect::SubmitVirtualOrder(vo) => {
+                                // main.rs の VirtualExchangeEngine に委譲する
+                                return (Task::none(), Some(Event::SubmitVirtualOrder(vo)));
                             }
                         };
                         return (task, None);
@@ -667,6 +707,18 @@ impl Dashboard {
                     panel.update(panel::order_entry::Message::HoldingsUpdated(result.ok()));
                 }
             }
+            Message::VirtualOrderFilled(fill) => {
+                // 仮想約定通知をトーストで表示する
+                let side_str = match fill.side {
+                    crate::replay::virtual_exchange::PositionSide::Long => "買い",
+                    crate::replay::virtual_exchange::PositionSide::Short => "売り",
+                };
+                let msg = format!(
+                    "[仮想] 約定: {} {} {:.4} @ {:.2}",
+                    fill.ticker, side_str, fill.qty, fill.fill_price
+                );
+                return (Task::none(), Some(Event::Notification(Toast::info(msg))));
+            }
         }
 
         (Task::none(), None)
@@ -698,6 +750,18 @@ impl Dashboard {
             }
         }
         Task::none()
+    }
+
+    /// 全 Pane の `is_virtual_mode` と全 OrderEntry パネルの `is_virtual` を
+    /// `is_replay` に合わせて同期する。Replay ↔ Live の切替時に呼ぶ。
+    pub fn sync_virtual_mode(&mut self, main_window: window::Id) {
+        let virtual_mode = self.is_replay;
+        for (_, _, state) in self.iter_all_panes_mut(main_window) {
+            state.is_virtual_mode = virtual_mode;
+            if let pane::Content::OrderEntry(panel) = &mut state.content {
+                panel.is_virtual = virtual_mode;
+            }
+        }
     }
 
     fn new_pane(
@@ -1080,6 +1144,16 @@ impl Dashboard {
         )))
     }
 
+    /// フォーカスが無く唯一ペインがある場合、そのペインを自動的にフォーカスする。
+    fn auto_focus_single_pane(&mut self, main_window: window::Id) {
+        if self.focus.is_none()
+            && self.panes.len() == 1
+            && let Some((pane_id, _)) = self.panes.iter().next()
+        {
+            self.focus = Some((main_window, *pane_id));
+        }
+    }
+
     /// フォーカスペインを Horizontal Split し、新ペインに ticker_info + content_kind を設定する。
     /// Split 成功時は Some(Task)、フォーカスなし（ペイン数 > 1）・Split 失敗時は None を返す。
     pub fn split_focused_and_init(
@@ -1088,13 +1162,7 @@ impl Dashboard {
         ticker_info: TickerInfo,
         content_kind: ContentKind,
     ) -> Option<Task<Message>> {
-        // フォーカスが無く唯一ペインがある場合は自動フォーカス（init_focused_pane と同じ挙動）
-        if self.focus.is_none()
-            && self.panes.len() == 1
-            && let Some((pane_id, _)) = self.panes.iter().next()
-        {
-            self.focus = Some((main_window, *pane_id));
-        }
+        self.auto_focus_single_pane(main_window);
 
         let (window, focused_pane) = self.focus?;
 
@@ -1113,17 +1181,47 @@ impl Dashboard {
         Some(task)
     }
 
+    /// フォーカスペインを Horizontal Split し、新ペインを指定の注文パネルで初期化する。
+    /// TickerInfo 不要（SyncIssueToOrderEntry で自動連動）。
+    /// set_content_and_streams は tickers[0] を必須アクセスするため使用しない。
+    pub fn split_focused_and_init_order(
+        &mut self,
+        main_window: window::Id,
+        content_kind: data::layout::pane::ContentKind,
+    ) -> Task<Message> {
+        self.auto_focus_single_pane(main_window);
+
+        let Some((window, focused_pane)) = self.focus else {
+            return Task::done(Message::Notification(Toast::warn(
+                "No focused pane found".to_string(),
+            )));
+        };
+
+        let Some((new_pane, _)) = self.panes.split(
+            pane_grid::Axis::Horizontal,
+            focused_pane,
+            pane::State::new(),
+        ) else {
+            return Task::done(Message::Notification(Toast::warn(
+                "Could not split pane".to_string(),
+            )));
+        };
+
+        self.focus = Some((window, new_pane));
+
+        if let Some(state) = self.get_mut_pane(main_window, window, new_pane) {
+            state.content = pane::Content::placeholder(content_kind);
+        }
+
+        Task::none()
+    }
+
     pub fn switch_tickers_in_group(
         &mut self,
         main_window: window::Id,
         ticker_info: TickerInfo,
     ) -> Task<Message> {
-        if self.focus.is_none()
-            && self.panes.len() == 1
-            && let Some((pane_id, _)) = self.panes.iter().next()
-        {
-            self.focus = Some((main_window, *pane_id));
-        }
+        self.auto_focus_single_pane(main_window);
 
         let link_group = self.focus.and_then(|(window, pane)| {
             self.get_pane(main_window, window, pane)
@@ -1991,6 +2089,78 @@ mod tests {
         );
         assert!(result2.is_some(), "2 回目も Some を返すこと");
         assert_eq!(dashboard.panes.len(), 3, "2 回目後 pane count = 3");
+    }
+
+    // --- split_focused_and_init_order tests ---
+
+    #[test]
+    fn split_focused_and_init_order_splits_single_pane_no_focus() {
+        let mut dashboard = single_pane_dashboard();
+        let main_window = window::Id::unique();
+        assert_eq!(dashboard.panes.len(), 1);
+        assert!(dashboard.focus.is_none());
+
+        let _task = dashboard.split_focused_and_init_order(
+            main_window,
+            data::layout::pane::ContentKind::OrderEntry,
+        );
+
+        assert_eq!(dashboard.panes.len(), 2, "pane count must increase by 1");
+        assert!(dashboard.focus.is_some(), "focus must be set after split");
+    }
+
+    #[test]
+    fn split_focused_and_init_order_no_split_when_no_focus_multiple_panes() {
+        let mut dashboard = Dashboard::default();
+        let main_window = window::Id::unique();
+        assert!(dashboard.panes.len() > 1);
+        assert!(dashboard.focus.is_none());
+        let pane_count_before = dashboard.panes.len();
+
+        let _task = dashboard.split_focused_and_init_order(
+            main_window,
+            data::layout::pane::ContentKind::OrderEntry,
+        );
+
+        assert_eq!(
+            dashboard.panes.len(),
+            pane_count_before,
+            "pane count must not change when there is no focus and multiple panes"
+        );
+    }
+
+    #[test]
+    fn split_focused_and_init_order_sets_order_content_on_new_pane() {
+        let mut dashboard = single_pane_dashboard();
+        let main_window = window::Id::unique();
+
+        let _task = dashboard.split_focused_and_init_order(
+            main_window,
+            data::layout::pane::ContentKind::OrderEntry,
+        );
+
+        assert_eq!(dashboard.panes.len(), 2);
+        let (_, focused_pane) = dashboard.focus.unwrap();
+        let state = dashboard.panes.get(focused_pane).unwrap();
+        assert!(
+            matches!(state.content, pane::Content::OrderEntry(_)),
+            "new pane content must be OrderEntry"
+        );
+    }
+
+    #[test]
+    fn split_focused_and_init_order_moves_focus_to_new_pane() {
+        let mut dashboard = single_pane_dashboard();
+        let main_window = window::Id::unique();
+        let original_pane = *dashboard.panes.iter().next().map(|(p, _)| p).unwrap();
+
+        let _task = dashboard.split_focused_and_init_order(
+            main_window,
+            data::layout::pane::ContentKind::BuyingPower,
+        );
+
+        let (_, focused_pane) = dashboard.focus.unwrap();
+        assert_ne!(focused_pane, original_pane, "focus must move to the new pane");
     }
 
     // compile-time: clear_chart_for_replay returns (), not Vec<...>

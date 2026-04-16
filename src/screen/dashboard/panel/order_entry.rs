@@ -177,6 +177,8 @@ pub struct OrderEntryPanel {
     pub confirm_modal: bool,
     pub loading: bool,
     pub last_result: Option<OrderResult>,
+    /// true = REPLAYモード（仮想注文）。pane.rs の is_virtual_mode に連動する。
+    pub is_virtual: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -238,6 +240,7 @@ impl OrderEntryPanel {
             confirm_modal: false,
             loading: false,
             last_result: None,
+            is_virtual: false,
         }
     }
 
@@ -274,7 +277,8 @@ impl OrderEntryPanel {
         if self.qty.is_empty() {
             return Err("数量を入力してください".to_string());
         }
-        if self.second_password.is_empty() {
+        // 仮想モードではパスワード不要
+        if !self.is_virtual && self.second_password.is_empty() {
             return Err("発注パスワードを入力してください".to_string());
         }
 
@@ -398,7 +402,7 @@ impl OrderEntryPanel {
 
     // ── View ──────────────────────────────────────────────────────────────────
 
-    pub fn view(&self, theme: &Theme) -> Element<'_, Message> {
+    pub fn view(&self, theme: &Theme, is_replay: bool) -> Element<'_, Message> {
         let issue_label = if self.issue_code.is_empty() {
             text("銘柄未選択").size(13)
         } else {
@@ -541,34 +545,75 @@ impl OrderEntryPanel {
             .spacing(8)
             .into()
         } else {
+            // 仮想モードではパスワード不要
+            let password_ok = self.is_virtual || !self.second_password.is_empty();
             let confirm_enabled = !self.loading
                 && !self.issue_code.is_empty()
                 && !self.qty.is_empty()
-                && !self.second_password.is_empty()
+                && password_ok
                 && (self.price_type == PriceType::Market || !self.limit_price.is_empty());
 
-            button(text(if self.loading { "送信中..." } else { "注文確認" }).size(13))
+            let label = if self.loading {
+                "送信中..."
+            } else if self.is_virtual {
+                "仮想注文確認"
+            } else {
+                "注文確認"
+            };
+
+            button(text(label).size(13))
                 .on_press_maybe(confirm_enabled.then_some(Message::ConfirmClicked))
                 .into()
         };
 
-        container(
-            column![
-                side_tabs,
-                issue_label,
-                row![text("口座: ").size(13), account_picker].align_y(Alignment::Center).spacing(4),
-                row![text("現物/信用: ").size(13), cash_margin_picker].align_y(Alignment::Center).spacing(4),
-                qty_row,
-                price_row,
-                row![text("期日: ").size(13), expire_picker].align_y(Alignment::Center).spacing(4),
+        // 仮想モード = is_virtual フィールド OR is_replay パラメータ（フェーズ A との後方互換）
+        let virtual_mode = self.is_virtual || is_replay;
+
+        let mut col = column![
+            side_tabs,
+            issue_label,
+            row![text("口座: ").size(13), account_picker].align_y(Alignment::Center).spacing(4),
+            row![text("現物/信用: ").size(13), cash_margin_picker].align_y(Alignment::Center).spacing(4),
+            qty_row,
+            price_row,
+            row![text("期日: ").size(13), expire_picker].align_y(Alignment::Center).spacing(4),
+        ]
+        .spacing(8);
+
+        if !virtual_mode {
+            col = col.push(
                 row![text("パスワード: ").size(13), password_input].align_y(Alignment::Center).spacing(4),
-                result_row,
-                action_area,
+            );
+        }
+
+        col = col.push(result_row).push(action_area);
+
+        let body = container(col.padding(8));
+
+        if virtual_mode {
+            let banner_text = if self.is_virtual {
+                "⏪ 仮想注文モード"
+            } else {
+                "⏪ REPLAYモード中 — 注文は無効です"
+            };
+            column![
+                container(text(banner_text).size(12))
+                    .style(|theme: &Theme| {
+                        let palette = theme.extended_palette();
+                        iced::widget::container::Style {
+                            background: Some(palette.primary.weak.color.into()),
+                            text_color: Some(palette.primary.weak.text),
+                            ..Default::default()
+                        }
+                    })
+                    .padding([4, 8])
+                    .width(iced::Length::Fill),
+                body,
             ]
-            .spacing(8)
-            .padding(8),
-        )
-        .into()
+            .into()
+        } else {
+            body.into()
+        }
     }
 }
 

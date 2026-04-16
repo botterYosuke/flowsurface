@@ -74,6 +74,11 @@ impl Price {
         (self.units as f32) / scale
     }
 
+    /// Convert price to f64. Preserves full i64 resolution (no f32 rounding).
+    pub fn to_f64(self) -> f64 {
+        (self.units as f64) / 10f64.powi(Self::ATOMIC_SCALE)
+    }
+
     /// Lossy: create Price from f32 (rounds to nearest atomic unit)
     pub fn from_f32_lossy(v: f32) -> Self {
         let scale = 10f32.powi(Self::ATOMIC_SCALE);

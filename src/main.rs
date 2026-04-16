@@ -151,6 +151,9 @@ struct Flowsurface {
     theme: data::Theme,
     notifications: Notifications,
     replay: ReplayController,
+    /// REPLAYモードの仮想約定エンジン。
+    /// HTTP API は `Message::ReplayApi` 経由でアクセスするため Arc<Mutex> 不要。
+    virtual_engine: Option<replay::virtual_exchange::VirtualExchangeEngine>,
 }
 
 #[derive(Debug, Clone)]
@@ -226,6 +229,19 @@ impl Flowsurface {
                 let pending_auto_play =
                     replay_mode == replay::ReplayMode::Replay && has_valid_range;
                 ReplayController::from_saved(replay_mode, range_start, range_end, pending_auto_play)
+            },
+            // 起動時に Replay モードで開始する場合はエンジンを初期化する
+            // （Live→Replay 遷移ハンドラは通過しないため）
+            virtual_engine: {
+                let replay_mode = match saved_state.replay_config.mode.as_str() {
+                    "replay" => replay::ReplayMode::Replay,
+                    _ => replay::ReplayMode::Live,
+                };
+                if replay_mode == replay::ReplayMode::Replay {
+                    Some(replay::virtual_exchange::VirtualExchangeEngine::new(1_000_000.0))
+                } else {
+                    None
+                }
             },
         };
 
@@ -314,13 +330,15 @@ impl Flowsurface {
                     ..Default::default()
                 });
                 self.login_window = Some(login_window_id);
-                // ↓↓↓ DEV AUTO-LOGIN: 戻すときはこの return を削除 ↓↓↓
-                return Task::batch([
-                    open_login_window.discard(),
-                    Task::done(Message::Login(login::Message::LoginSubmit)),
-                ]);
-                // ↑↑↑ DEV AUTO-LOGIN ↑↑↑
-                #[allow(unreachable_code)]
+                #[cfg(debug_assertions)]
+                {
+                    // DEV AUTO-LOGIN: リリースビルドでは削除される
+                    return Task::batch([
+                        open_login_window.discard(),
+                        Task::done(Message::Login(login::Message::LoginSubmit)),
+                    ]);
+                }
+                #[cfg(not(debug_assertions))]
                 return open_login_window.discard();
             }
             Message::MarketWsEvent(event) => {
@@ -375,20 +393,37 @@ impl Flowsurface {
                 // リプレイ再生中: tick() でイベントを抽出してチャートに注入する
                 if self.replay.is_replay() {
                     // layout_manager と replay は別フィールドなので同時可変借用が成立する
-                    let active_id = self
-                        .layout_manager
-                        .active_layout_id()
-                        .expect("No active layout")
-                        .unique;
-                    let dashboard = self
+                    let Some(active_id) = self.layout_manager.active_layout_id().map(|l| l.unique)
+                    else {
+                        return Task::none();
+                    };
+                    let Some(dashboard) = self
                         .layout_manager
                         .get_mut(active_id)
                         .map(|l| &mut l.dashboard)
-                        .expect("No active dashboard");
+                    else {
+                        return Task::none();
+                    };
                     let outcome = self.replay.tick(now, dashboard, main_window_id);
 
                     // trades を heatmap 等に注入（Task が必要なため呼び出し側で処理）
+                    // 同時に VirtualExchangeEngine の on_tick も呼ぶ
                     for (stream, trades, update_t) in outcome.trade_events {
+                        // 仮想エンジンへの tick 通知
+                        if let Some(engine) = &mut self.virtual_engine {
+                            let ticker = stream.ticker_info().ticker.to_string();
+                            let clock_ms = self.replay.current_time_ms().unwrap_or(0);
+                            let fills = engine.on_tick(&ticker, &trades, clock_ms);
+                            for fill in fills {
+                                let fill_msg =
+                                    dashboard::Message::VirtualOrderFilled(fill);
+                                all_tasks.push(Task::done(Message::Dashboard {
+                                    layout_id: None,
+                                    event: fill_msg,
+                                }));
+                            }
+                        }
+
                         let task = self
                             .active_dashboard_mut()
                             .ingest_trades(&stream, &trades, update_t, main_window_id)
@@ -652,6 +687,14 @@ impl Flowsurface {
                             // 既知の不具合があるため Task::batch を使う。
                             // outer の main_task は Task::none() のため chain 不要。
                             return Task::batch([switch_task, replay_task]);
+                        }
+                        Some(dashboard::Event::SubmitVirtualOrder(vo)) => {
+                            if let Some(engine) = &mut self.virtual_engine {
+                                let _order_id = engine.place_order(vo);
+                            } else {
+                                log::warn!("仮想注文が来たが VirtualExchangeEngine が初期化されていません");
+                            }
+                            Task::none()
                         }
                         None => Task::none(),
                     };
@@ -940,6 +983,16 @@ impl Flowsurface {
                             replay_task,
                         ]);
                     }
+                    Some(dashboard::sidebar::Action::OpenOrderPane(content_kind)) => {
+                        let main_window_id = self.main_window.id;
+                        return self
+                            .active_dashboard_mut()
+                            .split_focused_and_init_order(main_window_id, content_kind)
+                            .map(move |msg| Message::Dashboard {
+                                layout_id: None,
+                                event: msg,
+                            });
+                    }
                     Some(dashboard::sidebar::Action::ErrorOccurred(err)) => {
                         self.notifications.push(Toast::error(err.to_string()));
                     }
@@ -970,20 +1023,64 @@ impl Flowsurface {
             Message::Replay(msg) => {
                 let main_window_id = self.main_window.id;
                 // layout_manager と replay は別フィールドなので同時可変借用が成立する
-                let active_id = self
-                    .layout_manager
-                    .active_layout_id()
-                    .expect("No active layout")
-                    .unique;
-                let dashboard = self
+                let Some(active_id) = self.layout_manager.active_layout_id().map(|l| l.unique)
+                else {
+                    return Task::none();
+                };
+                let Some(dashboard) = self
                     .layout_manager
                     .get_mut(active_id)
                     .map(|l| &mut l.dashboard)
-                    .expect("No active dashboard");
+                else {
+                    return Task::none();
+                };
+                let was_replay = self.replay.is_replay();
+                let time_before = self.replay.current_time_ms();
                 let (task, toast) = self.replay.handle_message(msg, dashboard, main_window_id);
+                let time_after = self.replay.current_time_ms();
                 if let Some(t) = toast {
                     self.notifications.push(t);
                 }
+                // replay 状態が切り替わった可能性があるため is_replay をシンクする
+                let is_replay_now = self.replay.is_replay();
+                self.active_dashboard_mut().is_replay = is_replay_now;
+                self.active_dashboard_mut().sync_virtual_mode(main_window_id);
+
+                // 仮想エンジンのライフサイクル管理:
+                // Live→Replay (Play): エンジンを生成/リセット
+                // Replay→Live: エンジンをリセット
+                // Seek (StepForward/StepBackward): 時刻変化を検出してリセット
+                if !was_replay && is_replay_now {
+                    // Replay 開始 → エンジンを初期化
+                    if self.virtual_engine.is_none() {
+                        self.virtual_engine = Some(
+                            replay::virtual_exchange::VirtualExchangeEngine::new(1_000_000.0),
+                        );
+                        log::info!("VirtualExchangeEngine を初期化しました（初期 cash: 1,000,000）");
+                    } else if let Some(engine) = &mut self.virtual_engine {
+                        engine.reset();
+                        log::info!("VirtualExchangeEngine をリセットしました（再プレイ）");
+                    }
+                } else if was_replay && !is_replay_now {
+                    // Replay 終了 → エンジンを破棄（Live モードでは存在しない）
+                    if self.virtual_engine.is_some() {
+                        self.virtual_engine = None;
+                        log::info!("VirtualExchangeEngine を破棄しました（Live へ切替）");
+                    }
+                } else if is_replay_now
+                    && time_before != time_after
+                    && let Some(engine) = &mut self.virtual_engine
+                {
+                    // Replay 中の seek 操作（StepForward/StepBackward/range 変更）
+                    // 時刻が変化した場合にポジション状態をリセットする
+                    engine.reset();
+                    log::info!(
+                        "VirtualExchangeEngine をリセットしました（seek: {:?} → {:?}）",
+                        time_before,
+                        time_after
+                    );
+                }
+
                 return task.map(Message::Replay);
             }
             Message::ReplayApi((command, reply_tx)) => {
@@ -1078,6 +1175,81 @@ impl Flowsurface {
                     ApiCommand::Auth(cmd) => {
                         let body = self.handle_auth_api(cmd);
                         reply_tx.send(body);
+                    }
+                    ApiCommand::VirtualExchange(cmd) => {
+                        use replay_api::VirtualExchangeCommand;
+                        use replay::virtual_exchange::{PositionSide, VirtualOrder, VirtualOrderStatus, VirtualOrderType};
+
+                        match cmd {
+                            VirtualExchangeCommand::PlaceOrder {
+                                ticker, side, qty, order_type, limit_price,
+                            } => {
+                                if let Some(engine) = &mut self.virtual_engine {
+                                    let order_side = if side == "buy" {
+                                        PositionSide::Long
+                                    } else {
+                                        PositionSide::Short
+                                    };
+                                    let vo_type = if order_type == "limit" {
+                                        VirtualOrderType::Limit {
+                                            price: limit_price.unwrap_or(0.0),
+                                        }
+                                    } else {
+                                        VirtualOrderType::Market
+                                    };
+                                    let now_ms = self.replay.current_time_ms().unwrap_or(0);
+                                    let vo = VirtualOrder {
+                                        order_id: uuid::Uuid::new_v4().to_string(),
+                                        ticker,
+                                        side: order_side,
+                                        qty,
+                                        order_type: vo_type,
+                                        placed_time_ms: now_ms,
+                                        status: VirtualOrderStatus::Pending,
+                                    };
+                                    let order_id = engine.place_order(vo);
+                                    reply_tx.send(serde_json::json!({
+                                        "order_id": order_id,
+                                        "status": "pending"
+                                    }).to_string());
+                                } else {
+                                    reply_tx.send_status(400, r#"{"error":"REPLAY mode only. Start replay first."}"#.to_string());
+                                }
+                            }
+                            VirtualExchangeCommand::GetPortfolio => {
+                                if let Some(engine) = &self.virtual_engine {
+                                    let snap = engine.portfolio_snapshot(0.0);
+                                    reply_tx.send(
+                                        serde_json::to_string(&snap)
+                                            .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string()),
+                                    );
+                                } else {
+                                    reply_tx.send_status(400, r#"{"error":"REPLAY mode only. Start replay first."}"#.to_string());
+                                }
+                            }
+                            VirtualExchangeCommand::GetState => {
+                                if self.virtual_engine.is_some() {
+                                    // Phase 1 骨格のみ
+                                    let now_ms = self.replay.current_time_ms().unwrap_or(0);
+                                    reply_tx.send(serde_json::json!({
+                                        "current_time_ms": now_ms,
+                                        "not_implemented": true
+                                    }).to_string());
+                                } else {
+                                    reply_tx.send_status(400, r#"{"error":"REPLAY mode only. Start replay first."}"#.to_string());
+                                }
+                            }
+                            VirtualExchangeCommand::GetOrders => {
+                                if let Some(engine) = &self.virtual_engine {
+                                    let orders = engine.get_orders();
+                                    reply_tx.send(
+                                        serde_json::json!({ "orders": orders }).to_string(),
+                                    );
+                                } else {
+                                    reply_tx.send_status(400, r#"{"error":"REPLAY mode only. Start replay first."}"#.to_string());
+                                }
+                            }
+                        }
                     }
                     #[cfg(debug_assertions)]
                     ApiCommand::Test(cmd) => {
@@ -1438,6 +1610,7 @@ impl Flowsurface {
                 let json = self.build_chart_snapshot_json(pane_id);
                 (json, Task::none())
             }
+            PaneCommand::OpenOrderPane { kind } => self.pane_api_open_order_pane(&kind),
         }
     }
 
@@ -1553,6 +1726,34 @@ impl Flowsurface {
             .iter_all_panes(main_window_id)
             .find(|(_, _, state)| state.unique_id() == pane_id)
             .map(|(win, pg, _)| (win, pg))
+    }
+
+    /// `POST /api/sidebar/open-order-pane` ハンドラ。
+    /// フォーカスペインを Horizontal Split し、指定種別の注文ペインを新ペインに表示する。
+    fn pane_api_open_order_pane(&mut self, kind_str: &str) -> (String, Task<Message>) {
+        let kind = match Self::parse_content_kind(kind_str) {
+            Some(k) => k,
+            None => {
+                return (
+                    format!(r#"{{"error":"invalid kind: {kind_str}"}}"#),
+                    Task::none(),
+                );
+            }
+        };
+        let main_window_id = self.main_window.id;
+        let task = self
+            .active_dashboard_mut()
+            .split_focused_and_init_order(main_window_id, kind)
+            .map(move |msg| Message::Dashboard {
+                layout_id: None,
+                event: msg,
+            });
+        let ok = serde_json::json!({
+            "ok": true,
+            "action": "open-order-pane",
+            "kind": kind_str,
+        });
+        (ok.to_string(), task)
     }
 
     fn pane_api_split(&mut self, pane_id: uuid::Uuid, axis_str: &str) -> (String, Task<Message>) {
@@ -1901,6 +2102,9 @@ impl Flowsurface {
             "TimeAndSales" | "Time&Sales" => Some(ContentKind::TimeAndSales),
             "Ladder" => Some(ContentKind::Ladder),
             "Starter" | "Starter Pane" => Some(ContentKind::Starter),
+            "OrderEntry" | "Order Entry" => Some(ContentKind::OrderEntry),
+            "OrderList" | "Order List" => Some(ContentKind::OrderList),
+            "BuyingPower" | "Buying Power" => Some(ContentKind::BuyingPower),
             _ => None,
         }
     }
@@ -2575,6 +2779,8 @@ impl Flowsurface {
                     align_x,
                 )
             }
+            // 注文パネルはサイドバーの view() 内でインライン表示されるため、modal は不要
+            sidebar::Menu::Order => base,
         }
     }
 

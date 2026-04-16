@@ -13,9 +13,30 @@ pub enum ApiCommand {
     Pane(PaneCommand),
     /// 認証状態確認コマンド（テスト・デバッグ用、本番ビルドにも含まれる）。
     Auth(AuthCommand),
+    /// 仮想約定エンジンコマンド（Phase 2 互換）。
+    VirtualExchange(VirtualExchangeCommand),
     /// E2E テスト用コマンド（debug ビルドで有効）。
     #[cfg(debug_assertions)]
     Test(TestCommand),
+}
+
+/// 仮想約定エンジン API コマンド。
+#[derive(Debug, Clone)]
+pub enum VirtualExchangeCommand {
+    /// 仮想注文を登録する（POST /api/replay/order）
+    PlaceOrder {
+        ticker: String,
+        side: String,   // "buy" | "sell"
+        qty: f64,
+        order_type: String,  // "market" | "limit"
+        limit_price: Option<f64>,
+    },
+    /// ポートフォリオスナップショットを取得する（GET /api/replay/portfolio）
+    GetPortfolio,
+    /// 観測データを取得する（GET /api/replay/state）— Phase 1 骨格のみ
+    GetState,
+    /// pending 注文の一覧を取得する（GET /api/replay/orders）
+    GetOrders,
 }
 
 /// 認証状態確認コマンド。
@@ -63,24 +84,39 @@ pub enum PaneCommand {
     /// 指定ペインのチャートスナップショット（バー数・タイムスタンプ範囲）を返す。
     /// クエリパラメータ: `?pane_id=<uuid>`
     GetChartSnapshot { pane_id: uuid::Uuid },
+    /// 注文ペインを開く（POST /api/sidebar/open-order-pane）
+    /// kind: "OrderEntry" | "OrderList" | "BuyingPower"
+    OpenOrderPane { kind: String },
 }
+
+type ReplySenderInner = Arc<Mutex<Option<oneshot::Sender<(u16, String)>>>>;
 
 /// oneshot::Sender を Clone 可能にするラッパー（iced の Message は Clone が必要）
 /// レスポンスは main.rs 側でシリアライズ済み JSON を送る。
+/// タプル (status_code, body) でステータスコードを指定できる。
 #[derive(Debug, Clone)]
-pub struct ReplySender(Arc<Mutex<Option<oneshot::Sender<String>>>>);
+pub struct ReplySender(ReplySenderInner);
 
 impl ReplySender {
-    fn new(tx: oneshot::Sender<String>) -> Self {
+    fn new(tx: oneshot::Sender<(u16, String)>) -> Self {
         Self(Arc::new(Mutex::new(Some(tx))))
     }
 
-    /// 応答を送信する。2回目以降の呼び出しは何もしない。
+    /// HTTP 200 でレスポンスを送信する。2回目以降の呼び出しは何もしない。
     pub fn send(self, body: String) {
         if let Ok(mut guard) = self.0.lock()
             && let Some(tx) = guard.take()
         {
-            let _ = tx.send(body);
+            let _ = tx.send((200, body));
+        }
+    }
+
+    /// 任意のステータスコードでレスポンスを送信する。2回目以降の呼び出しは何もしない。
+    pub fn send_status(self, status: u16, body: String) {
+        if let Ok(mut guard) = self.0.lock()
+            && let Some(tx) = guard.take()
+        {
+            let _ = tx.send((status, body));
         }
     }
 }
@@ -102,6 +138,66 @@ fn api_port() -> u16 {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(9876)
+}
+
+/// Content-Length ヘッダーの値をパースする（見つからなければ 0）。
+fn parse_content_length_from_headers(headers: &str) -> usize {
+    for line in headers.lines() {
+        if line.to_ascii_lowercase().starts_with("content-length:")
+            && let Some((_, val)) = line.split_once(':')
+            && let Ok(n) = val.trim().parse::<usize>()
+        {
+            return n;
+        }
+    }
+    0
+}
+
+/// HTTP リクエストを完全に読み込む（Content-Length に従ってボディも確保）。
+/// TCP が分割して届いても正しく結合する。
+async fn read_full_request(stream: &mut tokio::net::TcpStream) -> Option<String> {
+    // 512KB バッファ（inject-daily-history 等の大きなボディに対応）
+    let mut buf = vec![0u8; 524288];
+    let mut total = 0usize;
+
+    loop {
+        let n = match stream.read(&mut buf[total..]).await {
+            Ok(0) | Err(_) => return None,
+            Ok(n) => n,
+        };
+        total += n;
+
+        // ヘッダー末尾 \r\n\r\n を探す
+        let Some(header_end) = buf[..total].windows(4).position(|w| w == b"\r\n\r\n") else {
+            if total >= buf.len() {
+                return None; // バッファ枯渇
+            }
+            continue; // ヘッダーがまだ届いていない
+        };
+
+        let body_start = header_end + 4;
+        let headers_raw = std::str::from_utf8(&buf[..header_end]).ok()?;
+        let content_length = parse_content_length_from_headers(headers_raw);
+
+        let body_received = total - body_start;
+        if body_received >= content_length {
+            // 完全なリクエストを受信済み
+            return Some(String::from_utf8_lossy(&buf[..total]).into_owned());
+        }
+
+        // ボディの残りバイトを読む
+        let remaining = content_length - body_received;
+        if total + remaining > buf.len() {
+            return None; // バッファ超過
+        }
+        match stream.read_exact(&mut buf[total..total + remaining]).await {
+            Ok(_) => {
+                total += remaining;
+                return Some(String::from_utf8_lossy(&buf[..total]).into_owned());
+            }
+            Err(_) => return None,
+        }
+    }
 }
 
 async fn run_server(mut sender: mpsc::Sender<ApiMessage>) {
@@ -130,15 +226,13 @@ async fn run_server(mut sender: mpsc::Sender<ApiMessage>) {
 
         // 1 リクエスト / 接続（keep-alive なし）
         // 512KB バッファ: inject-daily-history で多数 kline を送る場合に備えて確保
-        let mut buf = vec![0u8; 524288];
-        let n = match stream.read(&mut buf).await {
-            Ok(0) => continue,
-            Ok(n) => n,
-            Err(_) => continue,
+        // Content-Length に従って完全なボディを受信する（TCP 分割対策）
+        let request_string = match read_full_request(&mut stream).await {
+            Some(s) => s,
+            None => continue,
         };
-
-        let request = String::from_utf8_lossy(&buf[..n]);
-        let (method, path, body) = match parse_request(&request) {
+        let request = request_string.as_str();
+        let (method, path, body) = match parse_request(request) {
             Some(parsed) => parsed,
             None => {
                 let _ = write_response(&mut stream, 400, r#"{"error":"Bad Request"}"#).await;
@@ -173,7 +267,7 @@ async fn run_server(mut sender: mpsc::Sender<ApiMessage>) {
         };
 
         // oneshot で iced app からのレスポンスを待つ
-        let (reply_tx, reply_rx) = oneshot::channel();
+        let (reply_tx, reply_rx) = oneshot::channel::<(u16, String)>();
         if sender
             .send((command, ReplySender::new(reply_tx)))
             .await
@@ -184,8 +278,8 @@ async fn run_server(mut sender: mpsc::Sender<ApiMessage>) {
         }
 
         match reply_rx.await {
-            Ok(json) => {
-                let _ = write_response(&mut stream, 200, &json).await;
+            Ok((status, json)) => {
+                let _ = write_response(&mut stream, status, &json).await;
             }
             Err(_) => {
                 let _ =
@@ -295,6 +389,19 @@ fn route(method: &str, path: &str, body: &str) -> Result<ApiCommand, RouteError>
         // ── その他 ────────────────────────────────────────────────────────
         ("GET", "/api/notification/list") => Ok(ApiCommand::Pane(PaneCommand::ListNotifications)),
         ("POST", "/api/sidebar/select-ticker") => parse_sidebar_select_ticker(body),
+        ("POST", "/api/sidebar/open-order-pane") => parse_open_order_pane(body),
+
+        // ── 仮想約定エンジン（Phase 2 互換）──────────────────────────────
+        ("POST", "/api/replay/order") => parse_virtual_order_command(body),
+        ("GET", "/api/replay/portfolio") => {
+            Ok(ApiCommand::VirtualExchange(VirtualExchangeCommand::GetPortfolio))
+        }
+        ("GET", "/api/replay/state") => {
+            Ok(ApiCommand::VirtualExchange(VirtualExchangeCommand::GetState))
+        }
+        ("GET", "/api/replay/orders") => {
+            Ok(ApiCommand::VirtualExchange(VirtualExchangeCommand::GetOrders))
+        }
 
         // ── debug ビルドで有効（keyring クリア） ─────────────────────────
         #[cfg(debug_assertions)]
@@ -304,6 +411,58 @@ fn route(method: &str, path: &str, body: &str) -> Result<ApiCommand, RouteError>
 
         _ => Err(RouteError::NotFound),
     }
+}
+
+/// `POST /api/replay/order` のボディをパースして ApiCommand を返す。
+fn parse_virtual_order_command(body: &str) -> Result<ApiCommand, RouteError> {
+    let parsed: serde_json::Value =
+        serde_json::from_str(body).map_err(|_| RouteError::BadRequest)?;
+
+    let ticker = parsed
+        .get("ticker")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .ok_or(RouteError::BadRequest)?;
+
+    let side = parsed
+        .get("side")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_lowercase())
+        .ok_or(RouteError::BadRequest)?;
+
+    if side != "buy" && side != "sell" {
+        return Err(RouteError::BadRequest);
+    }
+
+    let qty = parsed
+        .get("qty")
+        .and_then(|v| v.as_f64())
+        .ok_or(RouteError::BadRequest)?;
+
+    let (order_type, limit_price) = if let Some(ot) = parsed.get("order_type") {
+        match ot {
+            serde_json::Value::String(s) if s == "market" => ("market".to_string(), None),
+            serde_json::Value::Object(obj) if obj.contains_key("limit") => {
+                let lp = obj
+                    .get("limit")
+                    .and_then(|v| v.as_f64())
+                    .ok_or(RouteError::BadRequest)?;
+                ("limit".to_string(), Some(lp))
+            }
+            _ => return Err(RouteError::BadRequest),
+        }
+    } else {
+        // order_type 省略 → market
+        ("market".to_string(), None)
+    };
+
+    Ok(ApiCommand::VirtualExchange(VirtualExchangeCommand::PlaceOrder {
+        ticker,
+        side,
+        qty,
+        order_type,
+        limit_price,
+    }))
 }
 
 /// URL パスのクエリ文字列から指定キーの値を取り出す。
@@ -345,6 +504,16 @@ fn parse_split_command(body: &str) -> Result<ApiCommand, RouteError> {
         _ => return Err(RouteError::BadRequest),
     }
     Ok(ApiCommand::Pane(PaneCommand::Split { pane_id, axis }))
+}
+
+/// `POST /api/sidebar/open-order-pane` のボディをパースして ApiCommand を返す。
+fn parse_open_order_pane(body: &str) -> Result<ApiCommand, RouteError> {
+    let kind = body_str_field(body, "kind")?;
+    match kind.as_str() {
+        "OrderEntry" | "OrderList" | "BuyingPower" => {}
+        _ => return Err(RouteError::BadRequest),
+    }
+    Ok(ApiCommand::Pane(PaneCommand::OpenOrderPane { kind }))
 }
 
 /// `POST /api/sidebar/select-ticker` のボディをパースして ApiCommand を返す。
@@ -831,6 +1000,52 @@ mod tests {
         assert!(matches!(result, Err(RouteError::BadRequest)));
     }
 
+    // ── route tests: open-order-pane ──
+
+    #[test]
+    fn route_post_sidebar_open_order_pane_order_entry() {
+        let body = r#"{"kind":"OrderEntry"}"#;
+        let cmd = route("POST", "/api/sidebar/open-order-pane", body).unwrap();
+        match unwrap_pane(cmd) {
+            PaneCommand::OpenOrderPane { kind } => assert_eq!(kind, "OrderEntry"),
+            _ => panic!("Expected OpenOrderPane"),
+        }
+    }
+
+    #[test]
+    fn route_post_sidebar_open_order_pane_order_list() {
+        let body = r#"{"kind":"OrderList"}"#;
+        let cmd = route("POST", "/api/sidebar/open-order-pane", body).unwrap();
+        match unwrap_pane(cmd) {
+            PaneCommand::OpenOrderPane { kind } => assert_eq!(kind, "OrderList"),
+            _ => panic!("Expected OpenOrderPane"),
+        }
+    }
+
+    #[test]
+    fn route_post_sidebar_open_order_pane_buying_power() {
+        let body = r#"{"kind":"BuyingPower"}"#;
+        let cmd = route("POST", "/api/sidebar/open-order-pane", body).unwrap();
+        match unwrap_pane(cmd) {
+            PaneCommand::OpenOrderPane { kind } => assert_eq!(kind, "BuyingPower"),
+            _ => panic!("Expected OpenOrderPane"),
+        }
+    }
+
+    #[test]
+    fn route_post_sidebar_open_order_pane_invalid_kind() {
+        let body = r#"{"kind":"InvalidKind"}"#;
+        let result = route("POST", "/api/sidebar/open-order-pane", body);
+        assert!(matches!(result, Err(RouteError::BadRequest)));
+    }
+
+    #[test]
+    fn route_post_sidebar_open_order_pane_missing_kind() {
+        let body = r#"{}"#;
+        let result = route("POST", "/api/sidebar/open-order-pane", body);
+        assert!(matches!(result, Err(RouteError::BadRequest)));
+    }
+
     // ── route tests: auth ──
 
     #[test]
@@ -863,5 +1078,23 @@ mod tests {
         assert!(matches!(r3, Err(RouteError::NotFound)));
         assert!(matches!(r4, Err(RouteError::NotFound)));
         assert!(matches!(r5, Err(RouteError::NotFound)));
+    }
+
+    // ── route tests: GET /api/replay/orders ──
+
+    #[test]
+    fn route_get_replay_orders() {
+        let cmd = route("GET", "/api/replay/orders", "").unwrap();
+        assert!(matches!(
+            cmd,
+            ApiCommand::VirtualExchange(VirtualExchangeCommand::GetOrders)
+        ));
+    }
+
+    #[test]
+    fn route_post_replay_orders_not_found() {
+        // POST はマッチしない（GET のみ）
+        let result = route("POST", "/api/replay/orders", "");
+        assert!(matches!(result, Err(RouteError::NotFound)));
     }
 }

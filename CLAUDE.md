@@ -3,7 +3,13 @@
 ## プロジェクト概要
 
 flowsurface は Rust 製デスクトップアプリで、暗号資産マーケットのチャートプラットフォームです。
-`iced` GUI フレームワークを使用し、リアルタイムデータの表示・リプレイ機能を提供します。
+`iced` GUI フレームワークを使用し、リアルタイムデータの表示・リプレイ機能・仮想約定エンジンによる模擬取引を提供します。
+
+主要モジュール：
+- `src/replay/` — リプレイ制御・仮想約定エンジン（`virtual_exchange/`）
+- `src/connector/` — WebSocket ストリーム・注文送信（`order.rs`）・認証（`auth.rs`）
+- `src/replay_api.rs` — E2E テスト用 HTTP API（ポート 9876）
+- `src/screen/dashboard/panel/` — 注文入力・注文一覧・買付余力パネル
 
 ## 技術スタック
 
@@ -33,6 +39,10 @@ cargo fmt --check
 
 # コンパイル確認（高速）
 cargo check
+
+# E2E テスト（アプリ起動後、別ターミナルで実行）
+bash tests/e2e_scripts/s1_basic_lifecycle.sh   # 例：個別スクリプト
+# HTTP API はポート 9876 で受け付け（replay_api.rs）
 ```
 
 ## スキルの使い方ガイド

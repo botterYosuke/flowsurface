@@ -17,6 +17,8 @@
 # 注意: inject-master / inject-daily-history エンドポイントは現在未実装のため、
 #       実際の Tachibana セッション（keyring）を使用する。
 #       セッションが存在しない環境では TC-A は SKIP される。
+#
+# 前提条件: DEV_USER_ID / DEV_PASSWORD 環境変数が設定済みであること
 set -euo pipefail
 source "$(dirname "$0")/common_helpers.sh"
 
@@ -53,6 +55,11 @@ cat > "$DATA_DIR/saved-state.json" <<EOF
   "timezone":"UTC","trade_fetch_enabled":false,"size_in_quote_ccy":"Base"
 }
 EOF
+
+if [ -z "${DEV_USER_ID:-}" ] || [ -z "${DEV_PASSWORD:-}" ]; then
+  echo "  SKIP: DEV_USER_ID / DEV_PASSWORD が未設定 — Tachibana セッション不要環境ではスキップ"
+  exit 0
+fi
 
 start_app
 
