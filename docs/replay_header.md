@@ -1,7 +1,7 @@
 # リプレイ機能 仕様書
 
-**最終更新**: 2026-04-15
-**対象バージョン**: `sasa/develop` ブランチ (Phase 1〜8 + Tachibana Phase 1〜3 + R3 アーキテクチャ刷新 + Fixture 直接起動 + Auto-play タイムアウト廃止 + R4-1 Dead Code 除去 + R4-2 フィールド非公開化 + R4-5 テストヘルパー共通化 + R4-3 ReplaySession State Machine 導入 + R4-4 ReplayMessage 責務分割 + P1 seek_to 統一 + P2 play_with_range 追加 + Play リセット時の speed 引き継ぎ 完了)
+**最終更新**: 2026-04-16
+**対象バージョン**: `sasa/virtual` ブランチ (Phase 1〜8 + Tachibana Phase 1〜3 + R3 アーキテクチャ刷新 + Fixture 直接起動 + Auto-play タイムアウト廃止 + R4-1 Dead Code 除去 + R4-2 フィールド非公開化 + R4-5 テストヘルパー共通化 + R4-3 ReplaySession State Machine 導入 + R4-4 ReplayMessage 責務分割 + P1 seek_to 統一 + P2 play_with_range 追加 + Play リセット時の speed 引き継ぎ + **仮想約定エンジン（VirtualExchangeEngine）** 完了)
 **関連ドキュメント**:
 - [docs/plan/replay_redesign.md](plan/replay_redesign.md) — R1〜R3 リファクタ計画と実装ログ
 - [docs/plan/replay_bar_step_loop.md](plan/replay_bar_step_loop.md) — StepClock / EventStore / dispatch_tick 設計
@@ -41,7 +41,7 @@ flowsurface のリプレイ機能は、取引所 API から取得した過去の
 
 > 観察 → 仮説 → エントリー → 結果 → 改善
 
-仮想売買・PnL・スコアリングといった後続ステップは本機能のスコープ外で、本機能はそれらの土台となる「決定論的なデータ再生基盤」を提供する。
+本機能はゲームループの土台となる「決定論的なデータ再生基盤」と、REPLAY モードでの仮想売買・PnL 管理を提供する。スコアリング・強化学習連携（Phase 2）は別タスク。
 
 ### 1.1 主な機能
 
@@ -53,16 +53,19 @@ flowsurface のリプレイ機能は、取引所 API から取得した過去の
 | 再生速度 | 1x / 2x / 5x / 10x の循環切替 |
 | EventStore ベース再生 | kline・trades を `EventStore` に一括ロードし、バーステップ単位で dispatch |
 | mid-replay ペイン操作 | リプレイ中のペイン追加・削除・timeframe / ticker 変更 |
-| HTTP 制御 API | `127.0.0.1:9876` でリプレイ・ペイン操作を外部から駆動 |
+| HTTP 制御 API | `127.0.0.1:9876` でリプレイ・ペイン操作・仮想注文を外部から駆動 |
 | E2E テスト支援 | `POST /api/app/save` で状態をディスク保存 |
 | **起動時自動再生** | `saved-state.json` に replay 構成が含まれる場合、全ペイン Ready になった瞬間に自動 Play |
+| **仮想約定エンジン** | REPLAY 中に成行・指値注文を受け付け、tick ごとに約定判定。`VirtualPortfolio` で PnL 管理 |
 
 ### 1.2 非ゴール
 
 - 板情報（Depth）の再生 — 取引所 API が過去スナップショットを提供しない
 - Comparison ペインのリプレイ — 複数銘柄同期は将来課題
 - リプレイ中の Layout 切替 — `active_dashboard()` が変わる動作は未定義
-- インジケータ再計算 / 仮想売買 — 別タスク
+- インジケータ再計算 — 別タスク
+- 複数銘柄同時ポジションの PnL 計算 — Phase 2 で `HashMap<ticker, price>` に拡張予定（現状は単一銘柄制約）
+- スコアリング / 強化学習連携 — Phase 2（Python SDK 経由）
 
 ---
 
@@ -766,6 +769,41 @@ fn subscription(&self) -> Subscription<Message> {
 | POST | `/api/replay/step-backward` | — | `ReplayStatus` | `StepBackward` |
 | POST | `/api/replay/speed` | — | `ReplayStatus` | `CycleSpeed` |
 
+#### 仮想約定エンジン (`/api/replay/order`, `/api/replay/portfolio`, `/api/replay/state`)
+
+REPLAY モード専用。LIVE モード時は 400 を返す。
+
+| メソッド | パス | リクエストボディ | レスポンス |
+|---|---|---|---|
+| POST | `/api/replay/order` | `VirtualOrderRequest` (下記参照) | `{"order_id": "<uuid>", "status": "pending"}` |
+| GET | `/api/replay/portfolio` | — | `PortfolioSnapshot` (下記参照) |
+| GET | `/api/replay/state` | — | `{"current_time_ms": <u64>, "not_implemented": true}` ※骨格のみ |
+
+**`VirtualOrderRequest` リクエストボディ**:
+
+```json
+{
+  "ticker": "BTCUSDT",
+  "side": "buy",
+  "qty": 0.1,
+  "order_type": "market"
+}
+```
+
+| フィールド | 型 | 値 |
+|---|---|---|
+| `ticker` | string | 銘柄コード（例: `"BTCUSDT"`） |
+| `side` | string | `"buy"` \| `"sell"` |
+| `qty` | number | 注文数量 |
+| `order_type` | string \| object | `"market"` または `{"limit": 92500.0}` |
+
+**約定ルール**:
+- 注文受付（`place_order`）は即時に `Pending` 状態で登録され、約定は次の tick まで保留
+- 成行注文: その tick の最初の Trade 価格で約定
+- 指値買い: `trade.price <= limit_price` のトレードが来た tick で約定
+- 指値売り: `trade.price >= limit_price` のトレードが来た tick で約定
+- seek（StepBackward / Play リセット）時にすべての注文・ポジションがリセットされる
+
 #### 認証確認 (`/api/auth/*`)
 
 | メソッド | パス | リクエストボディ | レスポンス | 対応コマンド |
@@ -855,6 +893,41 @@ pub struct ReplayStatus {
   "range_end": "2026-04-01 15:00"
 }
 ```
+
+#### `PortfolioSnapshot` (`GET /api/replay/portfolio`)
+
+```json
+{
+  "cash": 1000000.0,
+  "unrealized_pnl": 230.5,
+  "realized_pnl": 1200.0,
+  "total_equity": 1001430.5,
+  "open_positions": [
+    {
+      "order_id": "<uuid>",
+      "ticker": "BTCUSDT",
+      "side": "Long",
+      "qty": 0.1,
+      "entry_price": 92500.0,
+      "entry_time_ms": 1743492600000,
+      "exit_price": null,
+      "realized_pnl": null
+    }
+  ],
+  "closed_positions": [...]
+}
+```
+
+| フィールド | 型 | 説明 |
+|---|---|---|
+| `cash` | number | 現在の現金残高（初期値 1,000,000.0 固定）|
+| `unrealized_pnl` | number | 未実現PnL（単一銘柄制約、複数銘柄は Phase 2）|
+| `realized_pnl` | number | 実現PnL 合計 |
+| `total_equity` | number | `cash + unrealized_pnl` |
+| `open_positions` | array | オープン中のポジション一覧 |
+| `closed_positions` | array | クローズ済みポジション一覧 |
+
+`side` は `"Long"` \| `"Short"`。seek リセット後は全フィールドが初期値に戻る。
 
 #### ペインリスト (`GET /api/pane/list`)
 
@@ -1017,10 +1090,14 @@ curl -X POST http://127.0.0.1:9876/api/app/save
 | [src/replay/dispatcher.rs](../src/replay/dispatcher.rs) | `dispatch_tick` / `DispatchResult` |
 | [src/replay/loader.rs](../src/replay/loader.rs) | `load_klines` / `KlineLoadResult` / `fetch_all_klines` |
 | [src/replay/testutil.rs](../src/replay/testutil.rs) | テスト共通ヘルパー (`#[cfg(test)]`)。`dummy_trade` / `dummy_kline` / `trade_stream` / `kline_stream` を提供。`dispatcher.rs` / `store.rs` / `loader.rs` の各テストモジュールで使用 |
-| [src/replay_api.rs](../src/replay_api.rs) | HTTP サーバー (`tokio::net::TcpListener` + 手動パース) / `ApiCommand` / `PaneCommand` / `ReplySender` / ルーティング |
-| [src/main.rs](../src/main.rs) | `Flowsurface` への `replay` フィールド、起動時 `pending_auto_play` 初期化、`Message::Replay` / `Message::ReplayApi` ハンドラ、auto-play ゲート（`ResolveStreams` + `Tick`）、`view_replay_header()`、`subscription()`、`handle_pane_api()` |
-| [src/screen/dashboard.rs](../src/screen/dashboard.rs) | `prepare_replay()` / `rebuild_for_live()` / `collect_trade_streams()` / `ingest_replay_klines()` / `ingest_trades()` / `all_panes_have_ready_streams()` |
-| [src/screen/dashboard/pane.rs](../src/screen/dashboard/pane.rs) | `rebuild_content_for_replay()` / `rebuild_content_for_live()` / `ingest_replay_klines()` / `reset_for_seek()` / `insert_hist_klines()` / Heatmap の Depth unavailable オーバーレイ |
+| [src/replay/virtual_exchange/mod.rs](../src/replay/virtual_exchange/mod.rs) | `VirtualExchangeEngine` — 公開エントリーポイント。`place_order()` / `on_tick()` / `reset()` / `portfolio_snapshot()` |
+| [src/replay/virtual_exchange/order_book.rs](../src/replay/virtual_exchange/order_book.rs) | `VirtualOrderBook` / `VirtualOrder` / `VirtualOrderType` / `VirtualOrderStatus` / `FillEvent` — 注文受付・約定判定（成行・指値）|
+| [src/replay/virtual_exchange/portfolio.rs](../src/replay/virtual_exchange/portfolio.rs) | `VirtualPortfolio` / `Position` / `PositionSide` / `PortfolioSnapshot` / `PositionSnapshot` — ポジション・PnL 管理 |
+| [src/replay_api.rs](../src/replay_api.rs) | HTTP サーバー (`tokio::net::TcpListener` + 手動パース) / `ApiCommand` / `PaneCommand` / `ReplySender` / ルーティング。`POST /api/replay/order` / `GET /api/replay/portfolio` / `GET /api/replay/state` を含む |
+| [src/main.rs](../src/main.rs) | `Flowsurface` への `replay` / `virtual_engine` フィールド、起動時 `pending_auto_play` 初期化、`Message::Replay` / `Message::ReplayApi` ハンドラ、auto-play ゲート（`ResolveStreams` + `Tick`）、`on_tick` フック、`view_replay_header()`、`subscription()`、`handle_pane_api()` |
+| [src/screen/dashboard.rs](../src/screen/dashboard.rs) | `prepare_replay()` / `rebuild_for_live()` / `collect_trade_streams()` / `ingest_replay_klines()` / `ingest_trades()` / `all_panes_have_ready_streams()` / `is_replay: bool` フィールド（発注ガード用）|
+| [src/screen/dashboard/pane.rs](../src/screen/dashboard/pane.rs) | `rebuild_content_for_replay()` / `rebuild_content_for_live()` / `ingest_replay_klines()` / `reset_for_seek()` / `insert_hist_klines()` / `Effect::SubmitVirtualOrder` / `is_virtual_mode` フィールド / Heatmap の Depth unavailable オーバーレイ |
+| [src/screen/dashboard/panel/order_entry.rs](../src/screen/dashboard/panel/order_entry.rs) | `OrderEntryPanel` — `is_virtual` フラグによる仮想注文モード UI（バナー表示・パスワード非表示）|
 | [src/chart/kline.rs](../src/chart/kline.rs) | `ingest_historical_klines()` / `reset_for_seek()` |
 | [src/connector/fetcher.rs](../src/connector/fetcher.rs) | Tachibana D1 range フィルタ分岐 |
 
@@ -1033,6 +1110,8 @@ curl -X POST http://127.0.0.1:9876/api/app/save
 - `src/replay/dispatcher.rs`: `dispatch_tick` のスライス抽出 / Waiting 検出 / 終端判定
 - `src/replay/testutil.rs`: テストヘルパー（`#[cfg(test)]`）— `dummy_trade` / `dummy_kline` / `trade_stream` / `kline_stream`
 - `src/replay/loader.rs`: `EventStore` 直接操作で loader 動作を検証
+- `src/replay/virtual_exchange/order_book.rs`: `VirtualOrderBook` ユニットテスト 7 件（成行・指値買い・指値売り・未達・往復PnL・リセット・ticker 不一致）
+- `src/replay/virtual_exchange/portfolio.rs`: `VirtualPortfolio` ユニットテスト 4 件（ロング未実現・ショート未実現・実現・スナップショット）
 - `src/chart/kline.rs`: `ingest_historical_klines` / `reset_for_seek`
 - `src/screen/dashboard.rs`: `all_panes_have_ready_streams` の true/false 条件
 - `src/replay_api.rs`: ルーター/パーサーテスト

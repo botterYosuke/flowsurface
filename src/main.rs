@@ -151,6 +151,9 @@ struct Flowsurface {
     theme: data::Theme,
     notifications: Notifications,
     replay: ReplayController,
+    /// REPLAYモードの仮想約定エンジン。
+    /// HTTP API は `Message::ReplayApi` 経由でアクセスするため Arc<Mutex> 不要。
+    virtual_engine: Option<replay::virtual_exchange::VirtualExchangeEngine>,
 }
 
 #[derive(Debug, Clone)]
@@ -227,6 +230,7 @@ impl Flowsurface {
                     replay_mode == replay::ReplayMode::Replay && has_valid_range;
                 ReplayController::from_saved(replay_mode, range_start, range_end, pending_auto_play)
             },
+            virtual_engine: None,
         };
 
         if let Some(err) = audio_init_err {
@@ -314,13 +318,15 @@ impl Flowsurface {
                     ..Default::default()
                 });
                 self.login_window = Some(login_window_id);
-                // ↓↓↓ DEV AUTO-LOGIN: 戻すときはこの return を削除 ↓↓↓
-                return Task::batch([
-                    open_login_window.discard(),
-                    Task::done(Message::Login(login::Message::LoginSubmit)),
-                ]);
-                // ↑↑↑ DEV AUTO-LOGIN ↑↑↑
-                #[allow(unreachable_code)]
+                #[cfg(debug_assertions)]
+                {
+                    // DEV AUTO-LOGIN: リリースビルドでは削除される
+                    return Task::batch([
+                        open_login_window.discard(),
+                        Task::done(Message::Login(login::Message::LoginSubmit)),
+                    ]);
+                }
+                #[cfg(not(debug_assertions))]
                 return open_login_window.discard();
             }
             Message::MarketWsEvent(event) => {
@@ -375,20 +381,37 @@ impl Flowsurface {
                 // リプレイ再生中: tick() でイベントを抽出してチャートに注入する
                 if self.replay.is_replay() {
                     // layout_manager と replay は別フィールドなので同時可変借用が成立する
-                    let active_id = self
-                        .layout_manager
-                        .active_layout_id()
-                        .expect("No active layout")
-                        .unique;
-                    let dashboard = self
+                    let Some(active_id) = self.layout_manager.active_layout_id().map(|l| l.unique)
+                    else {
+                        return Task::none();
+                    };
+                    let Some(dashboard) = self
                         .layout_manager
                         .get_mut(active_id)
                         .map(|l| &mut l.dashboard)
-                        .expect("No active dashboard");
+                    else {
+                        return Task::none();
+                    };
                     let outcome = self.replay.tick(now, dashboard, main_window_id);
 
                     // trades を heatmap 等に注入（Task が必要なため呼び出し側で処理）
+                    // 同時に VirtualExchangeEngine の on_tick も呼ぶ
                     for (stream, trades, update_t) in outcome.trade_events {
+                        // 仮想エンジンへの tick 通知
+                        if let Some(engine) = &mut self.virtual_engine {
+                            let ticker = stream.ticker_info().ticker.to_string();
+                            let clock_ms = self.replay.current_time_ms().unwrap_or(0);
+                            let fills = engine.on_tick(&ticker, &trades, clock_ms);
+                            for fill in fills {
+                                let fill_msg =
+                                    dashboard::Message::VirtualOrderFilled(fill);
+                                all_tasks.push(Task::done(Message::Dashboard {
+                                    layout_id: None,
+                                    event: fill_msg,
+                                }));
+                            }
+                        }
+
                         let task = self
                             .active_dashboard_mut()
                             .ingest_trades(&stream, &trades, update_t, main_window_id)
@@ -652,6 +675,14 @@ impl Flowsurface {
                             // 既知の不具合があるため Task::batch を使う。
                             // outer の main_task は Task::none() のため chain 不要。
                             return Task::batch([switch_task, replay_task]);
+                        }
+                        Some(dashboard::Event::SubmitVirtualOrder(vo)) => {
+                            if let Some(engine) = &mut self.virtual_engine {
+                                let _order_id = engine.place_order(vo);
+                            } else {
+                                log::warn!("仮想注文が来たが VirtualExchangeEngine が初期化されていません");
+                            }
+                            Task::none()
                         }
                         None => Task::none(),
                     };
@@ -970,20 +1001,64 @@ impl Flowsurface {
             Message::Replay(msg) => {
                 let main_window_id = self.main_window.id;
                 // layout_manager と replay は別フィールドなので同時可変借用が成立する
-                let active_id = self
-                    .layout_manager
-                    .active_layout_id()
-                    .expect("No active layout")
-                    .unique;
-                let dashboard = self
+                let Some(active_id) = self.layout_manager.active_layout_id().map(|l| l.unique)
+                else {
+                    return Task::none();
+                };
+                let Some(dashboard) = self
                     .layout_manager
                     .get_mut(active_id)
                     .map(|l| &mut l.dashboard)
-                    .expect("No active dashboard");
+                else {
+                    return Task::none();
+                };
+                let was_replay = self.replay.is_replay();
+                let time_before = self.replay.current_time_ms();
                 let (task, toast) = self.replay.handle_message(msg, dashboard, main_window_id);
+                let time_after = self.replay.current_time_ms();
                 if let Some(t) = toast {
                     self.notifications.push(t);
                 }
+                // replay 状態が切り替わった可能性があるため is_replay をシンクする
+                let is_replay_now = self.replay.is_replay();
+                self.active_dashboard_mut().is_replay = is_replay_now;
+                self.active_dashboard_mut().sync_virtual_mode(main_window_id);
+
+                // 仮想エンジンのライフサイクル管理:
+                // Live→Replay (Play): エンジンを生成/リセット
+                // Replay→Live: エンジンをリセット
+                // Seek (StepForward/StepBackward): 時刻変化を検出してリセット
+                if !was_replay && is_replay_now {
+                    // Replay 開始 → エンジンを初期化
+                    if self.virtual_engine.is_none() {
+                        self.virtual_engine = Some(
+                            replay::virtual_exchange::VirtualExchangeEngine::new(1_000_000.0),
+                        );
+                        log::info!("VirtualExchangeEngine を初期化しました（初期 cash: 1,000,000）");
+                    } else if let Some(engine) = &mut self.virtual_engine {
+                        engine.reset();
+                        log::info!("VirtualExchangeEngine をリセットしました（再プレイ）");
+                    }
+                } else if was_replay && !is_replay_now {
+                    // Replay 終了 → エンジンをリセット
+                    if let Some(engine) = &mut self.virtual_engine {
+                        engine.reset();
+                        log::info!("VirtualExchangeEngine をリセットしました（Live へ切替）");
+                    }
+                } else if is_replay_now
+                    && time_before != time_after
+                    && let Some(engine) = &mut self.virtual_engine
+                {
+                    // Replay 中の seek 操作（StepForward/StepBackward/range 変更）
+                    // 時刻が変化した場合にポジション状態をリセットする
+                    engine.reset();
+                    log::info!(
+                        "VirtualExchangeEngine をリセットしました（seek: {:?} → {:?}）",
+                        time_before,
+                        time_after
+                    );
+                }
+
                 return task.map(Message::Replay);
             }
             Message::ReplayApi((command, reply_tx)) => {
@@ -1078,6 +1153,67 @@ impl Flowsurface {
                     ApiCommand::Auth(cmd) => {
                         let body = self.handle_auth_api(cmd);
                         reply_tx.send(body);
+                    }
+                    ApiCommand::VirtualExchange(cmd) => {
+                        use replay_api::VirtualExchangeCommand;
+                        use replay::virtual_exchange::{PositionSide, VirtualOrder, VirtualOrderStatus, VirtualOrderType};
+
+                        match cmd {
+                            VirtualExchangeCommand::PlaceOrder {
+                                ticker, side, qty, order_type, limit_price,
+                            } => {
+                                if let Some(engine) = &mut self.virtual_engine {
+                                    let order_side = if side == "buy" {
+                                        PositionSide::Long
+                                    } else {
+                                        PositionSide::Short
+                                    };
+                                    let vo_type = if order_type == "limit" {
+                                        VirtualOrderType::Limit {
+                                            price: limit_price.unwrap_or(0.0),
+                                        }
+                                    } else {
+                                        VirtualOrderType::Market
+                                    };
+                                    let now_ms = self.replay.current_time_ms().unwrap_or(0);
+                                    let vo = VirtualOrder {
+                                        order_id: uuid::Uuid::new_v4().to_string(),
+                                        ticker,
+                                        side: order_side,
+                                        qty,
+                                        order_type: vo_type,
+                                        placed_time_ms: now_ms,
+                                        status: VirtualOrderStatus::Pending,
+                                    };
+                                    let order_id = engine.place_order(vo);
+                                    reply_tx.send(serde_json::json!({
+                                        "order_id": order_id,
+                                        "status": "pending"
+                                    }).to_string());
+                                } else {
+                                    reply_tx.send(r#"{"error":"VirtualExchangeEngine not initialized. Start replay first."}"#.to_string());
+                                }
+                            }
+                            VirtualExchangeCommand::GetPortfolio => {
+                                if let Some(engine) = &self.virtual_engine {
+                                    let snap = engine.portfolio_snapshot(0.0);
+                                    reply_tx.send(
+                                        serde_json::to_string(&snap)
+                                            .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string()),
+                                    );
+                                } else {
+                                    reply_tx.send(r#"{"error":"VirtualExchangeEngine not initialized."}"#.to_string());
+                                }
+                            }
+                            VirtualExchangeCommand::GetState => {
+                                // Phase 1 骨格のみ
+                                let now_ms = self.replay.current_time_ms().unwrap_or(0);
+                                reply_tx.send(serde_json::json!({
+                                    "current_time_ms": now_ms,
+                                    "not_implemented": true
+                                }).to_string());
+                            }
+                        }
                     }
                     #[cfg(debug_assertions)]
                     ApiCommand::Test(cmd) => {

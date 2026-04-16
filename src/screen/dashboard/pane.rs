@@ -62,6 +62,8 @@ pub enum Effect {
     SubmitNewOrder(exchange::adapter::tachibana::NewOrderRequest),
     SubmitCorrectOrder(exchange::adapter::tachibana::CorrectOrderRequest),
     SubmitCancelOrder(exchange::adapter::tachibana::CancelOrderRequest),
+    /// REPLAYモード専用：仮想注文を VirtualExchangeEngine に登録する
+    SubmitVirtualOrder(crate::replay::virtual_exchange::VirtualOrder),
     FetchOrders,
     FetchOrderDetail(String, String), // (order_num, eig_day)
     FetchBuyingPower,
@@ -134,6 +136,8 @@ pub struct State {
     pub streams: ResolvedStream,
     pub status: Status,
     pub link_group: Option<LinkGroup>,
+    /// true = REPLAYモード（仮想注文）。dashboard.rs から is_replay に連動して設定する。
+    pub is_virtual_mode: bool,
 }
 
 impl State {
@@ -1143,7 +1147,7 @@ impl State {
                 }
             }
             Content::OrderEntry(panel) => {
-                let base = panel.view(theme).map(move |msg| {
+                let base = panel.view(theme, is_replay).map(move |msg| {
                     Message::PaneEvent(id, Event::PanelInteraction(panel::Message::OrderEntry(msg)))
                 });
                 self.compose_stack_view(base, id, None, compact_controls, || column![].into(), None, tickers_table)
@@ -1274,10 +1278,16 @@ impl State {
                 (Content::Ladder(Some(p)), msg) => super::panel::update(p, msg),
                 (Content::TimeAndSales(Some(p)), msg) => super::panel::update(p, msg),
                 (Content::OrderEntry(panel), panel::Message::OrderEntry(msg)) => {
+                    let is_virtual = self.is_virtual_mode;
                     if let Some(action) = panel.update(msg) {
                         return match action {
                             panel::order_entry::Action::Submit(req) => {
-                                Some(Effect::SubmitNewOrder(*req))
+                                if is_virtual {
+                                    virtual_order_from_new_order_request(&req)
+                                        .map(Effect::SubmitVirtualOrder)
+                                } else {
+                                    Some(Effect::SubmitNewOrder(*req))
+                                }
                             }
                             panel::order_entry::Action::FetchHoldings { issue_code } => {
                                 Some(Effect::FetchHoldings { issue_code })
@@ -2038,6 +2048,7 @@ impl Default for State {
             notifications: vec![],
             status: Status::Ready,
             link_group: None,
+            is_virtual_mode: false,
         }
     }
 }
@@ -2624,6 +2635,47 @@ fn by_basis_default<T>(
         Basis::Time(tf) => on_time(tf),
         Basis::Tick(_) => on_tick(),
     }
+}
+
+/// `NewOrderRequest` を `VirtualOrder` に変換するヘルパー。
+/// `placed_time_ms` は 0 とする（main.rs でクロック時刻が必要な場合は呼び出し側で上書きする）。
+/// 価格・数量のパース失敗時は `None` を返す（サイレントに 0.0 へ変換しない）。
+fn virtual_order_from_new_order_request(
+    req: &exchange::adapter::tachibana::NewOrderRequest,
+) -> Option<crate::replay::virtual_exchange::VirtualOrder> {
+    use crate::replay::virtual_exchange::{PositionSide, VirtualOrder, VirtualOrderStatus, VirtualOrderType};
+
+    // tachibana API: side "3" = 買い, "1" = 売り
+    let side = if req.side == "3" {
+        PositionSide::Long
+    } else {
+        PositionSide::Short
+    };
+
+    let order_type = if req.price == "0" {
+        VirtualOrderType::Market
+    } else {
+        let Ok(price) = req.price.parse::<f64>() else {
+            log::warn!("仮想注文: 指値価格のパース失敗 ({:?}) — 注文を破棄", req.price);
+            return None;
+        };
+        VirtualOrderType::Limit { price }
+    };
+
+    let Ok(qty) = req.qty.parse::<f64>() else {
+        log::warn!("仮想注文: 数量のパース失敗 ({:?}) — 注文を破棄", req.qty);
+        return None;
+    };
+
+    Some(VirtualOrder {
+        order_id: uuid::Uuid::new_v4().to_string(),
+        ticker: req.issue_code.clone(),
+        side,
+        qty,
+        order_type,
+        placed_time_ms: 0,
+        status: VirtualOrderStatus::Pending,
+    })
 }
 
 #[cfg(test)]

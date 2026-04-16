@@ -13,9 +13,28 @@ pub enum ApiCommand {
     Pane(PaneCommand),
     /// 認証状態確認コマンド（テスト・デバッグ用、本番ビルドにも含まれる）。
     Auth(AuthCommand),
+    /// 仮想約定エンジンコマンド（Phase 2 互換）。
+    VirtualExchange(VirtualExchangeCommand),
     /// E2E テスト用コマンド（debug ビルドで有効）。
     #[cfg(debug_assertions)]
     Test(TestCommand),
+}
+
+/// 仮想約定エンジン API コマンド。
+#[derive(Debug, Clone)]
+pub enum VirtualExchangeCommand {
+    /// 仮想注文を登録する（POST /api/replay/order）
+    PlaceOrder {
+        ticker: String,
+        side: String,   // "buy" | "sell"
+        qty: f64,
+        order_type: String,  // "market" | "limit"
+        limit_price: Option<f64>,
+    },
+    /// ポートフォリオスナップショットを取得する（GET /api/replay/portfolio）
+    GetPortfolio,
+    /// 観測データを取得する（GET /api/replay/state）— Phase 1 骨格のみ
+    GetState,
 }
 
 /// 認証状態確認コマンド。
@@ -296,6 +315,15 @@ fn route(method: &str, path: &str, body: &str) -> Result<ApiCommand, RouteError>
         ("GET", "/api/notification/list") => Ok(ApiCommand::Pane(PaneCommand::ListNotifications)),
         ("POST", "/api/sidebar/select-ticker") => parse_sidebar_select_ticker(body),
 
+        // ── 仮想約定エンジン（Phase 2 互換）──────────────────────────────
+        ("POST", "/api/replay/order") => parse_virtual_order_command(body),
+        ("GET", "/api/replay/portfolio") => {
+            Ok(ApiCommand::VirtualExchange(VirtualExchangeCommand::GetPortfolio))
+        }
+        ("GET", "/api/replay/state") => {
+            Ok(ApiCommand::VirtualExchange(VirtualExchangeCommand::GetState))
+        }
+
         // ── debug ビルドで有効（keyring クリア） ─────────────────────────
         #[cfg(debug_assertions)]
         ("POST", "/api/test/tachibana/delete-persisted-session") => Ok(ApiCommand::Test(
@@ -304,6 +332,58 @@ fn route(method: &str, path: &str, body: &str) -> Result<ApiCommand, RouteError>
 
         _ => Err(RouteError::NotFound),
     }
+}
+
+/// `POST /api/replay/order` のボディをパースして ApiCommand を返す。
+fn parse_virtual_order_command(body: &str) -> Result<ApiCommand, RouteError> {
+    let parsed: serde_json::Value =
+        serde_json::from_str(body).map_err(|_| RouteError::BadRequest)?;
+
+    let ticker = parsed
+        .get("ticker")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .ok_or(RouteError::BadRequest)?;
+
+    let side = parsed
+        .get("side")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_lowercase())
+        .ok_or(RouteError::BadRequest)?;
+
+    if side != "buy" && side != "sell" {
+        return Err(RouteError::BadRequest);
+    }
+
+    let qty = parsed
+        .get("qty")
+        .and_then(|v| v.as_f64())
+        .ok_or(RouteError::BadRequest)?;
+
+    let (order_type, limit_price) = if let Some(ot) = parsed.get("order_type") {
+        match ot {
+            serde_json::Value::String(s) if s == "market" => ("market".to_string(), None),
+            serde_json::Value::Object(obj) if obj.contains_key("limit") => {
+                let lp = obj
+                    .get("limit")
+                    .and_then(|v| v.as_f64())
+                    .ok_or(RouteError::BadRequest)?;
+                ("limit".to_string(), Some(lp))
+            }
+            _ => return Err(RouteError::BadRequest),
+        }
+    } else {
+        // order_type 省略 → market
+        ("market".to_string(), None)
+    };
+
+    Ok(ApiCommand::VirtualExchange(VirtualExchangeCommand::PlaceOrder {
+        ticker,
+        side,
+        qty,
+        order_type,
+        limit_price,
+    }))
 }
 
 /// URL パスのクエリ文字列から指定キーの値を取り出す。

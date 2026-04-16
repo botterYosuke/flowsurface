@@ -1,8 +1,8 @@
-# 注文機能追加計画
+# 注文機能仕様書
 
 ## 概要
 
-flowsurface に立花証券 e 支店 API を使った注文機能を追加する。
+flowsurface に立花証券 e 支店 API を使った注文機能を追加した。
 **注文発注がメイン**。照会・余力確認はそれを支える補助機能。
 
 | ウィンドウ / 機能 | 役割 | 使用 API |
@@ -12,6 +12,7 @@ flowsurface に立花証券 e 支店 API を使った注文機能を追加する
 | **注文約定照会パネル** | 注文一覧と約定状況の確認 | CLMOrderList / CLMOrderListDetail |
 | **余力情報パネル** | 買付可能額・保証金率の確認 | CLMZanKaiKanougaku / CLMZanShinkiKanoIjiritu |
 | **保有株数取得** | 売り注文時の全数量ボタン | CLMGenbutuKabuList |
+| **仮想注文モード (REPLAY)** | REPLAY 中の疑似発注・PnL トラッキング | 内部エンジン（証券 API 不使用） |
 
 ---
 
@@ -32,10 +33,13 @@ flowsurface に立花証券 e 支店 API を使った注文機能を追加する
 | `sOrderSuryou` | 注文株数 | 例: "100" |
 | `sGenkinShinyouKubun` | 現物/信用区分 | 0=現物, 2=信用新規(制度6ヶ月), 4=信用返済(制度), 6=信用新規(一般), 8=信用返済(一般) |
 | `sOrderExpireDay` | 注文期日 | "0"=当日, YYYYMMDD=期日指定(10営業日以内) |
-| `sGyakusasiOrderType` | 逆指値種別 | 0=通常, 1=逆指値, 2=通常+逆指値 |
-| `sGyakusasiZyouken` | 逆指値条件（トリガー価格） | "0"=指定なし, 数値 |
-| `sGyakusasiPrice` | 逆指値値段 | "*"=指定なし, "0"=成行, 数値=指値 |
+| `sGyakusasiOrderType` | 逆指値種別 | 0=通常（現在は "0" 固定） |
+| `sGyakusasiZyouken` | 逆指値条件（トリガー価格） | "0"=指定なし（現在は固定） |
+| `sGyakusasiPrice` | 逆指値値段 | "*"=指定なし（現在は固定） |
 | `sSecondPassword` | **第二パスワード（必須）** | 発注パスワード |
+
+> **逆指値フィールド**は `serialize_order_request()` 内で常に通常注文の固定値を付与する。
+> 逆指値 UI は将来フェーズで追加する。
 
 **レスポンス主要フィールド:**
 
@@ -96,6 +100,11 @@ flowsurface に立花証券 e 支店 API を使った注文機能を追加する
 | `sOrderStatus` | 状態名称（テキスト） |
 | `sOrderYakuzyouSuryo` | 約定株数 |
 | `sOrderYakuzyouPrice` | 約定単価 |
+| `sOrderEigyouDay` | 営業日（暫定フィールド名。実 API で確認要） |
+
+> **⚠️ 要注意**: `sOrderEigyouDay` は暫定フィールド名。実際の CLMOrderList レスポンスで
+> 別のフィールド名が使われている場合、`eig_day` が `""` になり訂正・取消 API 呼び出し時に
+> エラーが発生する。実注文照会のログで確認が必要。
 
 ### CLMOrderListDetail（約定明細）
 
@@ -148,66 +157,62 @@ flowsurface に立花証券 e 支店 API を使った注文機能を追加する
 
 ---
 
-## 実装フェーズ
+## アーキテクチャ
 
-フェーズの実行順序:
+### リクエスト送信の仕組み
 
+全注文 API は `serialize_order_request()` ヘルパーを通じて送信する。
+
+```rust
+// exchange/src/adapter/tachibana.rs
+// p_no / p_sd_date / sCLMID / sJsonOfmt を動的にマージして URL クエリに付加する
+pub fn serialize_order_request<T: Serialize>(
+    clm_id: &'static str,
+    req: &T,
+) -> Result<String, TachibanaError>
 ```
-フェーズ 1（API 型）→ フェーズ 2（data 拡張）→ フェーズ 7-骨格（型コンパイル確認）
-  → フェーズ 3（注文入力）→ フェーズ 4（訂正・取消）→ フェーズ 5（照会）
-  → フェーズ 6（余力）→ フェーズ 7-完成（connector 接続）→ フェーズ 8（スタイル）
+
+各リクエスト struct は業務フィールドのみを持ち、共通フィールド（`p_no` 等）は
+`serialize_order_request()` が自動付与する。これは既存の `build_api_url_from()` とは
+別の方式として注文 API 向けに実装された。
+
+### レスポンスのエラー判定
+
+全レスポンスは `ApiResponse<T>` でラップし、`check()` でエラー判定する。
+
+```rust
+let resp: ApiResponse<NewOrderResponse> = serde_json::from_str(&body)?;
+let data = resp.check()?;  // sResultCode != "0" → TachibanaError
 ```
 
-> フェーズ 7 の骨格（Content enum / Effect の variant 追加のみ）を先に入れてコンパイルを通しておく。
-> 各パネルの実装が進むにつれて徐々に肉付けする。
+### 営業日の管理
+
+`dashboard.rs` が `Option<String>` の `eig_day` フィールドを保持する。
+初回 `submit_new_order()` 成功後に `NewOrderResponse.eig_day` をセットする。
+発注前に注文照会を開いた場合は `eig_day_or_today()` でローカル時計から当日日付を生成する。
+
+```rust
+// dashboard.rs
+fn eig_day_or_today(&self) -> String {
+    self.eig_day.clone().unwrap_or_else(|| {
+        chrono::Local::now().format("%Y%m%d").to_string()
+    })
+}
+```
 
 ---
 
-## フェーズ 1: API 型定義（`exchange` クレート）
+## API 型定義（`exchange` クレート）
 
 **ファイル**: `exchange/src/adapter/tachibana.rs`
 
-### 設計方針
-
-- `p_no`（リクエスト通番）・`p_sd_date`（接続日付）・`sCLMID`・`sJsonOfmt` は
-  **既存パターン通り各構造体フィールドに含め、`new()` で自動生成する**。
-  `build_api_url_from(&req)` は構造体をそのまま JSON シリアライズするため、
-  フィールドに含まれていないと API が受け付けない（`LoginRequest`, `MarketPriceRequest`,
-  `DailyHistoryRequest` すべて同パターン）。
-  > `build_request_body()` というヘルパーは存在しない。
-  > 全リクエストは `build_api_url_from()` → URL クエリに JSON をそのまま付加する方式。
-
-- 逆指値フィールド（`sGyakusasiOrderType` 等）は初期実装では常に
-  通常注文固定値（`"0"` / `"*"`）を `new()` 内で固定付与する。
-  逆指値 UI は後続フェーズで追加する。
-
-- **レスポンスは既存の `ApiResponse<T>` ラッパーに統一する。**
-  全レスポンスは `ApiResponse<T>` でラップし、`check()` でエラー判定する。
-
-  ```rust
-  // 既存パターン（再掲）
-  let resp: ApiResponse<NewOrderResponse> = serde_json::from_str(&body)?;
-  let data = resp.check()?;  // sResultCode != "0" → TachibanaError
-  ```
-
-- `second_password` を含む構造体には **`#[derive(Debug)]` を付けない**
-  （`Debug` を手動実装するか `secrecy` クレートを使う）。
-
-### 1-1. 注文発注 API 型
+### 注文発注 API 型
 
 ```rust
-// 新規注文リクエスト
-// NOTE: second_password を含むため #[derive(Debug)] を付けない → Debug を手動実装
-#[derive(Serialize)]
+// 新規注文リクエスト（業務フィールドのみ。共通フィールドは serialize_order_request() が付与）
+// second_password を含むため #[derive(Debug)] 不可 → Debug を手動実装
+#[derive(Clone, Serialize)]
 pub struct NewOrderRequest {
-    // 共通フィールド（new() で自動生成）
-    pub p_no: String,
-    pub p_sd_date: String,
-    #[serde(rename = "sCLMID")]
-    pub clm_id: &'static str,           // "CLMKabuNewOrder"
-    #[serde(rename = "sJsonOfmt")]
-    pub json_ofmt: &'static str,        // "5"
-    // 業務フィールド
     #[serde(rename = "sZyoutoekiKazeiC")]
     pub account_type: String,           // 1=特定, 3=一般, 5=NISA, 6=N成長
     #[serde(rename = "sIssueCode")]
@@ -226,36 +231,8 @@ pub struct NewOrderRequest {
     pub cash_margin: String,            // "0"=現物, "2"=信用新規(制度), ...
     #[serde(rename = "sOrderExpireDay")]
     pub expire_day: String,             // "0"=当日
-    // 逆指値（初期実装は通常注文固定。new() 内で設定）
-    #[serde(rename = "sGyakusasiOrderType")]
-    pub gyakusasi_order_type: &'static str,  // "0"=通常
-    #[serde(rename = "sGyakusasiZyouken")]
-    pub gyakusasi_zyouken: &'static str,     // "0"
-    #[serde(rename = "sGyakusasiPrice")]
-    pub gyakusasi_price: &'static str,       // "*"
     #[serde(rename = "sSecondPassword")]
     pub second_password: String,
-}
-
-impl NewOrderRequest {
-    pub fn new(
-        account_type: String, issue_code: String, market_code: String,
-        side: String, condition: String, price: String, qty: String,
-        cash_margin: String, expire_day: String, second_password: String,
-    ) -> Self {
-        Self {
-            p_no: next_p_no(),
-            p_sd_date: current_p_sd_date(),
-            clm_id: "CLMKabuNewOrder",
-            json_ofmt: "5",
-            account_type, issue_code, market_code, side, condition,
-            price, qty, cash_margin, expire_day,
-            gyakusasi_order_type: "0",
-            gyakusasi_zyouken: "0",
-            gyakusasi_price: "*",
-            second_password,
-        }
-    }
 }
 
 // Debug を手動実装（second_password をマスク）
@@ -272,7 +249,7 @@ impl std::fmt::Debug for NewOrderRequest {
 }
 
 // 新規注文レスポンス（ApiResponse<NewOrderResponse> でラップして使用）
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct NewOrderResponse {
     #[serde(rename = "sOrderNumber", default)]
     pub order_number: String,
@@ -294,130 +271,35 @@ pub struct NewOrderResponse {
     pub warning_text: String,
 }
 
-// 訂正注文リクエスト
-// NOTE: second_password を含むため #[derive(Debug)] を付けない → Debug を手動実装
-#[derive(Serialize)]
-pub struct CorrectOrderRequest {
-    // 共通フィールド（new() で自動生成）
-    pub p_no: String,
-    pub p_sd_date: String,
-    #[serde(rename = "sCLMID")]
-    pub clm_id: &'static str,           // "CLMKabuCorrectOrder"
-    #[serde(rename = "sJsonOfmt")]
-    pub json_ofmt: &'static str,        // "5"
-    // 業務フィールド
-    #[serde(rename = "sOrderNumber")]
-    pub order_number: String,
-    #[serde(rename = "sEigyouDay")]
-    pub eig_day: String,
-    #[serde(rename = "sCondition")]
-    pub condition: String,              // "*"=変更なし
-    #[serde(rename = "sOrderPrice")]
-    pub price: String,                  // "*"=変更なし, "0"=成行変更
-    #[serde(rename = "sOrderSuryou")]
-    pub qty: String,                    // "*"=変更なし（増株不可）
-    #[serde(rename = "sOrderExpireDay")]
-    pub expire_day: String,             // "*"=変更なし
-    #[serde(rename = "sSecondPassword")]
-    pub second_password: String,
-}
+// 訂正注文リクエスト（second_password を含むため Debug 手動実装）
+#[derive(Clone, Serialize)]
+pub struct CorrectOrderRequest { ... }
 
-impl CorrectOrderRequest {
-    pub fn new(
-        order_number: String, eig_day: String,
-        condition: String, price: String, qty: String,
-        expire_day: String, second_password: String,
-    ) -> Self {
-        Self {
-            p_no: next_p_no(),
-            p_sd_date: current_p_sd_date(),
-            clm_id: "CLMKabuCorrectOrder",
-            json_ofmt: "5",
-            order_number, eig_day, condition, price, qty, expire_day, second_password,
-        }
-    }
-}
-
-impl std::fmt::Debug for CorrectOrderRequest {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CorrectOrderRequest")
-            .field("order_number", &self.order_number)
-            .field("price", &self.price)
-            .field("qty", &self.qty)
-            .field("second_password", &"[REDACTED]")
-            .finish()
-    }
-}
-
-// 取消注文リクエスト
-// NOTE: second_password を含むため #[derive(Debug)] を付けない → Debug を手動実装
-#[derive(Serialize)]
-pub struct CancelOrderRequest {
-    // 共通フィールド（new() で自動生成）
-    pub p_no: String,
-    pub p_sd_date: String,
-    #[serde(rename = "sCLMID")]
-    pub clm_id: &'static str,           // "CLMKabuCancelOrder"
-    #[serde(rename = "sJsonOfmt")]
-    pub json_ofmt: &'static str,        // "5"
-    // 業務フィールド
-    #[serde(rename = "sOrderNumber")]
-    pub order_number: String,
-    #[serde(rename = "sEigyouDay")]
-    pub eig_day: String,
-    #[serde(rename = "sSecondPassword")]
-    pub second_password: String,
-}
-
-impl CancelOrderRequest {
-    pub fn new(
-        order_number: String, eig_day: String, second_password: String,
-    ) -> Self {
-        Self {
-            p_no: next_p_no(),
-            p_sd_date: current_p_sd_date(),
-            clm_id: "CLMKabuCancelOrder",
-            json_ofmt: "5",
-            order_number, eig_day, second_password,
-        }
-    }
-}
-
-impl std::fmt::Debug for CancelOrderRequest {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CancelOrderRequest")
-            .field("order_number", &self.order_number)
-            .field("second_password", &"[REDACTED]")
-            .finish()
-    }
-}
+// 取消注文リクエスト（second_password を含むため Debug 手動実装）
+#[derive(Clone, Serialize)]
+pub struct CancelOrderRequest { ... }
 
 // 訂正・取消共通レスポンス（ApiResponse<ModifyOrderResponse> でラップして使用）
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct ModifyOrderResponse {
-    #[serde(rename = "sOrderNumber", default)]
     pub order_number: String,
-    #[serde(rename = "sEigyouDay", default)]
     pub eig_day: String,
-    #[serde(rename = "sOrderDate", default)]
     pub order_datetime: String,
 }
 ```
 
-### 1-2. 注文照会 API 型
+> **`Clone` の要求**: `Effect` enum が `Debug + Clone` を要求するため、
+> 全リクエスト / レスポンス struct に `Clone` が必要。
+
+> **`Box<NewOrderRequest>`**: `NewOrderRequest` が 240 bytes のため、
+> `Action::Submit(Box<NewOrderRequest>)` として boxed にする（clippy 警告対応）。
+
+### 注文照会 API 型
 
 ```rust
 // 注文一覧リクエスト
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct OrderListRequest {
-    // 共通フィールド（new() で自動生成）
-    pub p_no: String,
-    pub p_sd_date: String,
-    #[serde(rename = "sCLMID")]
-    pub clm_id: &'static str,           // "CLMOrderList"
-    #[serde(rename = "sJsonOfmt")]
-    pub json_ofmt: &'static str,        // "5"
-    // 業務フィールド
     #[serde(rename = "sIssueCode")]
     pub issue_code: String,             // 空文字=全銘柄
     #[serde(rename = "sSikkouDay")]
@@ -426,19 +308,7 @@ pub struct OrderListRequest {
     pub status_filter: String,          // ""=全件
 }
 
-impl OrderListRequest {
-    pub fn new(issue_code: String, sikkou_day: String, status_filter: String) -> Self {
-        Self {
-            p_no: next_p_no(),
-            p_sd_date: current_p_sd_date(),
-            clm_id: "CLMOrderList",
-            json_ofmt: "5",
-            issue_code, sikkou_day, status_filter,
-        }
-    }
-}
-
-// 注文一覧レスポンス（配列フィールドを含むラッパー）
+// 注文一覧レスポンス
 #[derive(Debug, Deserialize)]
 pub struct OrderListResponse {
     #[serde(rename = "aOrderList", default)]
@@ -466,73 +336,27 @@ pub struct OrderRecord {
     pub executed_qty: String,
     #[serde(rename = "sOrderYakuzyouPrice", default)]
     pub executed_price: String,
-    // NOTE: 注文番号と営業日はペアで訂正・取消に使用。
-    // 実際のフィールド名は API リファレンス（mfds_json_api_ref_text.html）で
-    // CLMOrderList の aOrderList 要素を確認して rename を確定すること。
-    // 暫定: "sOrderEigyouDay" と仮定。フィールド名が違うとデシリアライズ時に
-    // default("") になり、取消・訂正 API に空文字を渡してエラーになるので要確認。
+    // ⚠️ 暫定: 実際のフィールド名は実 API レスポンスで確認が必要
     #[serde(rename = "sOrderEigyouDay", default)]
     pub eig_day: String,
 }
 
-// 約定明細リクエスト
-#[derive(Debug, Serialize)]
-pub struct OrderDetailRequest {
-    // 共通フィールド（new() で自動生成）
-    pub p_no: String,
-    pub p_sd_date: String,
-    #[serde(rename = "sCLMID")]
-    pub clm_id: &'static str,           // "CLMOrderListDetail"
-    #[serde(rename = "sJsonOfmt")]
-    pub json_ofmt: &'static str,        // "5"
-    // 業務フィールド
-    #[serde(rename = "sOrderNumber")]
-    pub order_num: String,
-    #[serde(rename = "sEigyouDay")]
-    pub eig_day: String,
-}
-
-impl OrderDetailRequest {
-    pub fn new(order_num: String, eig_day: String) -> Self {
-        Self {
-            p_no: next_p_no(),
-            p_sd_date: current_p_sd_date(),
-            clm_id: "CLMOrderListDetail",
-            json_ofmt: "5",
-            order_num, eig_day,
-        }
+impl OrderRecord {
+    // 取消可能判定（状態テキストで判定）
+    pub fn is_cancelable(&self) -> bool {
+        matches!(
+            self.status_text.as_str(),
+            "受付中" | "注文中" | "一部約定"
+        )
     }
-}
-
-// 約定明細レスポンス
-#[derive(Debug, Deserialize)]
-pub struct OrderDetailResponse {
-    #[serde(rename = "aYakuzyouSikkouList", default)]
-    pub executions: Vec<ExecutionRecord>,
-}
-
-// 約定明細レコード (1件)
-#[derive(Debug, Clone, Deserialize)]
-pub struct ExecutionRecord {
-    #[serde(rename = "sYakuzyouSuryou", default)]
-    pub exec_qty: String,
-    #[serde(rename = "sYakuzyouPrice", default)]
-    pub exec_price: String,
-    #[serde(rename = "sYakuzyouDate", default)]
-    pub exec_datetime: String,
 }
 ```
 
-> **注文状態の判定**: `CLMOrderList` の `sOrderStatus` は状態名称テキスト（"受付中" 等）。
-> 取消可能判定は `OrderRecord` に `is_cancelable() -> bool` メソッドを実装し、
-> テキストで判定する（"受付中" / "注文中" / "一部約定" を取消可能とする）。
-> ポーリングでの約定検出も同様にテキスト比較で実装する。
-
-### 1-3. 余力情報 API 型
+### 余力情報 API 型
 
 ```rust
-// 現物買付余力レスポンス（ApiResponse<BuyingPowerResponse> でラップして使用）
-#[derive(Debug, Deserialize)]
+// 現物買付余力レスポンス
+#[derive(Debug, Clone, Deserialize)]
 pub struct BuyingPowerResponse {
     #[serde(rename = "sSummaryGenkabuKaituke", default)]
     pub cash_buying_power: String,
@@ -542,8 +366,8 @@ pub struct BuyingPowerResponse {
     pub shortage_flag: String,
 }
 
-// 信用新規可能委託保証金率レスポンス（ApiResponse<MarginPowerResponse> でラップして使用）
-#[derive(Debug, Deserialize)]
+// 信用新規可能委託保証金率レスポンス
+#[derive(Debug, Clone, Deserialize)]
 pub struct MarginPowerResponse {
     #[serde(rename = "sSummarySinyouSinkidate", default)]
     pub margin_new_order_power: String,
@@ -554,65 +378,9 @@ pub struct MarginPowerResponse {
 }
 ```
 
-### 1-4. 保有株数 API 型
+### 保有株数 API 型
 
 ```rust
-// 現物買付余力リクエスト（フィールドなし → 共通フィールドのみ）
-#[derive(Debug, Serialize)]
-pub struct BuyingPowerRequest {
-    pub p_no: String,
-    pub p_sd_date: String,
-    #[serde(rename = "sCLMID")]
-    pub clm_id: &'static str,           // "CLMZanKaiKanougaku"
-    #[serde(rename = "sJsonOfmt")]
-    pub json_ofmt: &'static str,        // "5"
-}
-
-impl BuyingPowerRequest {
-    pub fn new() -> Self {
-        Self { p_no: next_p_no(), p_sd_date: current_p_sd_date(),
-               clm_id: "CLMZanKaiKanougaku", json_ofmt: "5" }
-    }
-}
-
-// 信用余力リクエスト
-#[derive(Debug, Serialize)]
-pub struct MarginPowerRequest {
-    pub p_no: String,
-    pub p_sd_date: String,
-    #[serde(rename = "sCLMID")]
-    pub clm_id: &'static str,           // "CLMZanShinkiKanoIjiritu"
-    #[serde(rename = "sJsonOfmt")]
-    pub json_ofmt: &'static str,        // "5"
-}
-
-impl MarginPowerRequest {
-    pub fn new() -> Self {
-        Self { p_no: next_p_no(), p_sd_date: current_p_sd_date(),
-               clm_id: "CLMZanShinkiKanoIjiritu", json_ofmt: "5" }
-    }
-}
-
-// 現物保有リクエスト
-#[derive(Debug, Serialize)]
-pub struct GenbutuKabuRequest {
-    pub p_no: String,
-    pub p_sd_date: String,
-    #[serde(rename = "sCLMID")]
-    pub clm_id: &'static str,           // "CLMGenbutuKabuList"
-    #[serde(rename = "sJsonOfmt")]
-    pub json_ofmt: &'static str,        // "5"
-    #[serde(rename = "sIssueCode")]
-    pub issue_code: String,             // 銘柄コード（空文字=全保有銘柄）
-}
-
-impl GenbutuKabuRequest {
-    pub fn new(issue_code: String) -> Self {
-        Self { p_no: next_p_no(), p_sd_date: current_p_sd_date(),
-               clm_id: "CLMGenbutuKabuList", json_ofmt: "5", issue_code }
-    }
-}
-
 // 現物保有レスポンス
 #[derive(Debug, Deserialize)]
 pub struct GenbutuKabuResponse {
@@ -632,43 +400,28 @@ pub struct HoldingRecord {
 }
 ```
 
-**テスト**:
-- 新規注文リクエストのシリアライズ（成行・指値の各パターン）
-- 新規注文レスポンスのデシリアライズ（正常・エラー・警告付き）
-- 訂正・取消リクエストのシリアライズ
-- `OrderRecord::is_cancelable()` の単体テスト
-
 ---
 
-## フェーズ 2: data クレート拡張
+## data クレート（`data/src/layout/pane.rs`）
 
-### 2-1. ContentKind 拡張
-
-**ファイル**: `data/src/layout/pane.rs`
+### ContentKind 拡張
 
 ```rust
 pub enum ContentKind {
-    // 既存...
+    // 既存 8 種類 ...
     OrderEntry,     // 注文入力パネル
     OrderList,      // 注文約定照会パネル
     BuyingPower,    // 余力情報パネル
 }
 
-// ALL 定数も忘れずに更新する
-pub const ALL: [ContentKind; N+3] = [
-    // 既存...
-    ContentKind::OrderEntry,
-    ContentKind::OrderList,
-    ContentKind::BuyingPower,
-];
+// ALL 定数: 11 要素
+pub const ALL: [ContentKind; 11] = [ ... ];
 ```
 
-### 2-2. Pane enum 拡張（レイアウト永続化）
+### Pane enum 拡張
 
-**ファイル**: `data/src/layout/pane.rs`（`ContentKind` と同じファイル）
-
-`Pane` enum はレイアウトの JSON 保存・復元に使われる。
-注文パネルは設定（stream / indicators / settings）を持たないため **ユニット variant** として追加する。
+注文パネルは設定（stream / indicators）を持たないため **ユニット variant** として追加。
+ユニット variant の追加は既存の保存済みレイアウト JSON のデシリアライズに影響しない。
 
 ```rust
 pub enum Pane {
@@ -679,122 +432,12 @@ pub enum Pane {
 }
 ```
 
-> **後方互換について**: ユニット variant の追加はデシリアライズを壊さない。
-> 既存の保存済みレイアウト JSON には新 variant が存在しないため、
-> 新コードで旧レイアウトを読み込んでも問題なし（新 variant が出現しないので）。
-> `#[serde(other)]` は **struct variant には使えない** ため、既存フィールドには適用しない。
-> 各フィールドの耐障害性は既存の `#[serde(deserialize_with = "ok_or_default", default)]` で対応済み。
-
-**テスト**: `ContentKind` / `Pane` の serde ラウンドトリップ
-
 ---
 
-## フェーズ 7-骨格: 型コンパイル確認（フェーズ 3〜6 の前に実施）
+## 注文入力パネル（`src/screen/dashboard/panel/order_entry.rs`）
 
-フェーズ 3〜6 の実装前に、型の骨格だけ追加してビルドを通す。
-中身（`view` / `update`）は `todo!()` でよい。
-
-### Content enum に variant を追加
-
-**ファイル**: `src/screen/dashboard/pane.rs`
-
-```rust
-pub enum Content {
-    // 既存...
-    OrderEntry(OrderEntryPanel),
-    OrderList(OrderListPanel),
-    BuyingPower(BuyingPowerPanel),
-}
-```
-
-### 非 canvas パネルの描画方針
-
-既存の `Heatmap`, `Kline`, `TimeAndSales`, `Ladder` 等は `panel::view()` 経由で
-`canvas::Program` として描画される。新パネルは `Panel` trait（`canvas::Program`）を
-実装せず、`view() -> Element<Message>` を直接返す。
-
-`pane.rs` の view/update match で専用アームを追加する:
-
-```rust
-// pane.rs の view 関数内（抜粋）
-Content::OrderEntry(panel) => panel.view().map(|msg| {
-    Message::PanelEvent(pane, panel::Message::OrderEntry(msg))
-}),
-Content::OrderList(panel) => panel.view().map(|msg| {
-    Message::PanelEvent(pane, panel::Message::OrderList(msg))
-}),
-Content::BuyingPower(panel) => panel.view().map(|msg| {
-    Message::PanelEvent(pane, panel::Message::BuyingPower(msg))
-}),
-
-// pane.rs の update 関数内（抜粋）
-(Content::OrderEntry(panel), Event::PanelInteraction(panel::Message::OrderEntry(msg))) => {
-    if let Some(action) = panel.update(msg) {
-        match action {
-            order_entry::Action::Submit(req) => Some(Effect::SubmitNewOrder(req)),
-            order_entry::Action::FetchHoldings { issue_code } => {
-                Some(Effect::FetchHoldings { issue_code })
-            }
-        }
-    } else { None }
-}
-```
-
-### Effect に variant を追加
-
-```rust
-pub enum Effect {
-    // 既存...
-    SubmitNewOrder(NewOrderRequest),
-    SubmitCorrectOrder(CorrectOrderRequest),
-    SubmitCancelOrder(CancelOrderRequest),
-    FetchOrders,
-    FetchOrderDetail(String, String),       // (order_num, eig_day)
-    FetchBuyingPower,
-    FetchHoldings { issue_code: String },   // 売り選択時に保有株数を取得（CLMGenbutuKabuList）
-    // 銘柄連動: チャートペインが銘柄変更時に発行 → dashboard が OrderEntry ペインへ配信
-    SyncIssueToOrderEntry { issue_code: String, issue_name: String, tick_size: Option<f64> },
-}
-```
-
-### panel::Message に variant を追加
-
-**ファイル**: `src/screen/dashboard/panel.rs`（既存の `Message` enum に追記）
-
-> **⚠️ 注意**: 現在の `panel::Message` は `#[derive(Debug, Clone, Copy)]` されている。
-> `OrderEntry(order_entry::Message)` 等の追加で `order_entry::Message` が `Copy` を
-> 満たせないため（`String` フィールドを含む）、**`Copy` derive を削除する必要がある**。
-> これは `PanelInteraction(super::panel::Message)` を使う全箇所に波及する。
-> フェーズ 7-骨格の作業で `Copy` を削除し、影響箇所を `clone()` で対応してから
-> 他のパネル実装に進むこと。
-
-```rust
-// #[derive(Debug, Clone)] ← Copy を外す（String を含む variant が追加されるため）
-#[derive(Debug, Clone)]
-pub enum Message {
-    // 既存...
-    OrderEntry(order_entry::Message),
-    OrderList(order_list::Message),
-    BuyingPower(buying_power::Message),
-}
-```
-
-### dashboard.rs に Effect ハンドラの骨格を追加
-
-**ファイル**: `src/screen/dashboard.rs`
-
-`pane::Effect::SubmitNewOrder` 等を受け取ったときのハンドラを追加する。
-フェーズ 7-完成までは `Task::none()` を返す骨格でよい。
-
----
-
-## フェーズ 3: 注文入力パネル（★メイン実装）
-
-**ファイル**: `src/screen/dashboard/panel/order_entry.rs`
-
-> **注意**: このパネルはテキスト入力・ボタン・ドロップダウンなどの通常 iced widget で実装する。
-> 既存の `Panel` trait（`canvas::Program` ベース）は実装しない。
-> `view() -> Element<Message>` と `update(msg: Message) -> Option<Action>` を直接定義する。
+`Panel` trait（`canvas::Program` ベース）は実装しない。
+`view() -> Element<Message>` と `update(msg: Message) -> Option<Action>` を直接定義する。
 
 ### UI レイアウト
 
@@ -819,9 +462,8 @@ pub enum Message {
 └─────────────────────────────────┘
 ```
 
-> **BBO（最良気配）について**: 立花証券の株価気配は既存の crypto 向け depth ストリームとは
-> 別系統のため、初期実装では **BBO 表示を省く**。銘柄名・コードのみ表示し、
-> リアルタイム気配は将来フェーズで立花証券イベント API と接続する際に追加する。
+> **BBO（最良気配）**: 立花証券の株価気配は既存の crypto 向け depth ストリームとは
+> 別系統のため、初期実装では **BBO 表示を省く**。銘柄名・コードのみ表示する。
 
 ### 注文確認モーダル
 
@@ -843,7 +485,6 @@ pub enum Message {
 
 ```rust
 pub struct OrderEntryPanel {
-    // 入力フォーム
     issue_code: String,
     issue_name: String,
     side: Side,                         // Buy / Sell
@@ -854,19 +495,14 @@ pub struct OrderEntryPanel {
     tick_size: Option<f64>,             // 呼値単位（銘柄連動で更新）
     cash_margin: CashMarginType,        // 現物 / 信用新規 / 信用返済
     expire_day: ExpireDay,              // Today / Specified(date)
-
-    // 保有株数（売り注文時に表示 / 「全数量」ボタン用）
-    holdings: Option<u64>,             // None = 未取得
-
-    // BBO は初期実装では省略（将来フェーズで立花証券イベント API 接続時に追加）
-
-    // 認証
+    holdings: Option<u64>,             // 保有株数（売り時のみ表示 / 全数量ボタン用）
     second_password: String,
-
-    // UI 状態
-    confirm_modal: bool,                // 確認モーダル表示中
+    confirm_modal: bool,
     loading: bool,
-    last_result: Option<OrderResult>,  // 直前の注文結果
+    last_result: Option<OrderResult>,
+    /// REPLAY モードで仮想注文モードになったとき true
+    /// true の場合: パスワード入力欄を非表示、確認ボタンラベル変更、パスワードバリデーションをスキップ
+    pub is_virtual: bool,
 }
 
 pub enum Side { Buy, Sell }
@@ -894,43 +530,43 @@ pub enum Message {
     CashMarginChanged(CashMarginType),
     ExpireDayChanged(ExpireDay),
     SecondPasswordChanged(String),
-    // BboUpdated は将来フェーズ（立花証券イベント API 接続後）に追加
-    HoldingsUpdated(Option<u64>),       // 保有株数の取得結果
-    ConfirmClicked,                     // 確認モーダルを開く
-    ConfirmCancelled,                   // 確認モーダルを閉じる
-    Submitted,                          // 実際に発注 Effect を発行
-    OrderCompleted(OrderResult),        // API 応答を受け取り UI を更新
-    SyncIssue {                         // チャートペインからの銘柄連動
-        issue_code: String,
-        issue_name: String,
-        tick_size: Option<f64>,
-    },
+    HoldingsUpdated(Option<u64>),
+    ConfirmClicked,
+    ConfirmCancelled,
+    Submitted,
+    OrderCompleted(OrderResult),
+    SyncIssue { issue_code: String, issue_name: String, tick_size: Option<f64> },
 }
 
 pub enum Action {
-    Submit(Box<NewOrderRequest>),       // pane.rs が Effect::SubmitNewOrder に変換
-                                        // NOTE: NewOrderRequest が 240 bytes のため Box 化（clippy 警告対応）
-    FetchHoldings { issue_code: String },   // 売り選択時に保有株数を取得
+    Submit(Box<NewOrderRequest>),       // NewOrderRequest が 240 bytes のため Box 化
+    FetchHoldings { issue_code: String },
 }
 ```
 
-> **`FillFromHoldings`（全数量ボタン）**: `side == Sell` のときのみ表示。
-> `holdings` が `None` の場合はボタンを無効化する。
+### `view()` シグネチャ
 
-> **`PriceIncrementTick` / `PriceDecrementTick`**: `price_type == Limit` のときのみ有効。
-> `tick_size` が `None`（未取得）の場合は操作を無視する。
-> `limit_price` が空文字のときは `"0"` を初期値にする（BBO は初期実装では持たない）。
+```rust
+// is_replay を受け取り、仮想モード UI の表示を制御する
+pub fn view(&self, theme: &Theme, is_replay: bool) -> Element<Message>
+```
 
-> **逆指値は将来フェーズに先送り**。初期実装では `sGyakusasiOrderType = "0"`（通常注文）を
-> `NewOrderRequest::new()` 内で固定付与する。
+`is_virtual_mode = self.is_virtual || is_replay` として評価する。
+仮想モード時の UI 変更:
+
+| 変更点 | 通常モード | 仮想モード |
+|---|---|---|
+| パスワード欄 | 表示 | 非表示 |
+| バナー | なし | `"⏪ 仮想注文モード"` (is_virtual) / `"⏪ REPLAYモード中 — 注文は無効です"` (is_replay のみ) |
+| 確認ボタンラベル | `"注文確認"` | `"仮想注文確認"` |
+| パスワードバリデーション | 必須 | スキップ |
+```
 
 ### 銘柄連動
 
 チャートペインが銘柄変更時に `Effect::SyncIssueToOrderEntry` を発行する。
 `dashboard.rs` がこれを受け取り、同一ウィンドウ内の `OrderEntry` ペインに
 `pane::Event` として配信する。LinkGroup とは独立した単方向の連動。
-
-連動時に `tick_size` と `holdings`（売り選択時）も更新する。
 
 ### 注文結果のデータフロー
 
@@ -942,65 +578,18 @@ OrderEntryPanel.update(Submitted)
   → dashboard::Message::OrderApiResult(pane_id, result)
   → pane.rs: state.update(Event::OrderApiResult(result))
   → OrderEntryPanel.update(OrderCompleted(result))
-
-注文成功後の連鎖更新:
-  OrderCompleted(Ok(_))
-  → pane.rs: Effect::FetchBuyingPower    // 余力を自動更新
-  → pane.rs: Effect::FetchOrders         // 注文照会を自動更新
-  → トースト通知を発行（"注文受付: 注文番号 XXXXXXXX"）
 ```
 
-> **約定通知**: 注文照会パネルのポーリングで状態テキストが "全部約定" に
-> 変わった行を検出したとき、既存の `Toast` / `Notification` 機構でトースト通知を表示する。
-> サウンドは将来フェーズとする。
+> **注文成功後の連鎖更新（未実装）**: `OrderCompleted(Ok(_))` 後に
+> `FetchBuyingPower` / `FetchOrders` を自動トリガーする処理は未実装。
+
+> **トースト通知（未実装）**: 注文受付後の "注文受付: 注文番号 XXXXXXXX" トーストは未実装。
 
 ---
 
-## フェーズ 4: 注文訂正・取消 UI
+## 注文照会パネル（`src/screen/dashboard/panel/order_list.rs`）
 
-注文照会パネルの各行に [訂正] [取消] ボタンを配置。
-
-### 訂正モーダル
-
-```
-┌─────────────────────────────────┐
-│  注文訂正: 注文番号 XXXXXXXX     │
-│─────────────────────────────────│
-│  銘柄: 7203 トヨタ自動車 / 買い  │
-│  現在: 指値 2,500円 × 100株      │
-│─────────────────────────────────│
-│  変更後の値段: [________]        │  空欄=変更なし
-│  変更後の株数: [________]        │  空欄=変更なし（増株不可）
-│─────────────────────────────────│
-│  発注パスワード: [__________]    │
-│─────────────────────────────────│
-│  [キャンセル]   [訂正を送信]     │
-└─────────────────────────────────┘
-```
-
-### 取消確認モーダル
-
-```
-┌─────────────────────────────────┐
-│  注文を取り消しますか？           │
-│                                 │
-│  注文番号: XXXXXXXX             │
-│  銘柄:    7203 トヨタ / 買い     │
-│  数量:    100株                  │
-│─────────────────────────────────│
-│  発注パスワード: [__________]    │
-│─────────────────────────────────│
-│  [戻る]   [取消を送信]           │
-└─────────────────────────────────┘
-```
-
----
-
-## フェーズ 5: 注文照会パネル
-
-**ファイル**: `src/screen/dashboard/panel/order_list.rs`
-
-> **注意**: フェーズ 3 と同様に `Panel` trait（`canvas::Program`）は実装しない。
+`Panel` trait（`canvas::Program`）は実装しない。
 
 ```
 表示項目:
@@ -1015,53 +604,78 @@ OrderEntryPanel.update(Submitted)
 
 行の操作:
   - クリック → 約定明細を展開
-  - [訂正] ボタン → フェーズ 4 の訂正モーダルを開く
-  - [取消] ボタン → フェーズ 4 の取消モーダルを開く
+  - [訂正] ボタン → 訂正モーダルを開く
+  - [取消] ボタン → 取消モーダルを開く
     ※ is_cancelable() == true の行のみ表示
 
                   [更新]  ← 手動リフレッシュボタン
 ```
 
-### 自動リフレッシュ戦略
-
-- **自動ポーリング**: 10秒間隔でバックグラウンドリフレッシュ（取引時間帯のみ）
-- **イベント駆動**: 注文発注・訂正・取消の成功後に即時リフレッシュ
-- **約定通知**: 前回取得との diff を比較し状態テキストが "全部約定" に
-  変わった行を検出したらトーストで通知する
-
-**ポーリング実装方針**: `iced::time::every(Duration::from_secs(10))` を
-`dashboard.rs` の `subscription()` に追加し、`Message::PollOrders` を発行する。
-`OrderListPanel` 側では `last_fetched_at` を管理し、取引時間外は Effect を発行しない。
+### 状態設計
 
 ```rust
-// dashboard.rs subscription() 内の追加分（抜粋）
-iced::time::every(Duration::from_secs(10))
-    .map(|_| Message::PollOrders)
-```
-
-```rust
-// OrderListPanel の状態
 pub struct OrderListPanel {
     orders: Vec<OrderRecord>,
     prev_orders: Vec<OrderRecord>,          // 約定通知の diff 用
     expanded_order: Option<String>,         // 展開中の注文番号
     executions: HashMap<String, Vec<ExecutionRecord>>,
-    correct_modal: Option<CorrectModal>,    // 訂正モーダル状態（フェーズ 4 と統合）
-    cancel_modal: Option<CancelModal>,      // 取消モーダル状態（フェーズ 4 と統合）
+    correct_modal: Option<CorrectModal>,    // 訂正モーダル状態
+    cancel_modal: Option<CancelModal>,      // 取消モーダル状態
     loading: bool,
     last_error: Option<String>,
-    // NOTE: last_fetched_at / polling_interval はポーリング未実装のため省略
-    // ポーリングは dashboard.rs の subscription() で管理する（Phase 7-完成予定）
+}
+
+pub enum Message {
+    RefreshClicked,
+    RowClicked(String),
+    CorrectClicked(OrderRecord),
+    CorrectNewPriceChanged(String),
+    CorrectNewQtyChanged(String),
+    CorrectPasswordChanged(String),
+    CorrectSubmitted,
+    CorrectCancelled,
+    CancelClicked(OrderRecord),
+    CancelPasswordChanged(String),
+    CancelSubmitted,
+    CancelCancelled,
+    OrdersUpdated(Vec<OrderRecord>),
+    ExecutionsUpdated(String, Vec<ExecutionRecord>),
+    ModifyCompleted(Result<ModifyOrderResponse, String>),
+    PollTick,
+}
+
+pub enum Action {
+    FetchOrders,
+    FetchOrderDetail { order_num: String, eig_day: String },
+    SubmitCorrect(Box<CorrectOrderRequest>),
+    SubmitCancel(Box<CancelOrderRequest>),
 }
 ```
 
+### 約定通知
+
+`newly_executed()` メソッドで `prev_orders` との diff を比較し、
+状態テキストが "全部約定" に遷移した行を検出してトーストで通知する。
+
+### 自動リフレッシュ戦略
+
+| 方式 | 状態 |
+|---|---|
+| 手動リフレッシュ（[更新] ボタン） | ✅ 実装済み |
+| イベント駆動（注文発注・訂正・取消成功後） | 未実装（連鎖 Effect 未接続） |
+| 自動ポーリング（10秒間隔） | 未実装 |
+| 取引時間帯チェック | 未実装 |
+
+> **ポーリング設計方針（未実装）**: `iced::time::every(Duration::from_secs(10))` を
+> `dashboard.rs` の `subscription()` に追加し、`Message::PollOrders` を発行する。
+> `OrderListPanel` 側では `PollTick` メッセージを受け取り `Action::FetchOrders` を返す。
+> 取引時間外はアクションを返さない設計。
+
 ---
 
-## フェーズ 6: 余力情報パネル
+## 余力情報パネル（`src/screen/dashboard/panel/buying_power.rs`）
 
-**ファイル**: `src/screen/dashboard/panel/buying_power.rs`
-
-> **注意**: フェーズ 3 と同様に `Panel` trait（`canvas::Program`）は実装しない。
+`Panel` trait（`canvas::Program`）は実装しない。
 
 ```
 現物口座:
@@ -1076,24 +690,26 @@ pub struct OrderListPanel {
                       [更新]  ← 手動リフレッシュボタン
 ```
 
+```rust
+pub enum Message {
+    RefreshClicked,
+    BuyingPowerUpdated { cash: BuyingPowerResponse, margin: MarginPowerResponse },
+    FetchFailed(String),
+}
+
+pub enum Action {
+    FetchBuyingPower,
+}
+```
+
 > **余力の更新タイミング**:
-> - パネルを開いた時（初回取得）
-> - [更新] ボタン押下時（手動）
-> - **注文発注成功後**（フェーズ 3 の注文結果フローから自動トリガー）
->
-> 連続した自動ポーリングは将来フェーズで検討する。
+> - パネルを開いた時（初回取得）: ✅ 実装済み
+> - [更新] ボタン押下時（手動）: ✅ 実装済み
+> - 注文発注成功後の自動トリガー: 未実装（連鎖 Effect 未接続）
 
 ---
 
-## フェーズ 7-完成: connector 接続
-
-### 注文 API 関数の追加
-
-**ファイル**: `src/connector/order.rs`（**新規ファイル**）
-
-> `src/connector.rs` はモジュール宣言のみのファイル。
-> 実装は既存の `src/connector/auth.rs` / `fetcher.rs` と同様に
-> `src/connector/order.rs` を新規作成して配置する。
+## connector（`src/connector/order.rs`）
 
 ```rust
 pub async fn submit_new_order(
@@ -1114,19 +730,12 @@ pub async fn submit_cancel_order(
     req: CancelOrderRequest,
 ) -> Result<ModifyOrderResponse, TachibanaError>
 
+// 現在の営業日（eig_day）を渡す。未取得の場合は eig_day_or_today() でローカル日付を使用
 pub async fn fetch_orders(
     client: &reqwest::Client,
     session: &TachibanaSession,
-    eig_day: &str,  // 当日営業日。NewOrderResponse.eig_day から取得して dashboard で保持する
+    eig_day: &str,
 ) -> Result<Vec<OrderRecord>, TachibanaError>
-
-// NOTE: 営業日の取得方法
-// 初回注文前は eig_day が不明のため、最初の submit_new_order のレスポンス
-// （NewOrderResponse.eig_day）を dashboard.rs で保持する。
-// 発注前に注文照会を開いた場合は当日日付（YYYYMMDD）をローカル時計から生成してよい
-// （立花 API は営業日=当日日付で解釈するため）。
-// dashboard.rs に Option<String> の eig_day フィールドを持たせ、
-// 初回注文成功後にセットする。
 
 pub async fn fetch_order_detail(
     client: &reqwest::Client,
@@ -1135,14 +744,12 @@ pub async fn fetch_order_detail(
     eig_day: &str,
 ) -> Result<Vec<ExecutionRecord>, TachibanaError>
 
-// 現物余力と信用余力を tokio::join! で並列取得してタプルで返す
+// CLMZanKaiKanougaku と CLMZanShinkiKanoIjiritu を tokio::join! で並列取得
 pub async fn fetch_buying_power(
     client: &reqwest::Client,
     session: &TachibanaSession,
 ) -> Result<(BuyingPowerResponse, MarginPowerResponse), String>
 
-// 保有株数取得（CLMGenbutuKabuList）
-// 売り注文時の「全数量」ボタン / 保有株表示用
 // sellable_qty（売付可能株数）を u64 に変換して返す
 pub async fn fetch_holdings(
     client: &reqwest::Client,
@@ -1151,26 +758,297 @@ pub async fn fetch_holdings(
 ) -> Result<u64, TachibanaError>
 ```
 
-`src/connector.rs` に `pub mod order;` を追記する。
+---
 
-### ペイン選択 UI
+## pane.rs（`src/screen/dashboard/pane.rs`）
 
-サイドバーまたはペイン作成時に `OrderEntry` / `OrderList` / `BuyingPower` を ContentKind として選択できるようにする。
+### State struct（抜粋）
+
+```rust
+pub struct State {
+    // 既存フィールド...
+    /// REPLAY モードで仮想注文を有効にするフラグ
+    /// dashboard.rs の sync_virtual_mode() から設定される
+    pub is_virtual_mode: bool,
+}
+```
+
+### Effect enum
+
+```rust
+pub enum Effect {
+    // 既存...
+    SubmitNewOrder(NewOrderRequest),
+    SubmitCorrectOrder(CorrectOrderRequest),
+    SubmitCancelOrder(CancelOrderRequest),
+    FetchOrders,
+    FetchOrderDetail(String, String),       // (order_num, eig_day)
+    FetchBuyingPower,
+    FetchHoldings { issue_code: String },
+    SyncIssueToOrderEntry { issue_code: String, issue_name: String, tick_size: Option<f64> },
+    /// REPLAY モード中の仮想注文送信（証券 API を呼ばない）
+    SubmitVirtualOrder(crate::replay::virtual_exchange::VirtualOrder),
+}
+```
+
+### Content enum
+
+非 canvas パネル（注文パネル）は `Panel` trait を実装しない。
+`pane.rs` の view/update match に専用アームを追加する。
+
+```rust
+pub enum Content {
+    // 既存...
+    OrderEntry(panel::order_entry::OrderEntryPanel),
+    OrderList(panel::order_list::OrderListPanel),
+    BuyingPower(panel::buying_power::BuyingPowerPanel),
+}
+```
+
+### panel::Message
+
+注文関連 variant は `String` フィールドを含むため `Copy` 不可。
+`panel::Message` は `#[derive(Debug, Clone)]`（`Copy` を削除済み）。
+
+```rust
+#[derive(Debug, Clone)]
+pub enum Message {
+    // 既存...
+    OrderEntry(order_entry::Message),
+    OrderList(order_list::Message),
+    BuyingPower(buying_power::Message),
+}
+```
 
 ---
 
-## フェーズ 8: スタイル
+## 仮想約定エンジン（`src/replay/virtual_exchange/`）
 
-**ファイル**: `src/style.rs`
+REPLAY モード中に証券 API を呼ばずに仮想注文を処理するエンジン。
+`main.rs` が `Option<Arc<tokio::sync::Mutex<VirtualExchangeEngine>>>` として保持し、
+HTTP API スレッドとも共有する。
+
+### モジュール構成
+
+```
+src/replay/virtual_exchange/
+├── mod.rs          VirtualExchangeEngine（公開 API ファサード）
+├── order_book.rs   VirtualOrderBook（注文受付・約定判定）
+└── portfolio.rs    VirtualPortfolio（ポジション管理・PnL 計算）
+```
+
+### 型定義
+
+```rust
+// --- portfolio.rs ---
+
+pub enum PositionSide { Long, Short }
+
+pub struct Position {
+    pub order_id: String,
+    pub ticker: String,
+    pub side: PositionSide,
+    pub qty: f64,
+    pub entry_price: f64,
+    pub entry_time_ms: u64,
+    pub exit_price: Option<f64>,
+    pub exit_time_ms: Option<u64>,  // Phase 2 PnL 履歴表示で使用予定
+    pub realized_pnl: Option<f64>,
+}
+
+pub struct VirtualPortfolio {
+    pub initial_cash: f64,
+    pub cash: f64,
+    positions: Vec<Position>,
+}
+
+#[derive(serde::Serialize)]
+pub struct PortfolioSnapshot {
+    pub cash: f64,
+    pub unrealized_pnl: f64,
+    pub realized_pnl: f64,
+    pub total_equity: f64,          // cash + unrealized_pnl
+    pub open_positions: Vec<PositionSnapshot>,
+    pub closed_positions: Vec<PositionSnapshot>,
+}
+
+// --- order_book.rs ---
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct VirtualOrder {
+    pub order_id: String,           // UUID
+    pub ticker: String,
+    pub side: PositionSide,
+    pub qty: f64,
+    pub order_type: VirtualOrderType,
+    pub placed_time_ms: u64,        // StepClock::now_ms() で記録
+    pub status: VirtualOrderStatus,
+}
+
+pub enum VirtualOrderType {
+    Market,
+    Limit { price: f64 },
+}
+
+pub enum VirtualOrderStatus {
+    Pending,
+    Filled { fill_price: f64, fill_time_ms: u64 },
+    Cancelled,
+}
+
+pub struct FillEvent {
+    pub order_id: String,
+    pub ticker: String,
+    pub side: PositionSide,
+    pub qty: f64,
+    pub fill_price: f64,
+    pub fill_time_ms: u64,
+}
+```
+
+### 約定ルール
+
+| 注文種別 | 約定条件 |
+|---|---|
+| 成行 | `on_tick()` 内で `trades[0].price` で即時約定 |
+| 指値買い | `trade.price <= limit_price` のトレードが来た tick で約定 |
+| 指値売り | `trade.price >= limit_price` のトレードが来た tick で約定 |
+
+`place()` は `Pending` 状態で登録するのみ。約定は必ず次の `on_tick()` で行う。
+
+### REPLAY モード Safety Guard
+
+REPLAY 中の誤発注を防ぐための二重ガード:
+
+**1. Dashboard レベルのブロック（`src/screen/dashboard.rs`）**
+
+```rust
+// Dashboard struct に is_replay フラグを追加
+pub is_replay: bool,
+
+// Effect ハンドラ内でブロック
+pane::Effect::SubmitNewOrder(req) => {
+    if is_replay {
+        log::warn!("REPLAY中の発注はブロックされました（新規注文）: {:?}", req);
+        Task::none()
+    } else {
+        // 既存の証券 API 呼び出し
+    }
+}
+// SubmitCorrectOrder / SubmitCancelOrder も同様にブロック
+```
+
+**2. pane.rs レベルのルーティング**
+
+```rust
+// is_virtual_mode == true の場合、証券 API Effect の代わりに仮想注文 Effect を発行
+panel::order_entry::Action::Submit(req) => {
+    if is_virtual {
+        Some(Effect::SubmitVirtualOrder(virtual_order_from_new_order_request(&req)))
+    } else {
+        Some(Effect::SubmitNewOrder(*req))
+    }
+}
+```
+
+### dashboard.rs の拡張
+
+```rust
+// 追加フィールド
+pub struct Dashboard {
+    // 既存...
+    pub is_replay: bool,
+}
+
+// 追加 Event / Message
+pub enum Event {
+    // 既存...
+    SubmitVirtualOrder(crate::replay::virtual_exchange::VirtualOrder),
+}
+
+pub enum Message {
+    // 既存...
+    VirtualOrderFilled(crate::replay::virtual_exchange::FillEvent),
+}
+
+// pane 間の仮想モード同期
+fn sync_virtual_mode(&mut self) {
+    // 全ペインの is_virtual_mode と OrderEntryPanel の is_virtual を同期する
+}
+```
+
+`VirtualOrderFilled` ハンドラはトースト通知を表示する:
+```
+"[仮想] 約定: {ticker} {side} {qty:.4} @ {price:.2}"
+```
+
+### main.rs の拡張
+
+```rust
+pub struct Flowsurface {
+    // 既存...
+    virtual_engine: Option<Arc<tokio::sync::Mutex<VirtualExchangeEngine>>>,
+}
+```
+
+**ライフサイクル:**
+- Live → Replay 遷移: `VirtualExchangeEngine::new(1_000_000.0)` で初期化（既存なら `reset()`）
+- Replay → Live 遷移: `engine.reset()`
+
+**Tick 処理（毎 tick）:**
+```rust
+// replay dispatcher から Trade が来たとき
+if let Some(engine) = &self.virtual_engine {
+    let fills = tokio::task::block_in_place(|| {
+        engine.blocking_lock().on_tick(&ticker, &trades, clock_ms)
+    });
+    // fills を VirtualOrderFilled メッセージとして発行
+}
+```
+
+### HTTP API（ポート 9876）
+
+| メソッド | パス | 説明 |
+|---|---|---|
+| `POST` | `/api/replay/order` | 仮想注文を発注する |
+| `GET` | `/api/replay/portfolio` | ポートフォリオスナップショット取得 |
+| `GET` | `/api/replay/state` | エンジン状態確認（REPLAY 中かどうか等） |
+
+**POST /api/replay/order リクエスト JSON:**
+
+```json
+{
+  "ticker": "BTCUSDT",
+  "side": "Long",
+  "qty": 0.1,
+  "order_type": "market"
+}
+// 指値の場合:
+{
+  "ticker": "BTCUSDT",
+  "side": "Short",
+  "qty": 0.5,
+  "order_type": { "limit": 92000.0 }
+}
+```
+
+---
+
+## スタイル（`src/style.rs`）
 
 ```rust
 // 注文状態色（sOrderStatus テキストで分岐）
 pub fn order_status_color(status_text: &str, theme: &Theme) -> Color
+
+// 売買区分色（買=青系, 売=赤系）
+pub fn side_color(side_str: &str, theme: &Theme) -> Color
+
 // 追証警告色
 pub fn margin_call_color(theme: &Theme) -> Color
-// 売買区分色（買=青, 売=赤）
-pub fn side_color(side: &Side, theme: &Theme) -> Color
 ```
+
+> **現状**: これらの関数は実装済みだが、パネルの `view()` からまだ呼び出されていないため
+> `dead_code` 警告が出る。各パネルの view で使用する際に解消予定。
 
 ---
 
@@ -1179,175 +1057,57 @@ pub fn side_color(side: &Side, theme: &Theme) -> Color
 - **第二パスワードはメモリ上にのみ保持**し、ログ・設定ファイルへの書き込みを禁止
 - 注文送信後は第二パスワードフィールドをクリア
 - `second_password` フィールドを含む構造体に `#[derive(Debug)]` を付けない
-  （`Debug` を手動実装するか `secrecy` クレートを検討）
-- 注文確認ステップ（2段階）は必須とし、バイパス不可にする
+  （手動実装で `[REDACTED]` を返す）
+- 注文確認ステップ（2段階）は必須とし、バイパス不可
 
 ---
 
-## タスクチェックリスト
+## 実装状況
 
-### フェーズ 1: API 型定義
-- ✅ `NewOrderRequest` 構造体（serde rename 属性付き、`Debug` 手動実装 + `Clone`）
-- ✅ `NewOrderResponse` 構造体（実 API フィールド名に準拠）
-- ✅ `CorrectOrderRequest` 構造体（`Debug` 手動実装 + `Clone`）
-- ✅ `CancelOrderRequest` 構造体（`Debug` 手動実装 + `Clone`）
-- ✅ `ModifyOrderResponse` 構造体
-- ✅ `OrderListRequest` 構造体（`sikkou_day` フィールド名を snake_case で）
-- ✅ `OrderListResponse` / `OrderRecord` 構造体（`eig_day` → `#[serde(rename = "sOrderEigyouDay")]`）
-- ✅ `OrderRecord::is_cancelable()` メソッド（状態テキストで取消可能判定）
-- ✅ `OrderDetailRequest` / `OrderDetailResponse` / `ExecutionRecord` 構造体
-- ✅ `BuyingPowerResponse` / `MarginPowerResponse` 構造体
-- ✅ `GenbutuKabuRequest` / `GenbutuKabuResponse` / `HoldingRecord` 構造体
-- ✅ `serialize_order_request()` ヘルパー（p_no / p_sd_date / sCLMID / sJsonOfmt を付与）
-- ✅ 各種ユニットテスト（シリアライズ・デシリアライズ・共通フィールド付与）
-- ✅ `OrderRecord::is_cancelable()` の単体テスト（取消可能3状態 / 不可4状態）
+### 完了済み
 
-**知見**:
-- `second_password` を持つ構造体は `#[derive(Debug)]` 不可。手動実装で `[REDACTED]` を返す。
-- `Effect` が `Debug + Clone` を要求するため `Clone` は必須だった。
-- `NewOrderRequest` は 240 bytes のため `Action::Submit(Box<NewOrderRequest>)` にする（clippy 警告）。
-- `serialize_order_request()` は `serde_json::to_value()` でマップに共通フィールドをマージする方式。
-
-### フェーズ 2: data クレート拡張
-- ✅ `ContentKind` に `OrderEntry` / `OrderList` / `BuyingPower` 追加
-- ✅ `ContentKind::ALL` を 11 要素に更新
-- ✅ `Pane` enum にユニット variant として `OrderEntry` / `OrderList` / `BuyingPower` を追加
-- ✅ `PaneSetup::new()` の match arms に新 variant 追加
-- ✅ serde ラウンドトリップテスト
-
-**知見**: `PaneSetup::new()` の 2 つの match（basis / tick_multiplier）と push_freq match にも
-新 variant を追加する必要があった。
-
-### フェーズ 7-骨格: 型コンパイル確認
-- ✅ `panel/order_entry.rs` / `order_list.rs` / `buying_power.rs` を `todo!()` で作成
-- ✅ `set_content_and_streams` の `todo!("order panel content")` → `unreachable!()` に昇格（注文ペインはストリーム不要のため、ここに到達するのはバグ）
-- ✅ `panel.rs` に `pub mod` 宣言追加
-- ✅ `panel::Message` を `Copy` → `Clone` に変更し `OrderEntry` / `OrderList` / `BuyingPower` variant 追加
-- ✅ `pane.rs` の `Content` enum に variant 追加（view/update のアームも追加）
-- ✅ `pane.rs` の `Effect` enum に注文関連 variant 追加
-- ✅ `layout.rs` の `From<&pane::State>` と `configuration()` に新 variant 追加
-- ✅ `dashboard.rs` の Effect ハンドラに `Task::none()` 骨格追加
-- ✅ `cargo check` でコンパイル通過確認
-- ✅ `cargo clippy -- -D warnings` で警告なし確認
-- ✅ `cargo test --workspace` で全テスト通過確認（346件）
-
-**知見**:
-- `pane.rs` の `Content` match は多箇所あった（view/invalidate/update_interval/last_tick/reorder_indicators/studies/kind/initialized/panel::Message 経由の view）
-- `layout.rs` の `From<&pane::State>` と `configuration()` 関数も新 variant を処理する必要あり
-- `panel::Message::OrderEntry` 等は `Copy` でないため `panel::Message` を `Clone` のみにした
-
-### フェーズ 3: 注文入力パネル（★）
-- ✅ `OrderEntryPanel` 状態設計（Panel trait は不使用、BBO フィールドは省略）
-- ✅ フォーム view 実装（iced widget: text_input / button / pick_list）
-- ✅ 価格ステップボタン（`[▲]` / `[▼]` で呼値単位 ±1）
-- ✅ 保有株数表示（売り選択時）と「全数量」ボタン
-- ✅ 注文確認モーダル
-- ✅ `Message::Submitted` → `Action::Submit` → Effect 発行
-- [ ] 注文成功後に `FetchBuyingPower` / `FetchOrders` を連鎖トリガー（Phase 7-完成で実装）
-- [ ] 注文受付トースト通知（Phase 7-完成で実装）
-- ✅ 注文成功・失敗・警告の表示
-- ✅ 銘柄連動処理（`SyncIssueToOrderEntry` 受信・`tick_size` 更新）
-- ✅ 売り選択時に `FetchHoldings` を発行
-
-**知見**:
-- `row![].extend(row.into_iter())` は iced の `Row` が `IntoIterator` を実装しないためコンパイルエラー。
-  ラベルを各 `if/else` ブランチに直接含めるか、`Vec<Element>` を作って `extend` する。
-  今回は各ブランチにラベルを含めることで解決した（`qty_row`/`price_row` を `Element<'_,Message>` に変換）。
-- `panel::update()` の match も新 variant（OrderEntry/OrderList/BuyingPower）を追加しないとコンパイルエラー。
-  これらは各パネル固有の update() で処理するため `_ => {}` でよい。
-
-### フェーズ 4: 訂正・取消 UI
-- ✅ 訂正モーダル view / update
-- ✅ 取消確認モーダル view / update
-
-**知見**:
-- 訂正・取消モーダルは `order_list.rs` 内に実装（`CorrectModal` / `CancelModal` 内部構造体）
-- 空欄フィールドは `"*"` にマップ（変更なし）するのを `update(CorrectSubmitted)` 内で実施
-- モーダル構造体には `#[derive(Debug, Clone)]` を付与（`Message` が要求）
-
-### フェーズ 5: 注文照会パネル
-- ✅ `OrderListPanel` view / update（Panel trait は不使用）
-- ✅ 訂正・取消ボタン（`is_cancelable()` == true の行のみ表示）
-- ✅ 約定明細展開 view
-- [ ] `dashboard.rs` の `subscription()` に `iced::time::every(10秒)` を追加（Phase 7-完成で実装）
-- [ ] 取引時間帯チェックでポーリングの発火を制御（Phase 7-完成で実装）
-- ✅ 約定通知（状態テキスト "全部約定" への遷移を検出: `newly_executed()` メソッドで diff 検出）
-- ✅ 手動リフレッシュボタン
-
-**知見**:
-- `column(rows.iter())` のような `IntoIterator` ベースの `column()` は使える（`column![]` マクロと別物）
-- `iced::Padding` は `[u16; 4]` に対応していない。`iced::padding::left(N)` などを使う
-- `newly_executed()` は `prev_orders` との diff で "全部約定" 遷移を検出するメソッドとして実装
-- ポーリングは `Message::PollTick` として受け取り `Action::FetchOrders` を返す設計
-
-### フェーズ 6: 余力情報パネル
-- ✅ `BuyingPowerPanel` view / update（Panel trait は不使用）
-- ✅ 手動リフレッシュボタン
-- [ ] 注文発注成功後の自動更新受け取り（`FetchBuyingPower` Effect の処理 — Phase 7-完成で実装）
-
-**知見**:
-- ヘルパー関数 `labeled_value<'a>(label: &'a str, ...)` のライフタイムに注意
-  `label` の型に `'a` を明示しないとコンパイルエラーになる（`Element<'a, Message>` を返すため）
-
-### フェーズ 7-完成: connector 接続
-- ✅ `src/connector/order.rs` 新規作成
-- ✅ 各 API 関数実装（`serialize_order_request()` + `post_request()` パターンで統一）
-- ✅ `fetch_holdings` 関数（`CLMGenbutuKabuList` を使い `sellable_qty` を u64 で返す）
-- ✅ `src/connector.rs` に `pub mod order;` 追記
-- ✅ `dashboard.rs` の Effect ハンドラを実際の API 呼び出し Task に差し替え
-- ✅ `dashboard.rs` で `NewOrderResponse.eig_day` を受け取り `self.eig_day` に保持
-- ✅ `FetchHoldings` / `SyncIssueToOrderEntry` Effect ハンドラ実装
-- ✅ 訂正・取消の `"*"` マッピング（`order_list.rs` の `update(CorrectSubmitted)` 内で実装）
-- [ ] サイドバー UI（ContentKind 選択）— 既存のサイドバーで ContentKind::ALL から選べるため省略可
-
-**知見**:
-- exchange adapter の async 関数（`submit_new_order` 等）を追加する場合は、レスポンス型に `Clone` が必要（`dashboard::Message` が `#[derive(Clone)]` を要求するため）
-- `serialize_order_request()` の引数は `&serde_json::json!({})` でフィールドなしリクエストも処理できる
-- `iter_all_panes_mut()` は `(window::Id, pane_grid::Pane, &mut pane::State)` タプルを返す（`state` だけでなくタプル分解が必要）
-- 連鎖 `if let ... && let ...` パターン（Rust 1.64+）でネストした `if let` をフラットにできる
-- `fetch_buying_power` は現物余力と信用余力の 2 つの API を `tokio::join!` で並列取得し、タプルで返す設計
-
-### フェーズ 8: スタイル
-- ✅ 注文状態色（状態テキストで分岐）・売買色・追証警告色
-
-**知見**:
-- `order_status_color()` / `side_color()` / `margin_call_color()` を `src/style.rs` の末尾に追加
-- これらは各パネルの view() から `theme: &Theme` を受け取って呼び出す設計
-- 現時点では未使用（パネル view で使用すると `dead_code` 警告が消える）
-
----
-
-## ログ検証結果（2026-04-16）
-
-`log::debug!` を追加して `cargo run`（デバッグビルド）で起動確認。
-
-### 確認できた動作
-
-| 項目 | 結果 |
+| 機能 | ファイル |
 |---|---|
-| セッション読み込み（keyring → 検証） | ✅ 正常（ログで確認） |
-| `build_request()` フィールドマッピング | ✅ 単体テスト 21件全通過 |
-| `serialize_order_request()` 共通フィールド付与 | ✅ 単体テスト確認済 |
-| `FetchHoldings` trigger（売り切替時） | ✅ 単体テスト確認済 |
-| `second_password` マスク（`Debug` 手動実装） | ✅ `[REDACTED]` 出力 |
-| `ApiResponse::check()` エラー判定 | ✅ p_errno / sResultCode 両方チェック |
-| `eig_day_or_today()` フォールバック | ✅ 実装確認（ローカル日付へ fallback） |
+| 注文・照会・余力・保有株数 API 型定義 | `exchange/src/adapter/tachibana.rs` |
+| `serialize_order_request()` ヘルパー | `exchange/src/adapter/tachibana.rs` |
+| `OrderRecord::is_cancelable()` | `exchange/src/adapter/tachibana.rs` |
+| `ContentKind` / `Pane` enum 拡張 | `data/src/layout/pane.rs` |
+| 注文入力パネル（UI・ロジック） | `src/screen/dashboard/panel/order_entry.rs` |
+| 注文照会パネル（UI・ロジック） | `src/screen/dashboard/panel/order_list.rs` |
+| 訂正・取消モーダル | `src/screen/dashboard/panel/order_list.rs` |
+| 余力情報パネル（UI・ロジック） | `src/screen/dashboard/panel/buying_power.rs` |
+| `Content` / `Effect` enum 拡張 | `src/screen/dashboard/pane.rs` |
+| `panel::Message` の `Copy` → `Clone` 変更 | `src/screen/dashboard/panel.rs` |
+| connector API 関数 | `src/connector/order.rs` |
+| `dashboard.rs` の Effect ハンドラ接続 | `src/screen/dashboard.rs` |
+| `eig_day_or_today()` フォールバック | `src/screen/dashboard.rs` |
+| スタイル関数 | `src/style.rs` |
+| **REPLAY 中の誤発注防止ガード** | `src/screen/dashboard.rs` |
+| **`OrderEntryPanel.is_virtual` フィールド・仮想モード UI** | `src/screen/dashboard/panel/order_entry.rs` |
+| **`Pane.is_virtual_mode` フィールド・仮想注文ルーティング** | `src/screen/dashboard/pane.rs` |
+| **`VirtualPortfolio`（ポジション管理・PnL 計算）** | `src/replay/virtual_exchange/portfolio.rs` |
+| **`VirtualOrderBook`（注文受付・約定判定）** | `src/replay/virtual_exchange/order_book.rs` |
+| **`VirtualExchangeEngine`（ファサード）** | `src/replay/virtual_exchange/mod.rs` |
+| **仮想注文エンジンの main.rs 統合** | `src/main.rs` |
+| **HTTP API（POST /api/replay/order 等）** | `src/replay_api.rs` |
+| **仮想約定トースト通知** | `src/screen/dashboard.rs` |
 
-### 要注意項目（未解決）
+### 未実装・残課題
 
-#### `sOrderEigyouDay` フィールド名（暫定）
-
-`OrderRecord.eig_day` のデシリアライズキーを `"sOrderEigyouDay"` と仮定している。
-実際の `CLMOrderList` API レスポンスで別のフィールド名が使われている場合、
-`eig_day` が `""` になり訂正・取消 API 呼び出し時にエラーが発生する。
-
-**確認方法**: 実際の注文照会を行い、受け取った `OrderRecord` の `eig_day` が空文字か否かをログで確認。
-空文字の場合は `tachibana.rs` の `#[serde(rename = "sOrderEigyouDay")]` を実際のフィールド名に修正する。
-
-#### `dead_code` 警告（スタイル関数）
-
-`style.rs` の `order_status_color` / `side_color` / `margin_call_color` が未使用で警告が出る。
-計画通り将来フェーズでパネルの view() から呼び出す際に解消予定。
+| 課題 | 優先度 | 備考 |
+|---|---|---|
+| `sOrderEigyouDay` フィールド名の確認 | **高** | 実注文照会ログで確認。誤ると訂正・取消が全失敗 |
+| 注文成功後の `FetchBuyingPower` / `FetchOrders` 連鎖 | 中 | 注文入力パネルの `OrderCompleted(Ok(_))` で発行 |
+| 注文受付トースト通知（証券 API） | 中 | 既存の Toast / Notification 機構を使用予定 |
+| 自動ポーリング（10秒間隔） | 中 | `dashboard.rs` の `subscription()` に追加 |
+| 取引時間帯チェック | 低 | ポーリング実装時に同時対応 |
+| スタイル関数のパネル view への接続 | 低 | `dead_code` 警告解消のため |
+| 逆指値 UI | 低 | 現在は通常注文固定。立花証券イベント API 接続後に検討 |
+| BBO（最良気配）表示 | 低 | 立花証券イベント API 接続後に追加 |
+| **仮想注文の UI 一覧表示（Phase 2）** | 中 | `VirtualOrderBook::orders()` を利用。仮想注文ペインの実装 |
+| **仮想ポジションのクローズ（Phase 2）** | 中 | `VirtualPortfolio::record_close()` は実装済み・未接続 |
+| **SeekBackward 時のエンジンリセット** | 中 | 現在は Live↔Replay 遷移時のみリセット |
+| **PnL 履歴グラフ（Phase 2）** | 低 | `exit_time_ms` フィールドは実装済み・未使用 |
 
 ---
 
@@ -1356,13 +1116,41 @@ pub fn side_color(side: &Side, theme: &Theme) -> Color
 | ファイル | 変更種別 |
 |---|---|
 | `exchange/src/adapter/tachibana.rs` | 注文・照会・余力・保有株数 API 型追加 |
-| `data/src/layout/pane.rs` | `ContentKind` 拡張・`ALL` 更新・`Pane` enum にユニット variant 追加 |
-| `src/screen/dashboard/panel/order_entry.rs` | **新規** ★メイン（±ティックボタン / 保有株表示 / 全数量ボタン）BBO は将来フェーズ |
-| `src/screen/dashboard/panel/order_list.rs` | **新規**（ポーリング / 約定通知 / Panel trait 不使用） |
+| `data/src/layout/pane.rs` | `ContentKind` 拡張・`ALL` 更新・`Pane` enum に variant 追加 |
+| `src/screen/dashboard/panel/order_entry.rs` | **新規**（±ティックボタン / 保有株表示 / 全数量ボタン / 仮想モード UI） |
+| `src/screen/dashboard/panel/order_list.rs` | **新規**（訂正・取消モーダル / 約定通知 / Panel trait 不使用） |
 | `src/screen/dashboard/panel/buying_power.rs` | **新規**（iced widget、Panel trait 不使用） |
-| `src/screen/dashboard/panel.rs`（または `panel/mod.rs`） | `pub mod` 宣言追加・`Message` enum 拡張 |
-| `src/screen/dashboard/pane.rs` | `Content` enum / `Effect` enum 拡張・非 canvas パネルの view/update アーム追加 |
-| `src/screen/dashboard.rs` | Effect ハンドラ追加・注文結果 Message 追加・`subscription()` にポーリング追加 |
+| `src/screen/dashboard/panel.rs` | `pub mod` 宣言追加・`Message` enum 拡張（`Copy` → `Clone`） |
+| `src/screen/dashboard/pane.rs` | `Content` / `Effect` enum 拡張・`is_virtual_mode` フィールド追加・仮想注文ルーティング |
+| `src/screen/dashboard.rs` | Effect ハンドラ接続・`is_replay` フィールド・`VirtualOrderFilled` / `SubmitVirtualOrder` 追加 |
 | `src/connector.rs` | `pub mod order;` 追記 |
 | `src/connector/order.rs` | **新規** 注文・照会・余力・保有株数取得関数 |
 | `src/style.rs` | 注文状態・売買・追証警告色追加 |
+| `src/replay/mod.rs` | `pub mod virtual_exchange;` 追加 |
+| `src/replay/virtual_exchange/mod.rs` | **新規** `VirtualExchangeEngine` ファサード |
+| `src/replay/virtual_exchange/portfolio.rs` | **新規** `VirtualPortfolio`・`PortfolioSnapshot`（ユニットテスト 4 件） |
+| `src/replay/virtual_exchange/order_book.rs` | **新規** `VirtualOrderBook`・`FillEvent`（ユニットテスト 7 件） |
+| `src/replay/controller.rs` | `current_time_ms()` メソッド追加 |
+| `src/replay_api.rs` | `ApiCommand::VirtualExchange` と 3 エンドポイント追加 |
+| `src/main.rs` | `virtual_engine` フィールド・Tick ごとの on_tick フック・仮想注文ハンドラ |
+
+---
+
+## 実装時の知見
+
+- `second_password` を持つ構造体は `#[derive(Debug)]` 不可。手動実装で `[REDACTED]` を返す。
+- `Effect` が `Debug + Clone` を要求するため全リクエスト / レスポンス struct に `Clone` が必要。
+- `NewOrderRequest` は 240 bytes のため `Action::Submit(Box<NewOrderRequest>)` にする（clippy 警告）。
+- `serialize_order_request()` は `serde_json::to_value()` でマップに共通フィールドをマージする方式。逆指値フィールドもここで固定値として付与する。
+- `row![].extend(...)` は iced の `Row` が `IntoIterator` を実装しないためコンパイルエラー。各ブランチにラベルを直接含めるか `Vec<Element>` を作って extend する。
+- `iced::Padding` は `[u16; 4]` に対応していない。`iced::padding::left(N)` などを使う。
+- `panel.rs` の `Content` match は view / invalidate / update_interval / last_tick / reorder_indicators / studies / kind / initialized など多箇所に存在する。
+- `layout.rs` の `From<&pane::State>` と `configuration()` 関数も新 variant を処理する必要がある。
+- `fetch_buying_power` は現物余力と信用余力の 2 API を `tokio::join!` で並列取得してタプルで返す。
+- `iter_all_panes_mut()` は `(window::Id, pane_grid::Pane, &mut pane::State)` タプルを返す。
+- `連鎖 if let ... && let ...` パターン（Rust 1.64+）でネストした `if let` をフラットにできる。
+- **REPLAY ガードのボローチェッカー対策**: `dashboard.update()` 内で `self.is_replay` を `let is_replay = self.is_replay;` としてコピーしてから `get_mut_pane()` で `self` を可変借用する。フラグを先にコピーしないと E0503（不変参照と可変参照の競合）が発生する。
+- **`Trade` struct に ticker フィールドはない**: `VirtualOrderBook::on_tick()` は ticker を引数で受け取る設計にした。呼び出し側（main.rs）が `StreamKind` から ticker 文字列を特定して渡す。
+- **`tokio::task::block_in_place()`**: iced の同期 `update()` コンテキストから `Arc<tokio::sync::Mutex<T>>` を同期ロックするために使用。`block_in_place` は tokio の multi-thread runtime でのみ動作する。
+- **仮想注文の `placed_time_ms`**: pane.rs の `virtual_order_from_new_order_request()` では `0` を入れている。正確な時刻は `dashboard.rs` → `main.rs` の `SubmitVirtualOrder` ハンドラで `replay.current_time_ms()` を取得して上書きする設計にする（Phase 2）。
+- **`#[allow(dead_code)]` の活用**: Phase 2 で使用予定のメソッド（`record_close()`、`orders()`）と フィールド（`exit_time_ms`）には `#[allow(dead_code)]` を付けてコメントを残す。将来削除ではなく「設計上意図的」であることを示す。

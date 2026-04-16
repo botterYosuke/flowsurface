@@ -85,6 +85,16 @@ impl ReplayController {
         matches!(&self.state.session, ReplaySession::Active { clock, .. } if clock.now_ms() >= clock.full_range().end)
     }
 
+    /// 現在の仮想時刻（ms）を返す。セッションがアクティブでない場合は `None`。
+    pub fn current_time_ms(&self) -> Option<u64> {
+        match &self.state.session {
+            ReplaySession::Active { clock, .. } | ReplaySession::Loading { clock, .. } => {
+                Some(clock.now_ms())
+            }
+            ReplaySession::Idle => None,
+        }
+    }
+
     /// 現在の再生モード（永続化用）
     pub fn mode(&self) -> ReplayMode {
         self.state.mode

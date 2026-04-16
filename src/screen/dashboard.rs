@@ -87,6 +87,8 @@ pub enum Message {
         pane_id: uuid::Uuid,
         result: Result<u64, String>,
     },
+    /// 仮想約定通知（REPLAYモード）。main.rs の on_tick() から届く。
+    VirtualOrderFilled(crate::replay::virtual_exchange::FillEvent),
 }
 
 pub struct Dashboard {
@@ -97,6 +99,9 @@ pub struct Dashboard {
     layout_id: uuid::Uuid,
     /// 本日営業日 (YYYYMMDD)。初回注文成功時に NewOrderResponse.eig_day から取得する。
     eig_day: Option<String>,
+    /// REPLAYモード中かどうか。main.rs から replay 状態切替時にシンクされる。
+    /// update() 内で Effect ハンドラが参照できるよう、view() 引数とは別に保持する。
+    pub is_replay: bool,
 }
 
 impl Default for Dashboard {
@@ -108,6 +113,7 @@ impl Default for Dashboard {
             popout: HashMap::new(),
             layout_id: uuid::Uuid::new_v4(),
             eig_day: None,
+            is_replay: false,
         }
     }
 }
@@ -135,6 +141,8 @@ pub enum Event {
     SwitchTickersInGroup {
         ticker_info: TickerInfo,
     },
+    /// REPLAYモードで仮想注文が送信されたとき、main.rs の VirtualExchangeEngine に渡す。
+    SubmitVirtualOrder(crate::replay::virtual_exchange::VirtualOrder),
 }
 
 impl Dashboard {
@@ -185,6 +193,7 @@ impl Dashboard {
             popout,
             layout_id,
             eig_day: None,
+            is_replay: false,
         }
     }
 
@@ -407,6 +416,8 @@ impl Dashboard {
                     return (self.merge_pane(main_window), None);
                 }
                 pane::Message::PaneEvent(pane, local) => {
+                    // is_replay をコピーしておく（可変借用と同時参照できないため）
+                    let is_replay = self.is_replay;
                     if let Some(state) = self.get_mut_pane(main_window.id, window, pane) {
                         let Some(effect) = state.update(local) else {
                             return (Task::none(), None);
@@ -464,31 +475,56 @@ impl Dashboard {
                             }
                             // ── 注文関連 Effect ──────────────────────────────────────
                             pane::Effect::SubmitNewOrder(req) => {
-                                let pane_id = state.unique_id();
-                                Task::perform(
-                                    order_connector::submit_new_order(req),
-                                    move |result| Message::OrderNewResult { pane_id, result },
-                                )
+                                if is_replay {
+                                    // REPLAYモードでは実際の発注をブロック
+                                    log::warn!(
+                                        "REPLAY中の発注はブロックされました（新規注文）: {:?}",
+                                        req
+                                    );
+                                    Task::none()
+                                } else {
+                                    let pane_id = state.unique_id();
+                                    Task::perform(
+                                        order_connector::submit_new_order(req),
+                                        move |result| Message::OrderNewResult { pane_id, result },
+                                    )
+                                }
                             }
                             pane::Effect::SubmitCorrectOrder(req) => {
-                                let pane_id = state.unique_id();
-                                Task::perform(
-                                    order_connector::submit_correct_order(req),
-                                    move |result| Message::OrderModifyResult {
-                                        pane_id,
-                                        result: result.map(|r| r.order_number),
-                                    },
-                                )
+                                if is_replay {
+                                    log::warn!(
+                                        "REPLAY中の発注はブロックされました（訂正注文）: {:?}",
+                                        req
+                                    );
+                                    Task::none()
+                                } else {
+                                    let pane_id = state.unique_id();
+                                    Task::perform(
+                                        order_connector::submit_correct_order(req),
+                                        move |result| Message::OrderModifyResult {
+                                            pane_id,
+                                            result: result.map(|r| r.order_number),
+                                        },
+                                    )
+                                }
                             }
                             pane::Effect::SubmitCancelOrder(req) => {
-                                let pane_id = state.unique_id();
-                                Task::perform(
-                                    order_connector::submit_cancel_order(req),
-                                    move |result| Message::OrderModifyResult {
-                                        pane_id,
-                                        result: result.map(|r| r.order_number),
-                                    },
-                                )
+                                if is_replay {
+                                    log::warn!(
+                                        "REPLAY中の発注はブロックされました（取消注文）: {:?}",
+                                        req
+                                    );
+                                    Task::none()
+                                } else {
+                                    let pane_id = state.unique_id();
+                                    Task::perform(
+                                        order_connector::submit_cancel_order(req),
+                                        move |result| Message::OrderModifyResult {
+                                            pane_id,
+                                            result: result.map(|r| r.order_number),
+                                        },
+                                    )
+                                }
                             }
                             pane::Effect::FetchOrders => {
                                 let pane_id = state.unique_id();
@@ -536,6 +572,10 @@ impl Dashboard {
                                     issue_name,
                                     tick_size,
                                 )
+                            }
+                            pane::Effect::SubmitVirtualOrder(vo) => {
+                                // main.rs の VirtualExchangeEngine に委譲する
+                                return (Task::none(), Some(Event::SubmitVirtualOrder(vo)));
                             }
                         };
                         return (task, None);
@@ -667,6 +707,18 @@ impl Dashboard {
                     panel.update(panel::order_entry::Message::HoldingsUpdated(result.ok()));
                 }
             }
+            Message::VirtualOrderFilled(fill) => {
+                // 仮想約定通知をトーストで表示する
+                let side_str = match fill.side {
+                    crate::replay::virtual_exchange::PositionSide::Long => "買い",
+                    crate::replay::virtual_exchange::PositionSide::Short => "売り",
+                };
+                let msg = format!(
+                    "[仮想] 約定: {} {} {:.4} @ {:.2}",
+                    fill.ticker, side_str, fill.qty, fill.fill_price
+                );
+                return (Task::none(), Some(Event::Notification(Toast::info(msg))));
+            }
         }
 
         (Task::none(), None)
@@ -698,6 +750,18 @@ impl Dashboard {
             }
         }
         Task::none()
+    }
+
+    /// 全 Pane の `is_virtual_mode` と全 OrderEntry パネルの `is_virtual` を
+    /// `is_replay` に合わせて同期する。Replay ↔ Live の切替時に呼ぶ。
+    pub fn sync_virtual_mode(&mut self, main_window: window::Id) {
+        let virtual_mode = self.is_replay;
+        for (_, _, state) in self.iter_all_panes_mut(main_window) {
+            state.is_virtual_mode = virtual_mode;
+            if let pane::Content::OrderEntry(panel) = &mut state.content {
+                panel.is_virtual = virtual_mode;
+            }
+        }
     }
 
     fn new_pane(

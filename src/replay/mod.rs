@@ -3,6 +3,7 @@ pub mod controller;
 pub mod dispatcher;
 pub mod loader;
 pub mod store;
+pub mod virtual_exchange;
 #[cfg(test)]
 pub(crate) mod testutil;
 
