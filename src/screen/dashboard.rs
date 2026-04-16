@@ -131,6 +131,10 @@ pub enum Event {
         old_stream: Option<StreamKind>,
         new_stream: StreamKind,
     },
+    /// MiniTickersList ペインから銘柄を切り替えたとき、main.rs でリプレイ同期を行うために伝搬する。
+    SwitchTickersInGroup {
+        ticker_info: TickerInfo,
+    },
 }
 
 impl Dashboard {
@@ -436,7 +440,12 @@ impl Dashboard {
                                 .chain(self.refresh_streams(main_window.id))
                             }
                             pane::Effect::SwitchTickersInGroup(ticker_info) => {
-                                self.switch_tickers_in_group(main_window.id, ticker_info)
+                                // main.rs でリプレイ同期（ReloadKlineStream / SyncReplayBuffers）を
+                                // 行うため、Task を直接実行せずにイベントとして伝搬する。
+                                return (
+                                    Task::none(),
+                                    Some(Event::SwitchTickersInGroup { ticker_info }),
+                                );
                             }
                             pane::Effect::FocusWidget(id) => {
                                 return (iced::widget::operation::focus(id), None);
@@ -1804,5 +1813,52 @@ mod tests {
         id: iced::window::Id,
     ) {
         let _: () = d.clear_chart_for_replay(id);
+    }
+
+    /// MiniTickersList で銘柄切り替えを行うと SwitchTickersInGroup イベントが返ること。
+    /// このイベントが main.rs に伝搬することで ReloadKlineStream が発火される（リプレイ修正）。
+    #[test]
+    fn mini_tickers_list_switch_emits_switch_tickers_in_group_event() {
+        use crate::modal::pane::{
+            Modal,
+            mini_tickers_list::{MiniPanel, Message as MiniMsg, RowSelection},
+        };
+        use crate::window::Window;
+
+        let main_window = Window::new(iced::window::Id::unique());
+        let layout_id = uuid::Uuid::new_v4();
+        let mut dashboard = Dashboard::default();
+
+        // 最初のペインを取得し、MiniTickersList モーダルを開いた状態にする
+        let pane = *dashboard.panes.iter().next().map(|(p, _)| p).unwrap();
+        let state = dashboard.panes.get_mut(pane).unwrap();
+        state.modal = Some(Modal::MiniTickersList(MiniPanel::new()));
+
+        let ticker_info = exchange::TickerInfo::new(
+            exchange::Ticker::new("BTCUSDT", exchange::adapter::Exchange::BinanceLinear),
+            0.1,
+            0.001,
+            None,
+        );
+
+        // ペイン左上クリック → MiniTickersList → Switch 選択を模倣するメッセージ
+        let msg = Message::Pane(
+            main_window.id,
+            pane::Message::PaneEvent(
+                pane,
+                pane::Event::MiniTickersListInteraction(MiniMsg::RowSelected(
+                    RowSelection::Switch(ticker_info),
+                )),
+            ),
+        );
+
+        let (_task, event) = dashboard.update(msg, &main_window, &layout_id);
+
+        // SwitchTickersInGroup イベントが返ること（None だとリプレイが更新されないバグ）
+        assert!(
+            matches!(&event, Some(Event::SwitchTickersInGroup { ticker_info: ti }) if *ti == ticker_info),
+            "expected Some(Event::SwitchTickersInGroup {{ ticker_info }}) but got {:?}",
+            event
+        );
     }
 }

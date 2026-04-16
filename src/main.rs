@@ -606,6 +606,53 @@ impl Flowsurface {
                         }) => Task::done(Message::Replay(ReplayMessage::System(
                             ReplaySystemEvent::ReloadKlineStream { old_stream, new_stream },
                         ))),
+                        Some(dashboard::Event::SwitchTickersInGroup { ticker_info }) => {
+                            let old_kline_streams: Vec<exchange::adapter::StreamKind> =
+                                if self.replay.is_replay() {
+                                    self.replay.active_kline_streams()
+                                } else {
+                                    vec![]
+                                };
+
+                            let switch_task = self
+                                .active_dashboard_mut()
+                                .switch_tickers_in_group(main_window.id, ticker_info)
+                                .map(move |msg| Message::Dashboard {
+                                    layout_id: Some(layout_id),
+                                    event: msg,
+                                });
+
+                            let reload_tasks: Vec<Task<Message>> = old_kline_streams
+                                .into_iter()
+                                .filter_map(|old| {
+                                    old.as_kline_stream().map(|(_, tf)| {
+                                        Task::done(Message::Replay(ReplayMessage::System(
+                                            ReplaySystemEvent::ReloadKlineStream {
+                                                old_stream: Some(old),
+                                                new_stream: exchange::adapter::StreamKind::Kline {
+                                                    ticker_info,
+                                                    timeframe: tf,
+                                                },
+                                            },
+                                        )))
+                                    })
+                                })
+                                .collect();
+
+                            let replay_task = if reload_tasks.is_empty() {
+                                Task::done(Message::Replay(ReplayMessage::System(
+                                    ReplaySystemEvent::SyncReplayBuffers,
+                                )))
+                            } else {
+                                Task::batch(reload_tasks)
+                            };
+
+                            // switch_task と replay_task は並列実行。
+                            // .chain() だと認証待ちタスクが clock.seek をブロックする
+                            // 既知の不具合があるため Task::batch を使う。
+                            // outer の main_task は Task::none() のため chain 不要。
+                            return Task::batch([switch_task, replay_task]);
+                        }
                         None => Task::none(),
                     };
 
