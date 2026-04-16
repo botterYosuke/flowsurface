@@ -1144,6 +1144,16 @@ impl Dashboard {
         )))
     }
 
+    /// フォーカスが無く唯一ペインがある場合、そのペインを自動的にフォーカスする。
+    fn auto_focus_single_pane(&mut self, main_window: window::Id) {
+        if self.focus.is_none()
+            && self.panes.len() == 1
+            && let Some((pane_id, _)) = self.panes.iter().next()
+        {
+            self.focus = Some((main_window, *pane_id));
+        }
+    }
+
     /// フォーカスペインを Horizontal Split し、新ペインに ticker_info + content_kind を設定する。
     /// Split 成功時は Some(Task)、フォーカスなし（ペイン数 > 1）・Split 失敗時は None を返す。
     pub fn split_focused_and_init(
@@ -1152,13 +1162,7 @@ impl Dashboard {
         ticker_info: TickerInfo,
         content_kind: ContentKind,
     ) -> Option<Task<Message>> {
-        // フォーカスが無く唯一ペインがある場合は自動フォーカス（init_focused_pane と同じ挙動）
-        if self.focus.is_none()
-            && self.panes.len() == 1
-            && let Some((pane_id, _)) = self.panes.iter().next()
-        {
-            self.focus = Some((main_window, *pane_id));
-        }
+        self.auto_focus_single_pane(main_window);
 
         let (window, focused_pane) = self.focus?;
 
@@ -1177,17 +1181,47 @@ impl Dashboard {
         Some(task)
     }
 
+    /// フォーカスペインを Horizontal Split し、新ペインを指定の注文パネルで初期化する。
+    /// TickerInfo 不要（SyncIssueToOrderEntry で自動連動）。
+    /// set_content_and_streams は tickers[0] を必須アクセスするため使用しない。
+    pub fn split_focused_and_init_order(
+        &mut self,
+        main_window: window::Id,
+        content_kind: data::layout::pane::ContentKind,
+    ) -> Task<Message> {
+        self.auto_focus_single_pane(main_window);
+
+        let Some((window, focused_pane)) = self.focus else {
+            return Task::done(Message::Notification(Toast::warn(
+                "No focused pane found".to_string(),
+            )));
+        };
+
+        let Some((new_pane, _)) = self.panes.split(
+            pane_grid::Axis::Horizontal,
+            focused_pane,
+            pane::State::new(),
+        ) else {
+            return Task::done(Message::Notification(Toast::warn(
+                "Could not split pane".to_string(),
+            )));
+        };
+
+        self.focus = Some((window, new_pane));
+
+        if let Some(state) = self.get_mut_pane(main_window, window, new_pane) {
+            state.content = pane::Content::placeholder(content_kind);
+        }
+
+        Task::none()
+    }
+
     pub fn switch_tickers_in_group(
         &mut self,
         main_window: window::Id,
         ticker_info: TickerInfo,
     ) -> Task<Message> {
-        if self.focus.is_none()
-            && self.panes.len() == 1
-            && let Some((pane_id, _)) = self.panes.iter().next()
-        {
-            self.focus = Some((main_window, *pane_id));
-        }
+        self.auto_focus_single_pane(main_window);
 
         let link_group = self.focus.and_then(|(window, pane)| {
             self.get_pane(main_window, window, pane)
@@ -2055,6 +2089,78 @@ mod tests {
         );
         assert!(result2.is_some(), "2 回目も Some を返すこと");
         assert_eq!(dashboard.panes.len(), 3, "2 回目後 pane count = 3");
+    }
+
+    // --- split_focused_and_init_order tests ---
+
+    #[test]
+    fn split_focused_and_init_order_splits_single_pane_no_focus() {
+        let mut dashboard = single_pane_dashboard();
+        let main_window = window::Id::unique();
+        assert_eq!(dashboard.panes.len(), 1);
+        assert!(dashboard.focus.is_none());
+
+        let _task = dashboard.split_focused_and_init_order(
+            main_window,
+            data::layout::pane::ContentKind::OrderEntry,
+        );
+
+        assert_eq!(dashboard.panes.len(), 2, "pane count must increase by 1");
+        assert!(dashboard.focus.is_some(), "focus must be set after split");
+    }
+
+    #[test]
+    fn split_focused_and_init_order_no_split_when_no_focus_multiple_panes() {
+        let mut dashboard = Dashboard::default();
+        let main_window = window::Id::unique();
+        assert!(dashboard.panes.len() > 1);
+        assert!(dashboard.focus.is_none());
+        let pane_count_before = dashboard.panes.len();
+
+        let _task = dashboard.split_focused_and_init_order(
+            main_window,
+            data::layout::pane::ContentKind::OrderEntry,
+        );
+
+        assert_eq!(
+            dashboard.panes.len(),
+            pane_count_before,
+            "pane count must not change when there is no focus and multiple panes"
+        );
+    }
+
+    #[test]
+    fn split_focused_and_init_order_sets_order_content_on_new_pane() {
+        let mut dashboard = single_pane_dashboard();
+        let main_window = window::Id::unique();
+
+        let _task = dashboard.split_focused_and_init_order(
+            main_window,
+            data::layout::pane::ContentKind::OrderEntry,
+        );
+
+        assert_eq!(dashboard.panes.len(), 2);
+        let (_, focused_pane) = dashboard.focus.unwrap();
+        let state = dashboard.panes.get(focused_pane).unwrap();
+        assert!(
+            matches!(state.content, pane::Content::OrderEntry(_)),
+            "new pane content must be OrderEntry"
+        );
+    }
+
+    #[test]
+    fn split_focused_and_init_order_moves_focus_to_new_pane() {
+        let mut dashboard = single_pane_dashboard();
+        let main_window = window::Id::unique();
+        let original_pane = *dashboard.panes.iter().next().map(|(p, _)| p).unwrap();
+
+        let _task = dashboard.split_focused_and_init_order(
+            main_window,
+            data::layout::pane::ContentKind::BuyingPower,
+        );
+
+        let (_, focused_pane) = dashboard.focus.unwrap();
+        assert_ne!(focused_pane, original_pane, "focus must move to the new pane");
     }
 
     // compile-time: clear_chart_for_replay returns (), not Vec<...>

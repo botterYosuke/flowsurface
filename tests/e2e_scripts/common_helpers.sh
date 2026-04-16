@@ -178,10 +178,14 @@ api_post()     {
   fi
 }
 # HTTP ステータスコードのみ返す POST ラッパー
+# 注: ${2:-{}} は bash のブレース展開バグで $2} になるため local 変数を経由する
 api_post_code() {
+  local _body
+  _body="${2:-}"
+  [ -n "$_body" ] || _body="{}"
   curl -s -o /dev/null -w "%{http_code}" \
     -X POST -H "Content-Type: application/json" \
-    -d "${2:-{}}" "$API_BASE$1"
+    -d "$_body" "$API_BASE$1"
 }
 
 # status が want になるまでポーリング（最大 timeout 秒）

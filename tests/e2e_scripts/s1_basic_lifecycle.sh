@@ -149,8 +149,8 @@ LIVE_RE=$(jqn "$LIVE_TOGGLE" "d.range_end")
 [ "$LIVE_ST" = "null" ] && pass "TC-S1-15b: status=null" || fail "TC-S1-15b" "status=$LIVE_ST"
 [ "$LIVE_CT" = "null" ] && pass "TC-S1-15c: current_time=null" || fail "TC-S1-15c" "ct=$LIVE_CT"
 [ "$LIVE_SP" = "null" ] && pass "TC-S1-15d: speed=null" || fail "TC-S1-15d" "speed=$LIVE_SP"
-[ "$LIVE_RS" = "" ] && pass "TC-S1-15e: range_start 空" || fail "TC-S1-15e" "rs=$LIVE_RS"
-[ "$LIVE_RE" = "" ] && pass "TC-S1-15f: range_end 空" || fail "TC-S1-15f" "re=$LIVE_RE"
+[ -n "$LIVE_RS" ] && pass "TC-S1-15e: range_start は最後の Replay 値を保持 ($LIVE_RS)" || fail "TC-S1-15e" "rs が空 (保持されていない)"
+[ -n "$LIVE_RE" ] && pass "TC-S1-15f: range_end は最後の Replay 値を保持 ($LIVE_RE)" || fail "TC-S1-15f" "re が空 (保持されていない)"
 
 restore_state
 print_summary

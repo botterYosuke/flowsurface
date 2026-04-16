@@ -216,7 +216,7 @@ pub enum ContentKind {
 }
 
 impl ContentKind {
-    pub const ALL: [ContentKind; 11] = [
+    pub const ALL: [ContentKind; 8] = [
         ContentKind::Starter,
         ContentKind::HeatmapChart,
         ContentKind::ShaderHeatmap,
@@ -225,9 +225,6 @@ impl ContentKind {
         ContentKind::ComparisonChart,
         ContentKind::TimeAndSales,
         ContentKind::Ladder,
-        ContentKind::OrderEntry,
-        ContentKind::OrderList,
-        ContentKind::BuyingPower,
     ];
 }
 
@@ -385,14 +382,6 @@ mod tests {
             let s = kind.to_string();
             assert!(!s.is_empty(), "{kind:?} の Display が空文字列");
         }
-    }
-
-    /// 新規追加した ContentKind バリアントが ALL に含まれている
-    #[test]
-    fn content_kind_all_includes_order_variants() {
-        assert!(ContentKind::ALL.contains(&ContentKind::OrderEntry));
-        assert!(ContentKind::ALL.contains(&ContentKind::OrderList));
-        assert!(ContentKind::ALL.contains(&ContentKind::BuyingPower));
     }
 
     /// Pane::OrderEntry の serde ラウンドトリップ

@@ -2241,7 +2241,7 @@ impl Content {
         }
     }
 
-    fn placeholder(kind: ContentKind) -> Self {
+    pub fn placeholder(kind: ContentKind) -> Self {
         match kind {
             ContentKind::Starter => Content::Starter,
             ContentKind::CandlestickChart => Content::Kline {
@@ -2646,10 +2646,13 @@ fn virtual_order_from_new_order_request(
     use crate::replay::virtual_exchange::{PositionSide, VirtualOrder, VirtualOrderStatus, VirtualOrderType};
 
     // tachibana API: side "3" = 買い, "1" = 売り
-    let side = if req.side == "3" {
-        PositionSide::Long
-    } else {
-        PositionSide::Short
+    let side = match req.side.as_str() {
+        "3" => PositionSide::Long,
+        "1" => PositionSide::Short,
+        unknown => {
+            log::warn!("仮想注文: 未知の side コード ({unknown:?}) — 注文を破棄");
+            return None;
+        }
     };
 
     let order_type = if req.price == "0" {

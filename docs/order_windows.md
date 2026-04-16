@@ -13,6 +13,70 @@ flowsurface に立花証券 e 支店 API を使った注文機能を追加した
 | **余力情報パネル** | 買付可能額・保証金率の確認 | CLMZanKaiKanougaku / CLMZanShinkiKanoIjiritu |
 | **保有株数取得** | 売り注文時の全数量ボタン | CLMGenbutuKabuList |
 | **仮想注文モード (REPLAY)** | REPLAY 中の疑似発注・PnL トラッキング | 内部エンジン（証券 API 不使用） |
+| **サイドバー注文ボタン** | 注文パネルを開くエントリーポイント | UI のみ（API なし） |
+
+---
+
+## サイドバー注文ボタン
+
+### 概要
+
+注文パネルを開くためのエントリーポイント。サイドバーに専用の「注文」ボタン（鉛筆アイコン）を追加した。
+
+### ボタン配置
+
+```
+虫眼鏡 (Search)  ← ティッカーテーブル展開
+注文   (Order)   ← 注文パネル選択リスト展開  ★新規
+レイアウト
+音量
+───（スペーサー）───
+設定
+```
+
+### 動作
+
+1. 注文ボタンをクリックするとインラインパネルが展開する:
+
+   ```
+   [ Order Entry  ]
+   [ Order List   ]
+   [ Buying Power ]
+   ```
+
+2. いずれかを選択すると、フォーカスペインを **Horizontal Split** して新ペインに選択した種類を直接表示する。
+
+3. **注文パネルとティッカーテーブルは相互排他**: 一方を開くと他方が閉じる。
+
+### 実装ファイル
+
+| ファイル | 変更内容 |
+|---|---|
+| `data/src/config/sidebar.rs` | `Menu::Order` バリアント追加（`#[serde(skip)]` のため永続化に影響なし） |
+| `src/screen/dashboard/sidebar.rs` | `Message::OrderPaneSelected` / `Action::OpenOrderPane` 追加、注文ボタン・インラインパネル・相互排他ロジック |
+| `src/screen/dashboard.rs` | `split_focused_and_init_order()` 追加、`auto_focus_single_pane()` 切り出し |
+| `src/main.rs` | `Action::OpenOrderPane` ハンドラ・`Menu::Order` アーム追加 |
+
+### `split_focused_and_init_order`
+
+`TickerInfo` 不要（`SyncIssueToOrderEntry` で自動連動）のため、`set_content_and_streams` を使わず `Content::placeholder()` で直接初期化する。
+
+```rust
+/// フォーカスペインを Horizontal Split し、新ペインを指定の注文パネルで初期化する。
+pub fn split_focused_and_init_order(
+    &mut self,
+    main_window: window::Id,
+    content_kind: data::layout::pane::ContentKind,
+) -> Task<Message>
+```
+
+- フォーカスなし・単一ペイン → 自動フォーカス後に Split
+- フォーカスなし・複数ペイン → `Toast::warn("No focused pane found")`
+- `panes.split()` 失敗 → `Toast::warn("Could not split pane")`
+
+### `auto_focus_single_pane`（プライベートヘルパー）
+
+`split_focused_and_init` / `split_focused_and_init_order` / `switch_tickers_in_group` で共通化された「フォーカスなし単一ペイン時の自動フォーカス」ロジック。
 
 ---
 
@@ -408,15 +472,35 @@ pub struct HoldingRecord {
 
 ```rust
 pub enum ContentKind {
-    // 既存 8 種類 ...
-    OrderEntry,     // 注文入力パネル
-    OrderList,      // 注文約定照会パネル
-    BuyingPower,    // 余力情報パネル
+    // チャート・パネル系 8 種類
+    Starter,
+    HeatmapChart,
+    ShaderHeatmap,
+    FootprintChart,
+    CandlestickChart,
+    ComparisonChart,
+    TimeAndSales,
+    Ladder,
+    // 注文系（ALL には含まない — サイドバー注文ボタン経由のみで開く）
+    OrderEntry,
+    OrderList,
+    BuyingPower,
 }
 
-// ALL 定数: 11 要素
-pub const ALL: [ContentKind; 11] = [ ... ];
+// ALL 定数: 8 要素（注文系 3 種は除外 — Starter ペインの pick_list に表示しない）
+pub const ALL: [ContentKind; 8] = [
+    ContentKind::Starter,
+    ContentKind::HeatmapChart,
+    ContentKind::ShaderHeatmap,
+    ContentKind::FootprintChart,
+    ContentKind::CandlestickChart,
+    ContentKind::ComparisonChart,
+    ContentKind::TimeAndSales,
+    ContentKind::Ladder,
+];
 ```
+
+> **注文系バリアントを `ALL` から除外した理由**: 注文パネルはサイドバー注文ボタンが唯一の開き方であるため、Starter ペインの pick_list に表示する必要がなくなった。`Pane` enum のバリアントとしては残るため、保存済みレイアウト JSON のデシリアライズには影響しない。
 
 ### Pane enum 拡張
 
@@ -805,6 +889,32 @@ pub enum Content {
 }
 ```
 
+### `Content::placeholder`
+
+`TickerInfo` 不要なパネルを初期化する際に使用する公開ファクトリ。
+`set_content_and_streams()` は `tickers[0]` に無条件アクセスするため、注文パネルでは使用不可。
+
+```rust
+// pub に変更済み（サイドバー注文ボタンの split_focused_and_init_order から呼び出すため）
+pub fn placeholder(kind: ContentKind) -> Self { ... }
+```
+
+### `virtual_order_from_new_order_request`（プライベート）
+
+`NewOrderRequest` を `VirtualOrder` に変換するヘルパー。`side` フィールドのマッピングは `match` で排他的に処理し、未知コードは `log::warn!` + `None` で破棄する。
+
+```rust
+// tachibana API: "3" = 買い, "1" = 売り
+let side = match req.side.as_str() {
+    "3" => PositionSide::Long,
+    "1" => PositionSide::Short,
+    unknown => {
+        log::warn!("仮想注文: 未知の side コード ({unknown:?}) — 注文を破棄");
+        return None;
+    }
+};
+```
+
 ### panel::Message
 
 注文関連 variant は `String` フィールドを含むため `Copy` 不可。
@@ -975,6 +1085,16 @@ pub enum Message {
 fn sync_virtual_mode(&mut self) {
     // 全ペインの is_virtual_mode と OrderEntryPanel の is_virtual を同期する
 }
+
+// フォーカスなし・単一ペイン時の自動フォーカス（内部ヘルパー）
+fn auto_focus_single_pane(&mut self, main_window: window::Id) { ... }
+
+// 注文パネル専用 Split（TickerInfo 不要）
+pub fn split_focused_and_init_order(
+    &mut self,
+    main_window: window::Id,
+    content_kind: data::layout::pane::ContentKind,
+) -> Task<Message> { ... }
 ```
 
 `VirtualOrderFilled` ハンドラはトースト通知を表示する:
@@ -1091,6 +1211,10 @@ pub fn margin_call_color(theme: &Theme) -> Color
 | **仮想注文エンジンの main.rs 統合** | `src/main.rs` |
 | **HTTP API（POST /api/replay/order 等）** | `src/replay_api.rs` |
 | **仮想約定トースト通知** | `src/screen/dashboard.rs` |
+| **サイドバー注文ボタン・インラインパネル** | `src/screen/dashboard/sidebar.rs` |
+| **注文パネル専用 Split（`split_focused_and_init_order`）** | `src/screen/dashboard.rs` |
+| **`auto_focus_single_pane` 共通ヘルパー化** | `src/screen/dashboard.rs` |
+| **`ContentKind::ALL` から注文系除外** | `data/src/layout/pane.rs` |
 
 ### 未実装・残課題
 
@@ -1116,7 +1240,7 @@ pub fn margin_call_color(theme: &Theme) -> Color
 | ファイル | 変更種別 |
 |---|---|
 | `exchange/src/adapter/tachibana.rs` | 注文・照会・余力・保有株数 API 型追加 |
-| `data/src/layout/pane.rs` | `ContentKind` 拡張・`ALL` 更新・`Pane` enum に variant 追加 |
+| `data/src/layout/pane.rs` | `ContentKind` / `Pane` enum に注文系 3 variant 追加・`ALL` を 11→8 に縮小（注文系除外）|
 | `src/screen/dashboard/panel/order_entry.rs` | **新規**（±ティックボタン / 保有株表示 / 全数量ボタン / 仮想モード UI） |
 | `src/screen/dashboard/panel/order_list.rs` | **新規**（訂正・取消モーダル / 約定通知 / Panel trait 不使用） |
 | `src/screen/dashboard/panel/buying_power.rs` | **新規**（iced widget、Panel trait 不使用） |
@@ -1132,7 +1256,9 @@ pub fn margin_call_color(theme: &Theme) -> Color
 | `src/replay/virtual_exchange/order_book.rs` | **新規** `VirtualOrderBook`・`FillEvent`（ユニットテスト 7 件） |
 | `src/replay/controller.rs` | `current_time_ms()` メソッド追加 |
 | `src/replay_api.rs` | `ApiCommand::VirtualExchange` と 3 エンドポイント追加 |
-| `src/main.rs` | `virtual_engine` フィールド・Tick ごとの on_tick フック・仮想注文ハンドラ |
+| `src/main.rs` | `virtual_engine` フィールド・Tick ごとの on_tick フック・仮想注文ハンドラ・`OpenOrderPane` ハンドラ・`Menu::Order` アーム |
+| `data/src/config/sidebar.rs` | `Menu::Order` バリアント追加 |
+| `src/screen/dashboard/sidebar.rs` | `Message::OrderPaneSelected` / `Action::OpenOrderPane` 追加・注文ボタン・インラインパネル・相互排他ロジック |
 
 ---
 
@@ -1154,3 +1280,7 @@ pub fn margin_call_color(theme: &Theme) -> Color
 - **`tokio::task::block_in_place()`**: iced の同期 `update()` コンテキストから `Arc<tokio::sync::Mutex<T>>` を同期ロックするために使用。`block_in_place` は tokio の multi-thread runtime でのみ動作する。
 - **仮想注文の `placed_time_ms`**: pane.rs の `virtual_order_from_new_order_request()` では `0` を入れている。正確な時刻は `dashboard.rs` → `main.rs` の `SubmitVirtualOrder` ハンドラで `replay.current_time_ms()` を取得して上書きする設計にする（Phase 2）。
 - **`#[allow(dead_code)]` の活用**: Phase 2 で使用予定のメソッド（`record_close()`、`orders()`）と フィールド（`exit_time_ms`）には `#[allow(dead_code)]` を付けてコメントを残す。将来削除ではなく「設計上意図的」であることを示す。
+- **注文パネルを `ALL` から除外すると `set_content_and_streams` の bypass が必要**: `set_content_and_streams` は `tickers[0]` に無条件アクセスするため、TickerInfo 不要な注文パネルには使えない。`Content::placeholder()` を `pub` にして `split_focused_and_init_order` から呼び出す設計にした。
+- **`Menu::Order` の modal 処理**: `main.rs` の `view_with_menu()` は `match menu` で全バリアントを網羅する。`Order` は modal を出さずサイドバーインラインで表示するため、アームは `base` をそのまま返す。
+- **`split_focused_and_init_order` は `Option<Task>` でなく `Task` を返す**: フォーカスなし複数ペイン時も Toast 警告を含む `Task` を返すため、呼び出し側で `None` 分岐が不要。`split_focused_and_init`（`Option<Task>` 返し）との設計差異に注意。
+- **サイレント失敗を避ける**: `panes.split()` 失敗は頻度が低いが「ボタンを押したのに何も起きない」UX になる。`Task::none()` ではなく `Toast::warn("Could not split pane")` を返すことでデバッグ可能にする。
