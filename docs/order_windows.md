@@ -900,10 +900,16 @@ pub enum Message {
     ConfirmCancelled,                   // 確認モーダルを閉じる
     Submitted,                          // 実際に発注 Effect を発行
     OrderCompleted(OrderResult),        // API 応答を受け取り UI を更新
+    SyncIssue {                         // チャートペインからの銘柄連動
+        issue_code: String,
+        issue_name: String,
+        tick_size: Option<f64>,
+    },
 }
 
 pub enum Action {
-    Submit(NewOrderRequest),            // pane.rs が Effect::SubmitNewOrder に変換
+    Submit(Box<NewOrderRequest>),       // pane.rs が Effect::SubmitNewOrder に変換
+                                        // NOTE: NewOrderRequest が 240 bytes のため Box 化（clippy 警告対応）
     FetchHoldings { issue_code: String },   // 売り選択時に保有株数を取得
 }
 ```
@@ -1040,8 +1046,12 @@ pub struct OrderListPanel {
     prev_orders: Vec<OrderRecord>,          // 約定通知の diff 用
     expanded_order: Option<String>,         // 展開中の注文番号
     executions: HashMap<String, Vec<ExecutionRecord>>,
-    last_fetched_at: Option<Instant>,
-    polling_interval: Duration,             // デフォルト 10秒
+    correct_modal: Option<CorrectModal>,    // 訂正モーダル状態（フェーズ 4 と統合）
+    cancel_modal: Option<CancelModal>,      // 取消モーダル状態（フェーズ 4 と統合）
+    loading: bool,
+    last_error: Option<String>,
+    // NOTE: last_fetched_at / polling_interval はポーリング未実装のため省略
+    // ポーリングは dashboard.rs の subscription() で管理する（Phase 7-完成予定）
 }
 ```
 
@@ -1125,15 +1135,11 @@ pub async fn fetch_order_detail(
     eig_day: &str,
 ) -> Result<Vec<ExecutionRecord>, TachibanaError>
 
+// 現物余力と信用余力を tokio::join! で並列取得してタプルで返す
 pub async fn fetch_buying_power(
     client: &reqwest::Client,
     session: &TachibanaSession,
-) -> Result<BuyingPowerResponse, TachibanaError>
-
-pub async fn fetch_margin_power(
-    client: &reqwest::Client,
-    session: &TachibanaSession,
-) -> Result<MarginPowerResponse, TachibanaError>
+) -> Result<(BuyingPowerResponse, MarginPowerResponse), String>
 
 // 保有株数取得（CLMGenbutuKabuList）
 // 売り注文時の「全数量」ボタン / 保有株表示用
@@ -1214,6 +1220,7 @@ pub fn side_color(side: &Side, theme: &Theme) -> Color
 
 ### フェーズ 7-骨格: 型コンパイル確認
 - ✅ `panel/order_entry.rs` / `order_list.rs` / `buying_power.rs` を `todo!()` で作成
+- ✅ `set_content_and_streams` の `todo!("order panel content")` → `unreachable!()` に昇格（注文ペインはストリーム不要のため、ここに到達するのはバグ）
 - ✅ `panel.rs` に `pub mod` 宣言追加
 - ✅ `panel::Message` を `Copy` → `Clone` に変更し `OrderEntry` / `OrderList` / `BuyingPower` variant 追加
 - ✅ `pane.rs` の `Content` enum に variant 追加（view/update のアームも追加）

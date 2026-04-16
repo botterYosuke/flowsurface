@@ -419,8 +419,8 @@ impl State {
                 ContentKind::OrderEntry
                 | ContentKind::OrderList
                 | ContentKind::BuyingPower => {
-                    // 注文パネルは ticker_info / stream を必要としない
-                    todo!("order panel content")
+                    // 注文パネルは ticker_info / stream を必要としない — ここに到達するのはバグ
+                    unreachable!("order panes do not use streams — caller must not reach here")
                 }
             }
         };
@@ -642,7 +642,10 @@ impl State {
                 .height(widget::PANE_CONTROL_BTN_HEIGHT);
 
             top_left_buttons = top_left_buttons.push(tickers_list_btn);
-        } else if !matches!(self.content, Content::Starter) && !self.has_stream() {
+        } else if !matches!(
+            self.content,
+            Content::Starter | Content::OrderEntry(_) | Content::OrderList(_) | Content::BuyingPower(_)
+        ) && !self.has_stream() {
             let content = row![
                 text("Choose a ticker")
                     .size(13)
@@ -1243,7 +1246,13 @@ impl State {
             Event::ContentSelected(kind) => {
                 self.content = Content::placeholder(kind);
 
-                if !matches!(kind, ContentKind::Starter) {
+                if !matches!(
+                    kind,
+                    ContentKind::Starter
+                        | ContentKind::OrderEntry
+                        | ContentKind::OrderList
+                        | ContentKind::BuyingPower
+                ) {
                     self.streams = ResolvedStream::waiting(vec![]);
                     let modal = Modal::MiniTickersList(MiniPanel::new());
 
@@ -2614,5 +2623,53 @@ fn by_basis_default<T>(
     match basis.unwrap_or(Basis::Time(default_tf)) {
         Basis::Time(tf) => on_time(tf),
         Basis::Tick(_) => on_tick(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 注文ペインで ContentSelected を受け取っても MiniTickersList モーダルを開かないこと
+    #[test]
+    fn content_selected_order_entry_does_not_open_ticker_modal() {
+        let mut state = State::new();
+        let effect = state.update(Event::ContentSelected(ContentKind::OrderEntry));
+        assert!(
+            effect.is_none(),
+            "OrderEntry ContentSelected should not return an effect"
+        );
+        assert!(
+            state.modal.is_none(),
+            "OrderEntry ContentSelected should not open a modal"
+        );
+    }
+
+    #[test]
+    fn content_selected_order_list_does_not_open_ticker_modal() {
+        let mut state = State::new();
+        let effect = state.update(Event::ContentSelected(ContentKind::OrderList));
+        assert!(effect.is_none());
+        assert!(state.modal.is_none());
+    }
+
+    #[test]
+    fn content_selected_buying_power_does_not_open_ticker_modal() {
+        let mut state = State::new();
+        let effect = state.update(Event::ContentSelected(ContentKind::BuyingPower));
+        assert!(effect.is_none());
+        assert!(state.modal.is_none());
+    }
+
+    /// 非注文ペインは引き続き MiniTickersList モーダルを開くこと（リグレッション確認）
+    #[test]
+    fn content_selected_kline_opens_ticker_modal() {
+        let mut state = State::new();
+        let _effect = state.update(Event::ContentSelected(ContentKind::CandlestickChart));
+        assert!(
+            state.modal.is_some(),
+            "CandlestickChart ContentSelected should open a modal"
+        );
+        assert!(matches!(state.modal, Some(Modal::MiniTickersList(_))));
     }
 }

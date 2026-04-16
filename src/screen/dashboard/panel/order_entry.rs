@@ -526,7 +526,7 @@ impl OrderEntryPanel {
             };
             let info = row![
                 text(format!("{} ", self.issue_code)).size(12),
-                text(&side_str)
+                text(side_str.clone())
                     .size(12)
                     .color(crate::style::side_color(&side_str, theme)),
                 text(format!(" {}株 {}", self.qty, price_str)).size(12),
