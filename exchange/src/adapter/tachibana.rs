@@ -1212,6 +1212,453 @@ pub fn connect_event_stream(
     })
 }
 
+// ── 注文 API 型定義 ──────────────────────────────────────────────────────────
+
+// NOTE: second_password を含む構造体には #[derive(Debug)] を付けない
+// (Debug トレイトはログ出力などに使われ、パスワードが漏洩するリスクがある)
+
+/// CLMKabuNewOrder 新規注文リクエスト。
+/// p_no / p_sd_date / sCLMID / sJsonOfmt / 逆指値デフォルトは
+/// connector 側の `serialize_order_request()` で付与する。
+#[derive(Clone, Serialize)]
+pub struct NewOrderRequest {
+    /// 口座区分: 1=特定, 3=一般, 5=NISA, 6=N成長
+    #[serde(rename = "sZyoutoekiKazeiC")]
+    pub account_type: String,
+    /// 銘柄コード（例: "8411"）
+    #[serde(rename = "sIssueCode")]
+    pub issue_code: String,
+    /// 市場コード: "00"=東証
+    #[serde(rename = "sSizyouC")]
+    pub market_code: String,
+    /// 売買区分: 1=売, 3=買
+    #[serde(rename = "sBaibaiKubun")]
+    pub side: String,
+    /// 執行条件: "0"=指定なし, "2"=寄付, "4"=引け, "6"=不成
+    #[serde(rename = "sCondition")]
+    pub condition: String,
+    /// 注文値段: "0"=成行, 数値文字列=指値
+    #[serde(rename = "sOrderPrice")]
+    pub price: String,
+    /// 注文株数（例: "100"）
+    #[serde(rename = "sOrderSuryou")]
+    pub qty: String,
+    /// 現物/信用区分: "0"=現物, "2"=信用新規(制度6ヶ月), "4"=信用返済(制度),
+    ///                "6"=信用新規(一般), "8"=信用返済(一般)
+    #[serde(rename = "sGenkinShinyouKubun")]
+    pub cash_margin: String,
+    /// 注文期日: "0"=当日, YYYYMMDD=期日指定
+    #[serde(rename = "sOrderExpireDay")]
+    pub expire_day: String,
+    /// 第二パスワード（発注パスワード）
+    #[serde(rename = "sSecondPassword")]
+    pub second_password: String,
+}
+
+/// Debug の手動実装: second_password をマスクして出力する。
+impl std::fmt::Debug for NewOrderRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NewOrderRequest")
+            .field("account_type", &self.account_type)
+            .field("issue_code", &self.issue_code)
+            .field("market_code", &self.market_code)
+            .field("side", &self.side)
+            .field("condition", &self.condition)
+            .field("price", &self.price)
+            .field("qty", &self.qty)
+            .field("cash_margin", &self.cash_margin)
+            .field("expire_day", &self.expire_day)
+            .field("second_password", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// CLMKabuNewOrder 新規注文レスポンス。
+/// `ApiResponse<NewOrderResponse>` でラップして `check()` を呼ぶ。
+#[derive(Debug, Clone, Deserialize)]
+pub struct NewOrderResponse {
+    #[serde(rename = "sOrderNumber", default)]
+    pub order_number: String,
+    #[serde(rename = "sEigyouDay", default)]
+    pub eig_day: String,
+    #[serde(rename = "sOrderUkewatasiKingaku", default)]
+    pub delivery_amount: String,
+    #[serde(rename = "sOrderTesuryou", default)]
+    pub commission: String,
+    #[serde(rename = "sOrderSyouhizei", default)]
+    pub consumption_tax: String,
+    /// 金利（現物時は "-"）
+    #[serde(rename = "sKinri", default)]
+    pub interest: String,
+    /// 注文日時 (YYYYMMDDHHMMSS)
+    #[serde(rename = "sOrderDate", default)]
+    pub order_datetime: String,
+    #[serde(rename = "sWarningCode", default)]
+    pub warning_code: String,
+    #[serde(rename = "sWarningText", default)]
+    pub warning_text: String,
+}
+
+/// CLMKabuCorrectOrder 訂正注文リクエスト。
+#[derive(Clone, Serialize)]
+pub struct CorrectOrderRequest {
+    #[serde(rename = "sOrderNumber")]
+    pub order_number: String,
+    #[serde(rename = "sEigyouDay")]
+    pub eig_day: String,
+    /// "*"=変更なし
+    #[serde(rename = "sCondition")]
+    pub condition: String,
+    /// "*"=変更なし, "0"=成行変更, 数値=変更後の値段
+    #[serde(rename = "sOrderPrice")]
+    pub price: String,
+    /// "*"=変更なし, 数値=変更後の株数（増株不可）
+    #[serde(rename = "sOrderSuryou")]
+    pub qty: String,
+    /// "*"=変更なし, "0"=当日, YYYYMMDD=変更後の期日
+    #[serde(rename = "sOrderExpireDay")]
+    pub expire_day: String,
+    #[serde(rename = "sSecondPassword")]
+    pub second_password: String,
+}
+
+/// Debug の手動実装: second_password をマスクして出力する。
+impl std::fmt::Debug for CorrectOrderRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CorrectOrderRequest")
+            .field("order_number", &self.order_number)
+            .field("eig_day", &self.eig_day)
+            .field("condition", &self.condition)
+            .field("price", &self.price)
+            .field("qty", &self.qty)
+            .field("expire_day", &self.expire_day)
+            .field("second_password", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// CLMKabuCancelOrder 取消注文リクエスト。
+#[derive(Clone, Serialize)]
+pub struct CancelOrderRequest {
+    #[serde(rename = "sOrderNumber")]
+    pub order_number: String,
+    #[serde(rename = "sEigyouDay")]
+    pub eig_day: String,
+    #[serde(rename = "sSecondPassword")]
+    pub second_password: String,
+}
+
+/// Debug の手動実装: second_password をマスクして出力する。
+impl std::fmt::Debug for CancelOrderRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CancelOrderRequest")
+            .field("order_number", &self.order_number)
+            .field("eig_day", &self.eig_day)
+            .field("second_password", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// CLMKabuCorrectOrder / CLMKabuCancelOrder 共通レスポンス。
+#[derive(Debug, Clone, Deserialize)]
+pub struct ModifyOrderResponse {
+    #[serde(rename = "sOrderNumber", default)]
+    pub order_number: String,
+    #[serde(rename = "sEigyouDay", default)]
+    pub eig_day: String,
+    /// 注文日時 (YYYYMMDDHHMMSS)
+    #[serde(rename = "sOrderDate", default)]
+    pub order_datetime: String,
+}
+
+/// CLMOrderList 注文一覧リクエスト。
+#[derive(Debug, Serialize)]
+pub struct OrderListRequest {
+    /// 銘柄コード（空文字=全銘柄）
+    #[serde(rename = "sIssueCode")]
+    pub issue_code: String,
+    /// 執行予定日 (YYYYMMDD)
+    #[serde(rename = "sSikkouDay")]
+    pub sikkou_day: String,
+    /// 照会状態（""=全件）
+    #[serde(rename = "sOrderSyoukaiStatus")]
+    pub status_filter: String,
+}
+
+/// CLMOrderList 注文一覧レスポンス。
+#[derive(Debug, Deserialize)]
+pub struct OrderListResponse {
+    #[serde(rename = "aOrderList", default)]
+    pub orders: Vec<OrderRecord>,
+}
+
+/// 注文一覧の1件レコード。
+#[derive(Debug, Clone, Deserialize)]
+pub struct OrderRecord {
+    #[serde(rename = "sOrderOrderNumber", default)]
+    pub order_num: String,
+    #[serde(rename = "sOrderIssueCode", default)]
+    pub issue_code: String,
+    #[serde(rename = "sOrderOrderSuryou", default)]
+    pub order_qty: String,
+    /// 有効株数
+    #[serde(rename = "sOrderCurrentSuryou", default)]
+    pub current_qty: String,
+    #[serde(rename = "sOrderOrderPrice", default)]
+    pub order_price: String,
+    /// 注文日時 (YYYYMMDDHHMMSS)
+    #[serde(rename = "sOrderOrderDateTime", default)]
+    pub order_datetime: String,
+    /// 状態名称（テキスト）
+    #[serde(rename = "sOrderStatus", default)]
+    pub status_text: String,
+    #[serde(rename = "sOrderYakuzyouSuryo", default)]
+    pub executed_qty: String,
+    #[serde(rename = "sOrderYakuzyouPrice", default)]
+    pub executed_price: String,
+    /// 営業日（訂正・取消で注文番号とペアで使用）
+    #[serde(rename = "sOrderEigyouDay", default)]
+    pub eig_day: String,
+}
+
+impl OrderRecord {
+    /// この注文が取消可能かどうかを状態テキストで判定する。
+    /// "受付中" / "注文中" / "一部約定" → true
+    pub fn is_cancelable(&self) -> bool {
+        matches!(
+            self.status_text.as_str(),
+            "受付中" | "注文中" | "一部約定"
+        )
+    }
+}
+
+/// CLMOrderListDetail 約定明細リクエスト。
+#[derive(Debug, Serialize)]
+pub struct OrderDetailRequest {
+    #[serde(rename = "sOrderNumber")]
+    pub order_num: String,
+    #[serde(rename = "sEigyouDay")]
+    pub eig_day: String,
+}
+
+/// CLMOrderListDetail 約定明細レスポンス。
+#[derive(Debug, Deserialize)]
+pub struct OrderDetailResponse {
+    #[serde(rename = "aYakuzyouSikkouList", default)]
+    pub executions: Vec<ExecutionRecord>,
+}
+
+/// 約定明細1件。
+#[derive(Debug, Clone, Deserialize)]
+pub struct ExecutionRecord {
+    #[serde(rename = "sYakuzyouSuryou", default)]
+    pub exec_qty: String,
+    #[serde(rename = "sYakuzyouPrice", default)]
+    pub exec_price: String,
+    #[serde(rename = "sYakuzyouDate", default)]
+    pub exec_datetime: String,
+}
+
+/// CLMZanKaiKanougaku 現物買付余力レスポンス。
+#[derive(Debug, Clone, Deserialize)]
+pub struct BuyingPowerResponse {
+    #[serde(rename = "sSummaryGenkabuKaituke", default)]
+    pub cash_buying_power: String,
+    #[serde(rename = "sSummaryNseityouTousiKanougaku", default)]
+    pub nisa_growth_buying_power: String,
+    #[serde(rename = "sHusokukinHasseiFlg", default)]
+    pub shortage_flag: String,
+}
+
+/// CLMZanShinkiKanoIjiritu 信用新規可能委託保証金率レスポンス。
+#[derive(Debug, Clone, Deserialize)]
+pub struct MarginPowerResponse {
+    #[serde(rename = "sSummarySinyouSinkidate", default)]
+    pub margin_new_order_power: String,
+    #[serde(rename = "sItakuhosyoukin", default)]
+    pub maintenance_margin_rate: String,
+    /// 追証フラグ: "0"=なし, "1"=確定
+    #[serde(rename = "sOisyouKakuteiFlg", default)]
+    pub margin_call_flag: String,
+}
+
+/// CLMGenbutuKabuList 現物保有リクエスト。
+#[derive(Debug, Serialize)]
+pub struct GenbutuKabuRequest {
+    /// 銘柄コード（空文字=全保有銘柄）
+    #[serde(rename = "sIssueCode")]
+    pub issue_code: String,
+}
+
+/// CLMGenbutuKabuList 現物保有レスポンス。
+#[derive(Debug, Deserialize)]
+pub struct GenbutuKabuResponse {
+    #[serde(rename = "aGenbutuKabuList", default)]
+    pub holdings: Vec<HoldingRecord>,
+}
+
+/// 保有株式1件。
+#[derive(Debug, Deserialize)]
+pub struct HoldingRecord {
+    #[serde(rename = "sUriOrderIssueCode", default)]
+    pub issue_code: String,
+    /// 残高株数（保有数量）
+    #[serde(rename = "sUriOrderZanKabuSuryou", default)]
+    pub holding_qty: String,
+    /// 売付可能株数
+    #[serde(rename = "sUriOrderUritukeKanouSuryou", default)]
+    pub sellable_qty: String,
+}
+
+/// 注文 API リクエストを JSON にシリアライズし、共通フィールドを付与する。
+///
+/// 付与するフィールド: `p_no`, `p_sd_date`, `sCLMID`, `sJsonOfmt`
+/// connector 関数はこれを呼び出して API URL を構築する。
+pub fn serialize_order_request<T: Serialize>(
+    req: &T,
+    clm_id: &str,
+) -> Result<String, TachibanaError> {
+    let mut value = serde_json::to_value(req)?;
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert("p_no".to_string(), serde_json::Value::String(next_p_no()));
+        obj.insert(
+            "p_sd_date".to_string(),
+            serde_json::Value::String(current_p_sd_date()),
+        );
+        obj.insert(
+            "sCLMID".to_string(),
+            serde_json::Value::String(clm_id.to_string()),
+        );
+        obj.insert(
+            "sJsonOfmt".to_string(),
+            serde_json::Value::String("5".to_string()),
+        );
+    }
+    Ok(serde_json::to_string(&value)?)
+}
+
+// ── 注文 API 関数 ─────────────────────────────────────────────────────────────
+
+/// CLMKabuNewOrder — 新規注文を発注する。
+pub async fn submit_new_order(
+    client: &reqwest::Client,
+    session: &TachibanaSession,
+    req: &NewOrderRequest,
+) -> Result<NewOrderResponse, TachibanaError> {
+    let json_body = serialize_order_request(req, "CLMKabuNewOrder")?;
+    let text = post_request(client, &session.url_request, &json_body).await?;
+    let api_resp: ApiResponse<NewOrderResponse> = serde_json::from_str(&text)?;
+    api_resp.check()
+}
+
+/// CLMKabuCorrectOrder — 訂正注文を発注する。
+pub async fn submit_correct_order(
+    client: &reqwest::Client,
+    session: &TachibanaSession,
+    req: &CorrectOrderRequest,
+) -> Result<ModifyOrderResponse, TachibanaError> {
+    let json_body = serialize_order_request(req, "CLMKabuCorrectOrder")?;
+    let text = post_request(client, &session.url_request, &json_body).await?;
+    let api_resp: ApiResponse<ModifyOrderResponse> = serde_json::from_str(&text)?;
+    api_resp.check()
+}
+
+/// CLMKabuCancelOrder — 取消注文を発注する。
+pub async fn submit_cancel_order(
+    client: &reqwest::Client,
+    session: &TachibanaSession,
+    req: &CancelOrderRequest,
+) -> Result<ModifyOrderResponse, TachibanaError> {
+    let json_body = serialize_order_request(req, "CLMKabuCancelOrder")?;
+    let text = post_request(client, &session.url_request, &json_body).await?;
+    let api_resp: ApiResponse<ModifyOrderResponse> = serde_json::from_str(&text)?;
+    api_resp.check()
+}
+
+/// CLMOrderList — 注文一覧を取得する。
+/// `eig_day`: 執行予定日 (YYYYMMDD)。空文字=全件。
+pub async fn fetch_orders(
+    client: &reqwest::Client,
+    session: &TachibanaSession,
+    eig_day: &str,
+) -> Result<Vec<OrderRecord>, TachibanaError> {
+    let req = OrderListRequest {
+        issue_code: String::new(),
+        sikkou_day: eig_day.to_string(),
+        status_filter: String::new(),
+    };
+    let json_body = serialize_order_request(&req, "CLMOrderList")?;
+    let text = post_request(client, &session.url_request, &json_body).await?;
+    let api_resp: ApiResponse<OrderListResponse> = serde_json::from_str(&text)?;
+    let data = api_resp.check()?;
+    Ok(data.orders)
+}
+
+/// CLMOrderListDetail — 約定明細を取得する。
+pub async fn fetch_order_detail(
+    client: &reqwest::Client,
+    session: &TachibanaSession,
+    order_num: &str,
+    eig_day: &str,
+) -> Result<Vec<ExecutionRecord>, TachibanaError> {
+    let req = OrderDetailRequest {
+        order_num: order_num.to_string(),
+        eig_day: eig_day.to_string(),
+    };
+    let json_body = serialize_order_request(&req, "CLMOrderListDetail")?;
+    let text = post_request(client, &session.url_request, &json_body).await?;
+    let api_resp: ApiResponse<OrderDetailResponse> = serde_json::from_str(&text)?;
+    let data = api_resp.check()?;
+    Ok(data.executions)
+}
+
+/// CLMZanKaiKanougaku — 現物買付余力を取得する。
+pub async fn fetch_buying_power(
+    client: &reqwest::Client,
+    session: &TachibanaSession,
+) -> Result<BuyingPowerResponse, TachibanaError> {
+    // リクエストフィールドなし（共通フィールドのみ）
+    let json_body = serialize_order_request(&serde_json::json!({}), "CLMZanKaiKanougaku")?;
+    let text = post_request(client, &session.url_request, &json_body).await?;
+    let api_resp: ApiResponse<BuyingPowerResponse> = serde_json::from_str(&text)?;
+    api_resp.check()
+}
+
+/// CLMZanShinkiKanoIjiritu — 信用新規可能委託保証金率を取得する。
+pub async fn fetch_margin_power(
+    client: &reqwest::Client,
+    session: &TachibanaSession,
+) -> Result<MarginPowerResponse, TachibanaError> {
+    let json_body = serialize_order_request(&serde_json::json!({}), "CLMZanShinkiKanoIjiritu")?;
+    let text = post_request(client, &session.url_request, &json_body).await?;
+    let api_resp: ApiResponse<MarginPowerResponse> = serde_json::from_str(&text)?;
+    api_resp.check()
+}
+
+/// CLMGenbutuKabuList — 保有株数（売付可能株数）を取得する。
+/// 売り注文時の「全数量」ボタン用。
+/// 当該銘柄が保有されていない場合は `Ok(0)` を返す。
+pub async fn fetch_holdings(
+    client: &reqwest::Client,
+    session: &TachibanaSession,
+    issue_code: &str,
+) -> Result<u64, TachibanaError> {
+    let req = GenbutuKabuRequest {
+        issue_code: issue_code.to_string(),
+    };
+    let json_body = serialize_order_request(&req, "CLMGenbutuKabuList")?;
+    let text = post_request(client, &session.url_request, &json_body).await?;
+    let api_resp: ApiResponse<GenbutuKabuResponse> = serde_json::from_str(&text)?;
+    let data = api_resp.check()?;
+    let qty = data
+        .holdings
+        .iter()
+        .find(|h| h.issue_code == issue_code)
+        .and_then(|h| h.sellable_qty.parse::<u64>().ok())
+        .unwrap_or(0);
+    Ok(qty)
+}
+
 // ── テスト ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -3144,5 +3591,245 @@ mod tests {
         assert_eq!(records.len(), 2);
         assert_eq!(records[0], b"abc}");
         assert_eq!(records[1], b"incomplete");
+    }
+
+    // ── Phase 1: 注文 API 型 ───────────────────────────────────────────────────
+
+    /// 成行注文リクエストのフィールド名が API 仕様通りにシリアライズされる
+    #[test]
+    fn new_order_request_market_order_serializes_field_names() {
+        let req = NewOrderRequest {
+            account_type: "1".to_string(),
+            issue_code: "7203".to_string(),
+            market_code: "00".to_string(),
+            side: "3".to_string(),
+            condition: "0".to_string(),
+            price: "0".to_string(),
+            qty: "100".to_string(),
+            cash_margin: "0".to_string(),
+            expire_day: "0".to_string(),
+            second_password: "pass".to_string(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(
+            json.contains(r#""sZyoutoekiKazeiC":"1""#),
+            "sZyoutoekiKazeiC フィールドが必要: {json}"
+        );
+        assert!(
+            json.contains(r#""sIssueCode":"7203""#),
+            "sIssueCode フィールドが必要: {json}"
+        );
+        assert!(
+            json.contains(r#""sBaibaiKubun":"3""#),
+            "sBaibaiKubun フィールドが必要: {json}"
+        );
+        assert!(
+            json.contains(r#""sOrderPrice":"0""#),
+            "sOrderPrice フィールドが必要: {json}"
+        );
+        assert!(
+            json.contains(r#""sSecondPassword":"pass""#),
+            "sSecondPassword フィールドが必要: {json}"
+        );
+    }
+
+    /// 指値注文リクエストのシリアライズ（sOrderPrice に数値文字列が入る）
+    #[test]
+    fn new_order_request_limit_order_serializes_price_field() {
+        let req = NewOrderRequest {
+            account_type: "1".to_string(),
+            issue_code: "8411".to_string(),
+            market_code: "00".to_string(),
+            side: "1".to_string(),
+            condition: "0".to_string(),
+            price: "2500".to_string(),
+            qty: "200".to_string(),
+            cash_margin: "0".to_string(),
+            expire_day: "0".to_string(),
+            second_password: "secret".to_string(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(
+            json.contains(r#""sOrderPrice":"2500""#),
+            "指値の sOrderPrice フィールドが必要: {json}"
+        );
+        assert!(
+            json.contains(r#""sBaibaiKubun":"1""#),
+            "売注文の sBaibaiKubun=1 が必要: {json}"
+        );
+    }
+
+    /// 新規注文レスポンスの正常デシリアライズ
+    #[test]
+    fn new_order_response_deserializes_success() {
+        let json = r#"{
+            "sResultCode": "0",
+            "sOrderNumber": "12345678",
+            "sEigyouDay": "20260416",
+            "sOrderUkewatasiKingaku": "250000",
+            "sOrderTesuryou": "550",
+            "sOrderSyouhizei": "55",
+            "sKinri": "-",
+            "sOrderDate": "20260416103000",
+            "sWarningCode": "0",
+            "sWarningText": ""
+        }"#;
+        let resp: ApiResponse<NewOrderResponse> = serde_json::from_str(json).unwrap();
+        let data = resp.check().unwrap();
+        assert_eq!(data.order_number, "12345678");
+        assert_eq!(data.eig_day, "20260416");
+        assert_eq!(data.commission, "550");
+        assert_eq!(data.interest, "-");
+    }
+
+    /// 新規注文レスポンスのエラーデシリアライズ
+    #[test]
+    fn new_order_response_deserializes_error() {
+        let json = r#"{
+            "sResultCode": "E001",
+            "sResultText": "残高不足"
+        }"#;
+        let resp: ApiResponse<NewOrderResponse> = serde_json::from_str(json).unwrap();
+        let result = resp.check();
+        assert!(result.is_err(), "エラーコードの場合は Err を返すべき");
+    }
+
+    /// 警告付き正常レスポンス（警告コードありでも sResultCode=0 なら Ok）
+    #[test]
+    fn new_order_response_deserializes_with_warning() {
+        let json = r#"{
+            "sResultCode": "0",
+            "sOrderNumber": "99887766",
+            "sEigyouDay": "20260416",
+            "sOrderUkewatasiKingaku": "0",
+            "sOrderTesuryou": "0",
+            "sOrderSyouhizei": "0",
+            "sKinri": "-",
+            "sOrderDate": "20260416150000",
+            "sWarningCode": "W001",
+            "sWarningText": "注文数量が大きいため確認してください"
+        }"#;
+        let resp: ApiResponse<NewOrderResponse> = serde_json::from_str(json).unwrap();
+        let data = resp.check().unwrap();
+        assert_eq!(data.order_number, "99887766");
+        assert_eq!(data.warning_code, "W001");
+        assert!(!data.warning_text.is_empty());
+    }
+
+    /// 訂正注文リクエストのシリアライズ（変更なしフィールド "*" を含む）
+    #[test]
+    fn correct_order_request_serializes_with_no_change_markers() {
+        let req = CorrectOrderRequest {
+            order_number: "12345678".to_string(),
+            eig_day: "20260416".to_string(),
+            condition: "*".to_string(),
+            price: "2600".to_string(),
+            qty: "*".to_string(),
+            expire_day: "*".to_string(),
+            second_password: "pass".to_string(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(
+            json.contains(r#""sOrderNumber":"12345678""#),
+            "sOrderNumber が必要: {json}"
+        );
+        assert!(
+            json.contains(r#""sOrderSuryou":"*""#),
+            "変更なし株数は \"*\" が必要: {json}"
+        );
+        assert!(
+            json.contains(r#""sOrderPrice":"2600""#),
+            "変更後価格が必要: {json}"
+        );
+    }
+
+    /// 取消注文リクエストのシリアライズ
+    #[test]
+    fn cancel_order_request_serializes_correctly() {
+        let req = CancelOrderRequest {
+            order_number: "87654321".to_string(),
+            eig_day: "20260416".to_string(),
+            second_password: "mypass".to_string(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(
+            json.contains(r#""sOrderNumber":"87654321""#),
+            "sOrderNumber が必要: {json}"
+        );
+        assert!(
+            json.contains(r#""sEigyouDay":"20260416""#),
+            "sEigyouDay が必要: {json}"
+        );
+        assert!(
+            json.contains(r#""sSecondPassword":"mypass""#),
+            "sSecondPassword が必要: {json}"
+        );
+    }
+
+    /// is_cancelable: 取消可能な状態テキストで true を返す
+    #[test]
+    fn order_record_is_cancelable_returns_true_for_cancelable_statuses() {
+        for status in &["受付中", "注文中", "一部約定"] {
+            let rec = OrderRecord {
+                order_num: "1".to_string(),
+                issue_code: "7203".to_string(),
+                order_qty: "100".to_string(),
+                current_qty: "100".to_string(),
+                order_price: "2500".to_string(),
+                order_datetime: "20260416103000".to_string(),
+                status_text: status.to_string(),
+                executed_qty: "0".to_string(),
+                executed_price: "0".to_string(),
+                eig_day: "20260416".to_string(),
+            };
+            assert!(
+                rec.is_cancelable(),
+                "status={status} は取消可能なはず"
+            );
+        }
+    }
+
+    /// is_cancelable: 取消不可の状態テキストで false を返す
+    #[test]
+    fn order_record_is_cancelable_returns_false_for_non_cancelable_statuses() {
+        for status in &["全部約定", "取消完了", "失効", "取消中"] {
+            let rec = OrderRecord {
+                order_num: "2".to_string(),
+                issue_code: "7203".to_string(),
+                order_qty: "100".to_string(),
+                current_qty: "0".to_string(),
+                order_price: "2500".to_string(),
+                order_datetime: "20260416103000".to_string(),
+                status_text: status.to_string(),
+                executed_qty: "100".to_string(),
+                executed_price: "2500".to_string(),
+                eig_day: "20260416".to_string(),
+            };
+            assert!(
+                !rec.is_cancelable(),
+                "status={status} は取消不可なはず"
+            );
+        }
+    }
+
+    /// serialize_order_request が共通フィールドを JSON に付与する
+    #[test]
+    fn serialize_order_request_adds_common_fields() {
+        let req = CancelOrderRequest {
+            order_number: "11223344".to_string(),
+            eig_day: "20260416".to_string(),
+            second_password: "pw".to_string(),
+        };
+        let json = serialize_order_request(&req, "CLMKabuCancelOrder").unwrap();
+        assert!(
+            json.contains(r#""sCLMID":"CLMKabuCancelOrder""#),
+            "sCLMID が付与されるべき: {json}"
+        );
+        assert!(
+            json.contains(r#""sJsonOfmt":"5""#),
+            "sJsonOfmt が付与されるべき: {json}"
+        );
+        assert!(json.contains("p_no"), "p_no が付与されるべき: {json}");
+        assert!(json.contains("p_sd_date"), "p_sd_date が付与されるべき: {json}");
     }
 }

@@ -87,6 +87,12 @@ pub enum Pane {
         #[serde(deserialize_with = "ok_or_default", default)]
         link_group: Option<LinkGroup>,
     },
+    /// 注文入力パネル（ユニット variant: 設定なし）
+    OrderEntry,
+    /// 注文照会パネル（ユニット variant: 設定なし）
+    OrderList,
+    /// 余力情報パネル（ユニット variant: 設定なし）
+    BuyingPower,
 }
 
 impl Default for Pane {
@@ -204,10 +210,13 @@ pub enum ContentKind {
     ComparisonChart,
     TimeAndSales,
     Ladder,
+    OrderEntry,
+    OrderList,
+    BuyingPower,
 }
 
 impl ContentKind {
-    pub const ALL: [ContentKind; 8] = [
+    pub const ALL: [ContentKind; 11] = [
         ContentKind::Starter,
         ContentKind::HeatmapChart,
         ContentKind::ShaderHeatmap,
@@ -216,6 +225,9 @@ impl ContentKind {
         ContentKind::ComparisonChart,
         ContentKind::TimeAndSales,
         ContentKind::Ladder,
+        ContentKind::OrderEntry,
+        ContentKind::OrderList,
+        ContentKind::BuyingPower,
     ];
 }
 
@@ -230,6 +242,9 @@ impl std::fmt::Display for ContentKind {
             ContentKind::ComparisonChart => "Comparison Chart",
             ContentKind::TimeAndSales => "Time&Sales",
             ContentKind::Ladder => "DOM/Ladder",
+            ContentKind::OrderEntry => "Order Entry",
+            ContentKind::OrderList => "Order List",
+            ContentKind::BuyingPower => "Buying Power",
         };
         write!(f, "{s}")
     }
@@ -297,7 +312,11 @@ impl PaneSetup {
                         Basis::default_kline_time(Some(base_ticker), Timeframe::M15)
                     }))
                 }
-                ContentKind::Starter | ContentKind::TimeAndSales => None,
+                ContentKind::Starter
+                | ContentKind::TimeAndSales
+                | ContentKind::OrderEntry
+                | ContentKind::OrderList
+                | ContentKind::BuyingPower => None,
             };
 
         let tick_multiplier = match content_kind {
@@ -319,7 +338,10 @@ impl PaneSetup {
             ContentKind::CandlestickChart
             | ContentKind::ComparisonChart
             | ContentKind::TimeAndSales
-            | ContentKind::Starter => current_tick_multiplier,
+            | ContentKind::Starter
+            | ContentKind::OrderEntry
+            | ContentKind::OrderList
+            | ContentKind::BuyingPower => current_tick_multiplier,
         };
 
         let price_step = match tick_multiplier {
@@ -347,5 +369,65 @@ impl PaneSetup {
             depth_aggr,
             push_freq,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── Phase 2: ContentKind / Pane の serde ラウンドトリップ ─────────────────
+
+    /// ContentKind の全バリアントが Display で表示できる
+    #[test]
+    fn content_kind_display_covers_all_variants() {
+        for kind in ContentKind::ALL {
+            let s = kind.to_string();
+            assert!(!s.is_empty(), "{kind:?} の Display が空文字列");
+        }
+    }
+
+    /// 新規追加した ContentKind バリアントが ALL に含まれている
+    #[test]
+    fn content_kind_all_includes_order_variants() {
+        assert!(ContentKind::ALL.contains(&ContentKind::OrderEntry));
+        assert!(ContentKind::ALL.contains(&ContentKind::OrderList));
+        assert!(ContentKind::ALL.contains(&ContentKind::BuyingPower));
+    }
+
+    /// Pane::OrderEntry の serde ラウンドトリップ
+    #[test]
+    fn pane_order_entry_serde_roundtrip() {
+        let pane = Pane::OrderEntry;
+        let json = serde_json::to_string(&pane).unwrap();
+        let restored: Pane = serde_json::from_str(&json).unwrap();
+        assert!(matches!(restored, Pane::OrderEntry));
+    }
+
+    /// Pane::OrderList の serde ラウンドトリップ
+    #[test]
+    fn pane_order_list_serde_roundtrip() {
+        let pane = Pane::OrderList;
+        let json = serde_json::to_string(&pane).unwrap();
+        let restored: Pane = serde_json::from_str(&json).unwrap();
+        assert!(matches!(restored, Pane::OrderList));
+    }
+
+    /// Pane::BuyingPower の serde ラウンドトリップ
+    #[test]
+    fn pane_buying_power_serde_roundtrip() {
+        let pane = Pane::BuyingPower;
+        let json = serde_json::to_string(&pane).unwrap();
+        let restored: Pane = serde_json::from_str(&json).unwrap();
+        assert!(matches!(restored, Pane::BuyingPower));
+    }
+
+    /// 既存の Pane バリアントのデシリアライズは OrderEntry 追加後も壊れない
+    #[test]
+    fn pane_starter_serde_roundtrip_unaffected_by_new_variants() {
+        let pane = Pane::Starter { link_group: None };
+        let json = serde_json::to_string(&pane).unwrap();
+        let restored: Pane = serde_json::from_str(&json).unwrap();
+        assert!(matches!(restored, Pane::Starter { link_group: None }));
     }
 }

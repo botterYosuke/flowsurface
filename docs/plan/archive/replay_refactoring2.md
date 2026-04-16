@@ -960,25 +960,28 @@ cargo clippy -- -D warnings
 ## 進捗
 
 ### P1: seek_to メソッド統一
-- [ ] RED: テスト追加（seek_to 3件）
-- [ ] GREEN: seek_to 実装・4箇所の重複コード置き換え
-- [ ] REFACTOR: doc comment で例外ケースを明記
-- [ ] 完了条件確認
+- ✅ RED: テスト追加（seek_to 3件）
+- ✅ GREEN: seek_to 実装・4箇所の重複コード置き換え
+- ✅ REFACTOR: doc comment で例外ケースを明記
+- ✅ 完了条件確認
 
 ### P2: play_with_range 追加・pending_auto_play 方針確定
-- [ ] RED: テスト追加（play_with_range 2件）
-- [ ] GREEN: play_with_range 実装・main.rs 書き換え
-- [ ] REFACTOR: pending_auto_play に非目標コメント追加
-- [ ] 完了条件確認
+- ✅ RED: テスト追加（play_with_range 2件）
+- ✅ GREEN: play_with_range 実装
+- ✅ REFACTOR: pending_auto_play に非目標コメント追加
+- ✅ 完了条件確認
+- ✅ main.rs の ReplayCommand::Play を play_with_range 1行に書き換え（set_range_start + set_range_end + update の3ステップを集約）
+- **Tips**: set_range_start / set_range_end は dead_code 扱いになるため #[allow(dead_code)] を付与して残す（単独利用の余地を保持）
 
 ### P3: ReplaySession State Machine 導入
-- [ ] RED: テスト追加（遷移テスト 5件以上）
-- [ ] GREEN: ReplaySession enum 定義・全アクセス箇所を session match に移行・tick() 更新
-- [ ] REFACTOR: try_resume_from_waiting 廃止・exhaustive match 整備
-- [ ] 完了条件確認
+- ✅ RED: テスト追加（遷移テスト 4件）
+- ✅ GREEN: ReplaySession enum 定義・全アクセス箇所を session match に移行・tick() 更新
+- ✅ REFACTOR: try_resume_from_waiting 廃止・pending_count による O(1) カウンタ・exhaustive match 整備
+- ✅ 完了条件確認（`cargo check` / `cargo test` 190件全通過 / `cargo clippy -- -D warnings` クリーン）
 
 ### P4: ReplayMessage 責務分割
-- [ ] RED: テスト追加（ハンドラ 3件以上）
-- [ ] GREEN: enum 分割・loader.rs 更新・ハンドラ抽出（サブステップ 7段階）・main.rs 全参照更新
-- [ ] REFACTOR: handle_message ラッパーの存廃を判断
-- [ ] 完了条件確認
+- ✅ RED: テスト追加（ハンドラ 3件：load_event_completed_returns_no_toast / load_event_failed_returns_error_toast / load_event_handler_signature_returns_option_toast）
+- ✅ GREEN: ReplayUserMessage / ReplayLoadEvent / ReplaySystemEvent enum 定義、ReplayMessage を User/Load/System に変更、handle_user_message / handle_load_event / handle_system_event 抽出、handle_message をラッパーに書き換え、loader.rs Task closure 更新、main.rs 全参照更新
+- ✅ REFACTOR: handle_message は移行期ラッパーとして残す（P4 完了後も後方互換ラッパーとして維持、削除は別タスク）
+- ✅ 完了条件確認（`cargo test` 193件全通過 / `cargo clippy -- -D warnings` クリーン）
+- **Tips**: DataLoadFailed 後の遅延 KlinesLoadCompleted は `Idle` ステートで `Loading { .. }` にマッチしないためサイレントドロップされる（意図的）

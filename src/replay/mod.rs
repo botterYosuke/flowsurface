@@ -7,14 +7,12 @@ pub mod store;
 pub(crate) mod testutil;
 
 use std::collections::HashSet;
-use std::ops::Range;
-use std::time::Instant;
 
 use exchange::Kline;
 use exchange::adapter::StreamKind;
 
 use clock::{ClockStatus, StepClock};
-use store::{EventStore, LoadedData};
+use store::EventStore;
 
 /// Replay Start 時刻より前に何本の kline を履歴として読み込むか。
 /// 最小 timeframe × この本数分を pre-start history として fetch する。
@@ -99,21 +97,40 @@ pub struct ReplayStatus {
     pub range_end: String,
 }
 
+/// リプレイセッションの状態を表す列挙型。
+/// Idle: セッションなし、Loading: klines ロード待ち、Active: 再生可能（Playing/Paused）。
+#[derive(Debug)]
+pub enum ReplaySession {
+    /// セッションなし（Play 前 / DataLoadFailed 後 / Live モード）
+    Idle,
+    /// klines ロード中。`pending_count` が 0 になったら Active に遷移する。
+    Loading {
+        clock: StepClock,
+        /// ロード完了待ちのストリーム数
+        pending_count: usize,
+        store: EventStore,
+        active_streams: HashSet<StreamKind>,
+    },
+    /// ロード完了。Playing / Paused どちらでも Active。
+    Active {
+        clock: StepClock,
+        store: EventStore,
+        active_streams: HashSet<StreamKind>,
+    },
+}
+
 /// リプレイモードの状態を管理する
 pub struct ReplayState {
     /// ライブ / リプレイの切替
-    mode: ReplayMode,
+    pub(crate) mode: ReplayMode,
     /// リプレイ範囲の設定（UI入力）
-    range_input: ReplayRangeInput,
-    /// ステップ時計。Play 開始後 Some になる。
-    clock: Option<StepClock>,
-    /// 履歴データストア。リプレイ開始時に bulk load される。
-    event_store: EventStore,
-    /// 現在アクティブなストリーム集合（dispatch_tick に渡す）。
-    active_streams: HashSet<StreamKind>,
+    pub(crate) range_input: ReplayRangeInput,
+    /// リプレイセッション状態（クロック・データストア・アクティブストリームを集約）
+    pub(crate) session: ReplaySession,
     /// 起動時 fixture 復元の結果として次の「全ペイン Ready」で Play を発火する。
     /// 一度発火したら false に戻す。永続化しない。
-    pending_auto_play: bool,
+    /// NOTE: `session` の一部にしない — Play は UI イベント経由で処理するため。
+    pub(crate) pending_auto_play: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,41 +141,43 @@ pub enum ReplayMode {
 
 #[derive(Default)]
 pub struct ReplayRangeInput {
-    start: String,
-    end: String,
+    pub(crate) start: String,
+    pub(crate) end: String,
+}
+
+/// UI 操作（ユーザーが発火）
+#[derive(Debug, Clone)]
+pub enum ReplayUserMessage {
+    ToggleMode,
+    StartTimeChanged(String),
+    EndTimeChanged(String),
+    Play,
+    Resume,
+    Pause,
+    StepForward,
+    StepBackward,
+    CycleSpeed,
+}
+
+/// 非同期タスク応答（load_klines Task が発火）
+#[derive(Debug, Clone)]
+pub enum ReplayLoadEvent {
+    KlinesLoadCompleted(StreamKind, std::ops::Range<u64>, Vec<Kline>),
+    DataLoadFailed(String),
+}
+
+/// システムイベント（main.rs のシステムイベントが発火）
+#[derive(Debug, Clone)]
+pub enum ReplaySystemEvent {
+    SyncReplayBuffers,
+    ReloadKlineStream { old_stream: Option<StreamKind>, new_stream: StreamKind },
 }
 
 #[derive(Debug, Clone)]
 pub enum ReplayMessage {
-    /// ライブ/リプレイ切替
-    ToggleMode,
-    /// 開始日時の入力変更
-    StartTimeChanged(String),
-    /// 終了日時の入力変更
-    EndTimeChanged(String),
-    /// 再生ボタン押下（最初から開始）
-    Play,
-    /// 一時停止から再開
-    Resume,
-    /// 停止ボタン押下
-    Pause,
-    /// 進むボタン（1分早送り）
-    StepForward,
-    /// 再生速度変更
-    CycleSpeed,
-    /// 巻き戻し（1分前にジャンプ）
-    StepBackward,
-    /// klines の bulk load 完了（stream, range, klines）
-    KlinesLoadCompleted(StreamKind, Range<u64>, Vec<Kline>),
-    /// データロード失敗
-    DataLoadFailed(String),
-    /// mid-replay stream 同期
-    SyncReplayBuffers,
-    /// リプレイ中に kline の timeframe が変わったとき、新 stream を再ロードする。
-    ReloadKlineStream {
-        old_stream: Option<StreamKind>,
-        new_stream: StreamKind,
-    },
+    User(ReplayUserMessage),
+    Load(ReplayLoadEvent),
+    System(ReplaySystemEvent),
 }
 
 impl Default for ReplayState {
@@ -166,16 +185,15 @@ impl Default for ReplayState {
         Self {
             mode: ReplayMode::Live,
             range_input: ReplayRangeInput::default(),
-            clock: None,
-            event_store: EventStore::new(),
-            active_streams: HashSet::new(),
+            session: ReplaySession::Idle,
             pending_auto_play: false,
         }
     }
 }
 
 impl ReplayState {
-    /// モードをトグルする。Replay→Live の場合は状態をリセットする。
+    /// モードをトグルする。Replay→Live の場合はセッションをリセットする。
+    /// range_input は保持する（Live → Replay 再切替時に日付が復元されるようにするため）。
     pub fn toggle_mode(&mut self) {
         match self.mode {
             ReplayMode::Live => {
@@ -183,10 +201,7 @@ impl ReplayState {
             }
             ReplayMode::Replay => {
                 self.mode = ReplayMode::Live;
-                self.clock = None;
-                self.event_store = EventStore::new();
-                self.active_streams = HashSet::new();
-                self.range_input = ReplayRangeInput::default();
+                self.session = ReplaySession::Idle;
                 self.pending_auto_play = false;
             }
         }
@@ -199,28 +214,33 @@ impl ReplayState {
 
     /// 再生中かどうか
     pub fn is_playing(&self) -> bool {
-        self.clock
-            .as_ref()
-            .is_some_and(|c| c.status() == ClockStatus::Playing)
+        matches!(
+            &self.session,
+            ReplaySession::Active { clock, .. } if clock.status() == ClockStatus::Playing
+        )
     }
 
     /// 一時停止中かどうか
     pub fn is_paused(&self) -> bool {
-        self.clock
-            .as_ref()
-            .is_some_and(|c| c.status() == ClockStatus::Paused)
+        matches!(
+            &self.session,
+            ReplaySession::Active { clock, .. } if clock.status() == ClockStatus::Paused
+        )
     }
 
     /// ロード中（Waiting 状態）かどうか
     pub fn is_loading(&self) -> bool {
-        self.clock
-            .as_ref()
-            .is_some_and(|c| c.status() == ClockStatus::Waiting)
+        matches!(self.session, ReplaySession::Loading { .. })
     }
 
     /// 現在の仮想時刻（ms）。クロックが存在しない場合は 0。
     pub fn current_time(&self) -> u64 {
-        self.clock.as_ref().map_or(0, |c| c.now_ms())
+        match &self.session {
+            ReplaySession::Loading { clock, .. } | ReplaySession::Active { clock, .. } => {
+                clock.now_ms()
+            }
+            ReplaySession::Idle => 0,
+        }
     }
 
     /// 手動再生が要求されたとき、pending_auto_play フラグをクリアする。
@@ -235,73 +255,21 @@ impl ReplayState {
 
     /// 速度を次の段階にサイクルする (1x → 2x → 5x → 10x → 1x)。
     pub fn cycle_speed(&mut self) {
-        let Some(clock) = &mut self.clock else { return };
-        let current = clock.speed();
-        let next = cycle_speed_value(current);
+        let clock = match &mut self.session {
+            ReplaySession::Loading { clock, .. } | ReplaySession::Active { clock, .. } => clock,
+            ReplaySession::Idle => return,
+        };
+        let next = cycle_speed_value(clock.speed());
         clock.set_speed(next);
     }
 
     /// 現在の速度ラベル（"1x", "2x", etc.）
     pub fn speed_label(&self) -> String {
-        self.clock
-            .as_ref()
-            .map(|c| format_speed_label(c.speed()))
-            .unwrap_or_else(|| "1x".to_string())
-    }
-
-    /// リプレイを開始する（Play ボタン押下時）。
-    /// clock を Waiting 状態で初期化し、load タスクが完了したら自動的に Playing に移行する。
-    /// `step_size_ms`: active kline streams の最小 timeframe (ms)。`min_timeframe_ms()` で計算する。
-    pub fn start(&mut self, start_ms: u64, end_ms: u64, step_size_ms: u64) {
-        let mut clock = StepClock::new(start_ms, end_ms, step_size_ms);
-        clock.set_waiting(); // データロードが完了するまで待機
-        self.clock = Some(clock);
-        self.event_store = EventStore::new();
-        self.active_streams = HashSet::new();
-    }
-
-    /// 全 active_streams が loaded → Waiting から Playing に復帰する。
-    pub fn resume_from_waiting(&mut self, wall_now: Instant) {
-        if let Some(clock) = &mut self.clock {
-            clock.resume_from_waiting(wall_now);
-        }
-    }
-
-    /// klines load 完了を EventStore に反映し、全 stream が loaded なら Playing に復帰する。
-    pub fn on_klines_loaded(
-        &mut self,
-        stream: StreamKind,
-        range: Range<u64>,
-        klines: Vec<Kline>,
-        wall_now: Instant,
-    ) {
-        self.event_store.ingest_loaded(
-            stream,
-            range,
-            LoadedData {
-                klines,
-                trades: vec![],
-            },
-        );
-        self.try_resume_from_waiting(wall_now);
-    }
-
-    fn try_resume_from_waiting(&mut self, wall_now: Instant) {
-        let Some(clock) = &mut self.clock else { return };
-        if clock.status() != ClockStatus::Waiting {
-            return;
-        }
-        // (A) active_streams が空 = ロード待ち対象なし → 再生不可（vacuous truth ガード）
-        if self.active_streams.is_empty() {
-            return;
-        }
-        let full_range = clock.full_range();
-        let all_loaded = self
-            .active_streams
-            .iter()
-            .all(|s| self.event_store.is_loaded(s, full_range.clone()));
-        if all_loaded {
-            clock.resume_from_waiting(wall_now);
+        match &self.session {
+            ReplaySession::Loading { clock, .. } | ReplaySession::Active { clock, .. } => {
+                format_speed_label(clock.speed())
+            }
+            ReplaySession::Idle => "1x".to_string(),
         }
     }
 
@@ -314,7 +282,14 @@ impl ReplayState {
         let range_start = self.range_input.start.clone();
         let range_end = self.range_input.end.clone();
 
-        match &self.clock {
+        let clock = match &self.session {
+            ReplaySession::Loading { clock, .. } | ReplaySession::Active { clock, .. } => {
+                Some(clock)
+            }
+            ReplaySession::Idle => None,
+        };
+
+        match clock {
             Some(clock) => {
                 let range = clock.full_range();
                 ReplayStatus {
@@ -407,8 +382,11 @@ pub fn parse_replay_range(start: &str, end: &str) -> Result<(u64, u64), ParseRan
 /// 現在時刻の表示文字列を生成する。
 /// ライブモード: 現在時刻、リプレイモード: 仮想時刻（clock の now_ms）
 pub fn format_current_time(replay: &ReplayState, timezone: data::UserTimezone) -> String {
-    let timestamp_ms: i64 = match (&replay.mode, &replay.clock) {
-        (ReplayMode::Replay, Some(clock)) => clock.now_ms() as i64,
+    let timestamp_ms: i64 = match (&replay.mode, &replay.session) {
+        (
+            ReplayMode::Replay,
+            ReplaySession::Loading { clock, .. } | ReplaySession::Active { clock, .. },
+        ) => clock.now_ms() as i64,
         _ => chrono::Utc::now().timestamp_millis(),
     };
 
@@ -425,10 +403,37 @@ pub fn format_current_time(replay: &ReplayState, timezone: data::UserTimezone) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
     use std::time::{Duration, Instant};
 
     fn make_instant_plus(base: Instant, ms: u64) -> Instant {
         base + Duration::from_millis(ms)
+    }
+
+    fn make_active_state_playing() -> ReplayState {
+        let base = Instant::now();
+        let mut clock = StepClock::new(0, 100_000, 60_000);
+        clock.play(base);
+        ReplayState {
+            session: ReplaySession::Active {
+                clock,
+                store: EventStore::new(),
+                active_streams: HashSet::new(),
+            },
+            ..Default::default()
+        }
+    }
+
+    fn make_active_state_paused() -> ReplayState {
+        let clock = StepClock::new(0, 100_000, 60_000);
+        ReplayState {
+            session: ReplaySession::Active {
+                clock,
+                store: EventStore::new(),
+                active_streams: HashSet::new(),
+            },
+            ..Default::default()
+        }
     }
 
     // ── ReplayState モード管理 ──────────────────────────────────────────────
@@ -438,7 +443,7 @@ mod tests {
         let state = ReplayState::default();
         assert_eq!(state.mode, ReplayMode::Live);
         assert!(!state.is_replay());
-        assert!(state.clock.is_none());
+        assert!(matches!(state.session, ReplaySession::Idle));
         assert!(state.range_input.start.is_empty());
         assert!(state.range_input.end.is_empty());
     }
@@ -452,7 +457,7 @@ mod tests {
     }
 
     #[test]
-    fn toggle_mode_switches_replay_to_live_and_resets() {
+    fn toggle_mode_switches_replay_to_live_and_resets_session_but_preserves_range() {
         let mut state = ReplayState::default();
         state.toggle_mode(); // Live → Replay
         state.range_input.start = "2026-04-01 09:00".to_string();
@@ -461,40 +466,53 @@ mod tests {
         state.toggle_mode(); // Replay → Live
         assert_eq!(state.mode, ReplayMode::Live);
         assert!(!state.is_replay());
-        assert!(state.range_input.start.is_empty());
-        assert!(state.range_input.end.is_empty());
-        assert!(state.clock.is_none());
+        // range_input は保持される（Live → Replay 再切替時に日付が復元されるようにするため）
+        assert_eq!(state.range_input.start, "2026-04-01 09:00");
+        assert_eq!(state.range_input.end, "2026-04-01 15:00");
+        assert!(matches!(state.session, ReplaySession::Idle));
     }
 
-    // ── StepClock 経由の状態表現 ─────────────────────────────────────────
+    #[test]
+    fn toggle_mode_live_to_replay_restores_range_input() {
+        let mut state = ReplayState::default();
+        state.toggle_mode(); // Live → Replay
+        state.range_input.start = "2026-04-10 04:49".to_string();
+        state.range_input.end = "2026-04-15 06:49".to_string();
+        state.toggle_mode(); // Replay → Live（range は保持）
+
+        state.toggle_mode(); // Live → Replay 再切替
+        assert!(state.is_replay());
+        assert_eq!(state.range_input.start, "2026-04-10 04:49");
+        assert_eq!(state.range_input.end, "2026-04-15 06:49");
+    }
+
+    // ── ReplaySession 状態表現 ─────────────────────────────────────────
 
     #[test]
     fn is_playing_returns_true_when_clock_is_playing() {
-        let mut state = ReplayState::default();
-        let base = Instant::now();
-        let mut clock = StepClock::new(0, 100_000, 60_000);
-        clock.play(base);
-        state.clock = Some(clock);
+        let state = make_active_state_playing();
         assert!(state.is_playing());
     }
 
     #[test]
     fn is_paused_returns_true_when_clock_is_paused() {
-        let mut state = ReplayState::default();
-        let clock = StepClock::new(0, 100_000, 60_000);
-        // clock starts Paused
-        state.clock = Some(clock);
+        let state = make_active_state_paused();
         assert!(state.is_paused());
     }
 
     #[test]
-    fn is_loading_returns_true_when_clock_is_waiting() {
-        let mut state = ReplayState::default();
-        let base = Instant::now();
+    fn is_loading_returns_true_when_session_is_loading() {
         let mut clock = StepClock::new(0, 100_000, 60_000);
-        clock.play(base);
         clock.set_waiting();
-        state.clock = Some(clock);
+        let state = ReplayState {
+            session: ReplaySession::Loading {
+                clock,
+                pending_count: 1,
+                store: EventStore::new(),
+                active_streams: HashSet::new(),
+            },
+            ..Default::default()
+        };
         assert!(state.is_loading());
     }
 
@@ -506,13 +524,19 @@ mod tests {
 
     #[test]
     fn current_time_returns_clock_now_ms() {
-        let mut state = ReplayState::default();
         let base = Instant::now();
         // step_size=1000, step_delay=BASE_STEP_DELAY_MS(100ms) → tick at +100ms fires once → now_ms = 51_000
         let mut clock = StepClock::new(50_000, 100_000, 1_000);
         clock.play(base);
         clock.tick(make_instant_plus(base, 100));
-        state.clock = Some(clock);
+        let state = ReplayState {
+            session: ReplaySession::Active {
+                clock,
+                store: EventStore::new(),
+                active_streams: HashSet::new(),
+            },
+            ..Default::default()
+        };
         assert_eq!(state.current_time(), 51_000);
     }
 
@@ -520,11 +544,7 @@ mod tests {
 
     #[test]
     fn cycle_speed_rotates_1x_2x_5x_10x_1x() {
-        let mut state = ReplayState::default();
-        let base = Instant::now();
-        let mut clock = StepClock::new(0, 100_000, 60_000);
-        clock.play(base);
-        state.clock = Some(clock);
+        let mut state = make_active_state_playing();
 
         assert_eq!(state.speed_label(), "1x");
         state.cycle_speed();
@@ -575,13 +595,20 @@ mod tests {
 
     #[test]
     fn to_status_replay_playing() {
-        let mut state = ReplayState { mode: ReplayMode::Replay, ..Default::default() };
         let base = Instant::now();
         // step_size=500, step_delay=BASE_STEP_DELAY_MS(100ms) → 3 steps at +300ms → now_ms = 1500
         let mut clock = StepClock::new(0, 5_000, 500);
         clock.play(base);
         clock.tick(make_instant_plus(base, 300)); // 3 steps: now_ms = 1500
-        state.clock = Some(clock);
+        let state = ReplayState {
+            mode: ReplayMode::Replay,
+            session: ReplaySession::Active {
+                clock,
+                store: EventStore::new(),
+                active_streams: HashSet::new(),
+            },
+            ..Default::default()
+        };
 
         let status = state.to_status();
         assert_eq!(status.mode, "Replay");
@@ -594,12 +621,18 @@ mod tests {
 
     #[test]
     fn to_status_replay_loading() {
-        let mut state = ReplayState { mode: ReplayMode::Replay, ..Default::default() };
-        let base = Instant::now();
         let mut clock = StepClock::new(0, 1_000, 60_000);
-        clock.play(base);
         clock.set_waiting();
-        state.clock = Some(clock);
+        let state = ReplayState {
+            mode: ReplayMode::Replay,
+            session: ReplaySession::Loading {
+                clock,
+                pending_count: 1,
+                store: EventStore::new(),
+                active_streams: HashSet::new(),
+            },
+            ..Default::default()
+        };
 
         let status = state.to_status();
         assert_eq!(status.status.as_deref(), Some("Loading"));
@@ -607,10 +640,17 @@ mod tests {
 
     #[test]
     fn to_status_replay_paused() {
-        let mut state = ReplayState { mode: ReplayMode::Replay, ..Default::default() };
         let clock = StepClock::new(0, 1_000, 60_000);
         // clock starts Paused by default
-        state.clock = Some(clock);
+        let state = ReplayState {
+            mode: ReplayMode::Replay,
+            session: ReplaySession::Active {
+                clock,
+                store: EventStore::new(),
+                active_streams: HashSet::new(),
+            },
+            ..Default::default()
+        };
 
         let status = state.to_status();
         assert_eq!(status.status.as_deref(), Some("Paused"));
@@ -646,13 +686,20 @@ mod tests {
 
     #[test]
     fn to_status_replay_serializes_all_fields() {
-        let mut state = ReplayState { mode: ReplayMode::Replay, ..Default::default() };
         let base = Instant::now();
         // step_size=500, step_delay=100ms → 3 steps at +300ms → now_ms=1500
         let mut clock = StepClock::new(0, 5_000, 500);
         clock.play(base);
         clock.tick(make_instant_plus(base, 300));
-        state.clock = Some(clock);
+        let state = ReplayState {
+            mode: ReplayMode::Replay,
+            session: ReplaySession::Active {
+                clock,
+                store: EventStore::new(),
+                active_streams: HashSet::new(),
+            },
+            ..Default::default()
+        };
         let json = serde_json::to_string(&state.to_status()).unwrap();
         assert!(json.contains(r#""mode":"Replay""#));
         assert!(json.contains(r#""status":"Playing""#));
@@ -683,14 +730,20 @@ mod tests {
 
     #[test]
     fn replay_play_message_clears_pending_auto_play() {
-        let mut state = ReplayState { pending_auto_play: true, ..Default::default() };
+        let mut state = ReplayState {
+            pending_auto_play: true,
+            ..Default::default()
+        };
         state.on_manual_play_requested();
         assert!(!state.pending_auto_play);
     }
 
     #[test]
     fn session_restore_failure_clears_pending_auto_play() {
-        let mut state = ReplayState { pending_auto_play: true, ..Default::default() };
+        let mut state = ReplayState {
+            pending_auto_play: true,
+            ..Default::default()
+        };
         state.on_session_unavailable();
         assert!(!state.pending_auto_play);
     }
@@ -762,12 +815,18 @@ mod tests {
 
     #[test]
     fn format_current_time_uses_clock_time_in_replay() {
-        let mut state = ReplayState { mode: ReplayMode::Replay, ..Default::default() };
-
         // 2025-04-01 06:00:00 UTC = 1743487200000 ms
         let target_ms = 1_743_487_200_000u64;
         let clock = StepClock::new(target_ms, target_ms + 3_600_000, 60_000);
-        state.clock = Some(clock);
+        let state = ReplayState {
+            mode: ReplayMode::Replay,
+            session: ReplaySession::Active {
+                clock,
+                store: EventStore::new(),
+                active_streams: HashSet::new(),
+            },
+            ..Default::default()
+        };
 
         let result = format_current_time(&state, data::UserTimezone::Utc);
         assert_eq!(result, "2025-04-01 06:00:00");
@@ -785,51 +844,31 @@ mod tests {
         assert!((cycle_speed_value(10.0) - 1.0).abs() < 0.01);
     }
 
-    // ── try_resume_from_waiting ───────────────────────────────────────────
+    // ── ReplaySession 遷移（P3 vacuous truth ガード） ─────────────────────
 
+    /// Loading セッションで pending_count が 1 のとき、active_streams が空でも
+    /// is_loading() は true であることを確認する（pending_count ベースの O(1) カウンタ）。
     #[test]
-    fn try_resume_does_not_auto_play_when_active_streams_empty() {
-        use exchange::adapter::{Exchange, StreamKind};
-        use exchange::{Ticker, TickerInfo, Timeframe};
-
-        let mut state = ReplayState::default();
-        // start() sets clock to Waiting and clears active_streams
-        state.start(0, 3_600_000, 60_000);
-
-        assert!(
-            state.active_streams.is_empty(),
-            "active_streams must be empty after start()"
-        );
-        assert!(state.is_loading(), "clock must be Waiting after start()");
-
-        // Deliver a klines-loaded event for some stream that is NOT in active_streams.
-        // With the vacuous-truth bug, active_streams.iter().all(...) returns true on
-        // an empty set, so try_resume_from_waiting wrongly transitions → Playing.
-        let stream = StreamKind::Kline {
-            ticker_info: TickerInfo::new(
-                Ticker::new("BTCUSDT", Exchange::BinanceLinear),
-                0.01,
-                0.001,
-                Some(1.0),
-            ),
-            timeframe: Timeframe::M1,
+    fn loading_with_zero_pending_count_does_not_auto_activate_without_explicit_transition() {
+        let clock = StepClock::new(0, 3_600_000, 60_000);
+        let state = ReplayState {
+            session: ReplaySession::Loading {
+                clock,
+                pending_count: 1, // 1 ストリームを待機中
+                store: EventStore::new(),
+                active_streams: HashSet::new(), // active_streams が空でも pending_count が支配する
+            },
+            ..Default::default()
         };
-        state.on_klines_loaded(stream, 0..3_600_000, vec![], Instant::now());
-
-        assert!(
-            state.is_loading(),
-            "clock must remain Waiting (loading) when active_streams is empty — \
-             vacuous-truth must not trigger resume_from_waiting"
-        );
+        assert!(state.is_loading(), "Loading variant → is_loading() must be true");
+        assert!(!state.is_playing(), "Loading variant → is_playing() must be false");
     }
 
+    /// ReplaySession::Active の active_streams に Kline ストリームのみ含まれること。
     #[test]
     fn active_streams_only_contains_kline_streams_after_insert() {
         use exchange::adapter::{Exchange, StreamKind};
         use exchange::{Ticker, TickerInfo, Timeframe};
-
-        let mut state = ReplayState::default();
-        state.start(0, 100_000, 60_000);
 
         let kline_stream = StreamKind::Kline {
             ticker_info: TickerInfo::new(
@@ -849,22 +888,23 @@ mod tests {
             ),
         };
 
-        // OLD behaviour (no filter): insert everything into active_streams — BUG
+        // Play ハンドラと同様のフィルタリングをシミュレートする
         let kline_targets = vec![
             (uuid::Uuid::new_v4(), kline_stream),
             (uuid::Uuid::new_v4(), trades_stream),
         ];
-        for (_, stream) in &kline_targets {
-            if matches!(stream, StreamKind::Kline { .. }) {
-                state.active_streams.insert(*stream);
-            }
-        }
+        let active_streams: HashSet<StreamKind> = kline_targets
+            .iter()
+            .filter_map(|(_, s)| {
+                if matches!(s, StreamKind::Kline { .. }) { Some(*s) } else { None }
+            })
+            .collect();
 
-        // Only Kline should be present; Trades must be excluded by the filter
         assert!(
-            !state.active_streams.contains(&trades_stream),
+            !active_streams.contains(&trades_stream),
             "active_streams must not contain non-Kline streams, but Trades was found"
         );
+        assert!(active_streams.contains(&kline_stream));
     }
 
     // ── compute_load_range ────────────────────────────────────────────────

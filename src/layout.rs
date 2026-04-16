@@ -169,6 +169,9 @@ impl From<&pane::State> for data::Pane {
                     link_group: pane.link_group,
                 }
             }
+            pane::Content::OrderEntry(_) => data::Pane::OrderEntry,
+            pane::Content::OrderList(_) => data::Pane::OrderList,
+            pane::Content::BuyingPower(_) => data::Pane::BuyingPower,
         }
     }
 }
@@ -296,6 +299,30 @@ pub fn configuration(pane: data::Pane) -> Configuration<pane::State> {
                 link_group,
             ))
         }
+        data::Pane::OrderEntry => Configuration::Pane(pane::State::from_config(
+            pane::Content::OrderEntry(
+                crate::screen::dashboard::panel::order_entry::OrderEntryPanel::new(),
+            ),
+            vec![],
+            data::layout::pane::Settings::default(),
+            None,
+        )),
+        data::Pane::OrderList => Configuration::Pane(pane::State::from_config(
+            pane::Content::OrderList(
+                crate::screen::dashboard::panel::order_list::OrderListPanel::new(),
+            ),
+            vec![],
+            data::layout::pane::Settings::default(),
+            None,
+        )),
+        data::Pane::BuyingPower => Configuration::Pane(pane::State::from_config(
+            pane::Content::BuyingPower(
+                crate::screen::dashboard::panel::buying_power::BuyingPowerPanel::new(),
+            ),
+            vec![],
+            data::layout::pane::Settings::default(),
+            None,
+        )),
     }
 }
 

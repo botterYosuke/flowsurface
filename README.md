@@ -7,7 +7,8 @@
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://github.com/flowsurface-rs/flowsurface/blob/main/LICENSE)
 [![Made with iced](https://iced.rs/badge.svg)](https://github.com/iced-rs/iced)
 
-An open-source native desktop charting application for crypto markets. Supports Binance, Bybit, Hyperliquid, OKX, and MEXC.
+暗号資産マーケットおよび国内株式向けのオープンソース・ネイティブデスクトップチャートアプリケーション。  
+Binance、Bybit、Hyperliquid、OKX、MEXC、および **立花証券 e支店** に対応。
 
 <div align="center">
   <img
@@ -17,96 +18,168 @@ An open-source native desktop charting application for crypto markets. Supports 
   />
 </div>
 
-### Key Features
+### 主な機能
 
--   Multiple chart/panel types:
-    -   **Heatmap (Historical DOM):** Uses live trades and L2 orderbook to create a time-series heatmap chart. Supports customizable price grouping, different time aggregations, fixed or visible range volume profiles.
-    -   **Candlestick:** Traditional kline chart supporting both time-based and custom tick-based intervals.
-    -   **Footprint:** Price grouped and interval aggregated views for trades on top of a candlestick chart. Supports different clustering methods, configurable imbalance and naked-POC studies.
-    -   **Time & Sales:** Scrollable list of live trades.
-    -   **DOM (Depth of Market) / Ladder:** Displays current L2 orderbook alongside recent trade volumes on grouped price levels.
-    -   **Comparison:** Line graph for comparing multiple data sources, normalized by kline `close` prices on a percentage scale
--   Real-time sound effects driven by trade streams
--   Multi window/monitor support
--   Pane linking for quickly switching tickers across multiple panes
--   Persistent layouts and customizable themes with editable color palettes
+-   複数のチャート・パネル種別:
+    -   **ヒートマップ（Historical DOM）:** ライブ約定と L2 板情報を使って時系列ヒートマップを生成。価格グルーピング・時間集計・固定 or 表示範囲ボリュームプロファイルをカスタマイズ可能。
+    -   **ローソク足:** 時間ベースおよびカスタムティックベース間隔に対応した従来型 Kline チャート。
+    -   **フットプリント:** ローソク足チャート上に価格グループ・間隔集計された約定ビューを重ね表示。クラスタリング手法・インバランス・ネイキッド POC スタディを設定可能。
+    -   **タイム & セールス:** ライブ約定のスクロールリスト。
+    -   **DOM（板）/ ラダー:** グループ化された価格レベルに直近の約定数量を加えた L2 板情報を表示。
+    -   **比較:** 複数データソースの終値を基準に正規化したパーセンテージスケールの折れ線グラフ。
+-   約定ストリーム連動のリアルタイムサウンドエフェクト
+-   マルチウィンドウ / マルチモニター対応
+-   複数ペイン間で銘柄を一括切替できるペインリンク
+-   編集可能なカラーパレットを含む永続レイアウトとカスタマイズ可能なテーマ
 
-##### Market data is received directly from exchanges' public REST APIs and WebSockets
+##### マーケットデータは各取引所の公開 REST API および WebSocket から直接受信します
 
-#
+---
 
-#### Historical Trades on Footprint Charts:
+### リプレイ機能
 
--   By default, it captures and plots live trades in real time via WebSocket.
--   For Binance tickers, you can optionally backfill the visible time range by enabling trade fetching in the settings:
-    -   [data.binance.vision](https://data.binance.vision/): Fast daily bulk downloads (no intraday).
-    -   REST API (e.g., `/fapi/v1/aggTrades`): Slower, paginated intraday fetching (subject to rate limits).
-    -   The Binance connector can use either or both methods to retrieve historical data as needed.
--   Fetching trades for Bybit/Hyperliquid is not supported, as both lack a suitable REST API. OKX is WIP.
+過去の Kline / Trades データを時系列順に再生し、ライブチャートと同等のビュー更新を行います。
 
-## Installation
+| 機能 | 内容 |
+|---|---|
+| モード切替 | LIVE / REPLAY をヘッダーバー or F5 or HTTP API でトグル |
+| 範囲指定 | `YYYY-MM-DD HH:MM` 形式で開始・終了（UTC 解釈）|
+| 再生制御 | Play / Pause / Resume / StepForward / StepBackward / CycleSpeed |
+| 再生速度 | 1x / 2x / 5x / 10x の循環切替 |
+| mid-replay ペイン操作 | リプレイ中のペイン追加・削除・timeframe / ticker 変更 |
+| HTTP 制御 API | `127.0.0.1:9876` でリプレイ・ペイン操作を外部から駆動 |
+| 起動時自動再生 | `saved-state.json` に replay 構成が含まれる場合、起動後に自動 Play |
 
-### Method 1: Prebuilt Binaries
+**取引所別リプレイ対応状況:**
 
-Standalone executables are available for Windows, macOS, and Linux on the [Releases page](https://github.com/flowsurface-rs/flowsurface/releases).
+| 取引所 | Kline | Trades | リプレイ可否 |
+|---|:-:|:-:|:-:|
+| Binance (Spot / Linear / Inverse) | ✅ 全 tf | ✅ | ✅ 完全 |
+| Bybit | ✅ 全 tf | ❌ | ⚠️ kline のみ |
+| Hyperliquid | ✅ 全 tf | ❌ | ⚠️ kline のみ |
+| OKX | ✅ 全 tf | ❌ | ⚠️ kline のみ |
+| MEXC | ✅ 全 tf | ❌ | ⚠️ kline のみ |
+| **立花証券** | ✅ D1 のみ | ❌ | ⚠️ D1 kline のみ |
+
+詳細仕様は [docs/replay_header.md](docs/replay_header.md) を参照してください。
+
+---
+
+### 立花証券 e支店 対応
+
+国内株式の板情報・歩み値・日足チャートをリアルタイムで表示します。
+
+| 機能 | 内容 |
+|---|---|
+| 認証 | ログイン画面からユーザー ID・パスワードを入力（セッションは keyring で永続化）|
+| 銘柄検索 | 銘柄マスタ（約4200件）をダウンロードし、銘柄コード・名称で検索 |
+| 日足チャート | 最大約20年分の OHLCV データ（株式分割調整値対応）|
+| 板情報 | HTTP Long-polling による 10 本板のリアルタイム表示 |
+| 歩み値 | リアルタイム約定の表示 |
+| リプレイ | D1 kline のみ対応 |
+
+**制約事項:**
+- 日足（D1）のみ対応。分足・時間足は API 非提供
+- 電話認証が事前に必要（ユーザー手動）
+- 東証立会時間のみ板データ更新（9:00-11:30, 12:30-15:30 JST）
+
+詳細仕様は [docs/tachibana_spec.md](docs/tachibana_spec.md) を参照してください。
+
+---
+
+### 注文機能（立花証券 e支店）
+
+立花証券 e支店 API を使った国内株式の発注機能を追加中です。
+
+| パネル | 機能 | 状態 |
+|---|---|---|
+| **注文入力パネル** | 買い・売り注文の入力と発注（成行 / 指値、現物 / 信用） | 実装中 |
+| **注文約定照会パネル** | 発注済み注文の一覧表示と約定状況の確認 | 実装中 |
+| **余力情報パネル** | 買付可能額・委託保証金率・追証フラグの確認 | 実装中 |
+| **注文訂正・取消** | 発注済み注文の値段・株数変更およびキャンセル | 実装中 |
+
+**主な設計方針:**
+- 注文確認モーダルによる 2 段階発注（バイパス不可）
+- 第二パスワードはメモリ上にのみ保持し、ログ・設定ファイルへの書き込みを禁止
+- 約定検出時にトースト通知で通知
+- チャートペインの銘柄変更と注文入力パネルを自動連動
+
+詳細仕様は [docs/plan/order_windows.md](docs/plan/order_windows.md) を参照してください。
+
+---
+
+#### フットプリントチャートの過去約定データ:
+
+-   デフォルトでは WebSocket 経由でライブ約定をリアルタイムに取得・描画します。
+-   Binance 銘柄については、設定で約定フェッチを有効にすることで表示範囲をバックフィルできます:
+    -   [data.binance.vision](https://data.binance.vision/): 高速な日次一括ダウンロード（当日分なし）。
+    -   REST API（例: `/fapi/v1/aggTrades`）: 低速なページネーション方式の当日分フェッチ（レート制限あり）。
+    -   Binance コネクターは必要に応じてどちらか一方または両方を使用してデータを取得します。
+-   Bybit / Hyperliquid の約定フェッチは、適切な REST API がないため未対応。OKX は対応予定。
+
+## インストール
+
+### 方法 1: ビルド済みバイナリ
+
+Windows・macOS・Linux 向けのスタンドアロン実行ファイルが [リリースページ](https://github.com/flowsurface-rs/flowsurface/releases) からダウンロードできます。
 
 <details>
-<summary><strong>Having trouble running the file? (Permission/Security warnings)</strong></summary>
+<summary><strong>実行できない場合（権限・セキュリティ警告）</strong></summary>
  
-Since these binaries are currently unsigned they might get flagged.
+バイナリは現在未署名のため、フラグが立つ場合があります。
 
--   **Windows**: If you see a "Windows protected your PC" pop-up, click **More info** -> **Run anyway**.
--   **macOS**: If you see "Developer cannot be verified", control-click (right-click) the app and select **Open**, or go to _System Settings > Privacy & Security_ to allow it.
+-   **Windows**: 「Windows によって PC が保護されました」と表示された場合は、**詳細情報** → **実行** をクリックしてください。
+-   **macOS**: 「開発元を検証できません」と表示された場合は、アプリを Control クリック（右クリック）して **開く** を選択するか、_システム設定 > プライバシーとセキュリティ_ から許可してください。
 </details>
 
-### Method 2: Build from Source
+### 方法 2: ソースからビルド
 
-#### Requirements
+#### 要件
 
--   [Rust toolchain](https://www.rust-lang.org/tools/install)
--   [Git version control system](https://git-scm.com/)
--   System dependencies:
+-   [Rust ツールチェーン](https://www.rust-lang.org/tools/install)
+-   [Git バージョン管理システム](https://git-scm.com/)
+-   システム依存パッケージ:
     -   **Linux**:
         -   Debian/Ubuntu: `sudo apt install build-essential pkg-config libasound2-dev`
         -   Arch: `sudo pacman -S base-devel alsa-lib`
         -   Fedora: `sudo dnf install gcc make alsa-lib-devel`
-    -   **macOS**: Install Xcode Command Line Tools: `xcode-select --install`
-    -   **Windows**: No additional dependencies required
+    -   **macOS**: Xcode コマンドラインツールをインストール: `xcode-select --install`
+    -   **Windows**: 追加の依存パッケージは不要
 
-#### Option A: `cargo install`
+#### オプション A: `cargo install`
 
 ```bash
-# Install latest globally
+# 最新版をグローバルインストール
 cargo install --git https://github.com/flowsurface-rs/flowsurface flowsurface
 
-# Run
+# 実行
 flowsurface
 ```
 
-#### Option B: Cloning the repo
+#### オプション B: リポジトリをクローン
 
 ```bash
-# Clone the repository
+# リポジトリをクローン
 git clone https://github.com/flowsurface-rs/flowsurface
 
 cd flowsurface
 
-# Build and run
+# ビルドして実行
 cargo build --release
 cargo run --release
 ```
 
-## Credits and thanks to
+## クレジット・謝辞
 
--   [Kraken Desktop](https://www.kraken.com/desktop) (formerly [Cryptowatch](https://blog.kraken.com/product/cryptowatch-to-sunset-kraken-pro-to-integrate-cryptowatch-features)), the main inspiration that sparked this project
--   [Halloy](https://github.com/squidowl/halloy), an excellent open-source reference for the foundational code design and the project architecture
--   And of course, [iced](https://github.com/iced-rs/iced), the GUI library that makes all of this possible
+-   [Kraken Desktop](https://www.kraken.com/desktop)（旧 [Cryptowatch](https://blog.kraken.com/product/cryptowatch-to-sunset-kraken-pro-to-integrate-cryptowatch-features)）— このプロジェクトのインスピレーション源
+-   [Halloy](https://github.com/squidowl/halloy) — 基盤となるコード設計とプロジェクトアーキテクチャの優れたオープンソースリファレンス
+-   [iced](https://github.com/iced-rs/iced) — このプロジェクトを可能にしている GUI ライブラリ
 
-## Community
+## コミュニティ
 
-For feedback, questions, or for more casual conversations about the project, join our community on Discord:  
-https://discord.gg/RN2XAF7ZuR
+フィードバック・質問・プロジェクトに関する雑談は Discord コミュニティへどうぞ:  
+https://discord.gg/3YUUqzWWxr
 
-## License
+## ライセンス
 
-Flowsurface is released under the [GPLv3](./LICENSE) license. Contributions to the project are shared under the same license.  
+Flowsurface は [GPLv3](./LICENSE) ライセンスの下でリリースされています。プロジェクトへの貢献は同ライセンスで共有されます。

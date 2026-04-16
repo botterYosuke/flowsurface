@@ -252,32 +252,43 @@ pub mod button {
     }
 
     pub fn bordered_toggle(theme: &Theme, status: Status, is_active: bool) -> Style {
+        bordered_toggle_highlighted(theme, status, is_active, false)
+    }
+
+    pub fn bordered_toggle_highlighted(
+        theme: &Theme,
+        status: Status,
+        is_active: bool,
+        is_highlighted: bool,
+    ) -> Style {
         let palette = theme.extended_palette();
 
-        iced::widget::button::Style {
-            text_color: if is_active {
+        Style {
+            text_color: if is_highlighted {
+                palette.success.strong.color
+            } else if is_active {
                 palette.secondary.strong.color
             } else {
                 palette.secondary.base.color
             },
-            border: iced::Border {
+            border: Border {
                 radius: 3.0.into(),
                 width: if is_active { 2.0 } else { 1.0 },
                 color: palette.background.weak.color,
             },
             background: match status {
-                iced::widget::button::Status::Active => {
+                Status::Active => {
                     if is_active {
                         Some(palette.background.base.color.into())
                     } else {
                         Some(palette.background.weakest.color.into())
                     }
                 }
-                iced::widget::button::Status::Pressed => {
+                Status::Pressed => {
                     Some(palette.background.weakest.color.into())
                 }
-                iced::widget::button::Status::Hovered => Some(palette.background.weak.color.into()),
-                iced::widget::button::Status::Disabled => {
+                Status::Hovered => Some(palette.background.weak.color.into()),
+                Status::Disabled => {
                     if is_active {
                         None
                     } else {
@@ -789,4 +800,40 @@ pub fn dashed_line_from_palette(palette: &'_ Extended) -> Stroke<'_> {
             .color
             .scale_alpha(if palette.is_dark { 0.8 } else { 1.0 }),
     )
+}
+
+// ── 注文パネル用スタイル関数 ──────────────────────────────────────────────────
+
+/// 注文状態テキストに応じた文字色を返す。
+/// - "全部約定" → 通常テキスト色
+/// - "一部約定" → 警告色（黄）
+/// - "取消完了" → グレー（無効化色）
+/// - "受付中" / "注文中" → 薄い前景色
+/// - その他 / エラー → 危険色（赤）
+pub fn order_status_color(status_text: &str, theme: &Theme) -> Color {
+    let palette = theme.extended_palette();
+    match status_text {
+        "全部約定" => palette.primary.base.text,
+        "一部約定" => palette.warning.base.color,
+        "取消完了" => palette.secondary.strong.color,
+        "受付中" | "注文中" => {
+            palette.primary.base.text.scale_alpha(0.6)
+        }
+        _ => palette.danger.base.color,
+    }
+}
+
+/// 売買区分に応じた文字色を返す。買い = 青系, 売り = 赤系。
+/// `side_str`: "3" = 買い, "1" = 売り（API コード）または "買" / "売"（表示用）
+pub fn side_color(side_str: &str, theme: &Theme) -> Color {
+    let palette = theme.extended_palette();
+    match side_str {
+        "3" | "買" | "買い" => palette.primary.strong.color,
+        _ => palette.danger.base.color,
+    }
+}
+
+/// 追証フラグ "1"（確定）のときに使う警告色。
+pub fn margin_call_color(theme: &Theme) -> Color {
+    theme.extended_palette().danger.strong.color
 }

@@ -11,6 +11,7 @@ use crate::{
     connector::{
         ResolvedStream,
         fetcher::{self, FetchedData, InfoKind},
+        order as order_connector,
     },
     screen::dashboard::tickers_table::TickersTable,
     style,
@@ -30,7 +31,7 @@ use exchange::{
 };
 
 use iced::{
-    Element, Length, Subscription, Task, Vector,
+    Element, Length, Subscription, Task, Theme, Vector,
     widget::{
         PaneGrid, center, container,
         pane_grid::{self, Configuration},
@@ -53,6 +54,39 @@ pub enum Message {
     },
     ResolveStreams(uuid::Uuid, Vec<PersistStreamKind>),
     RequestPalette,
+    // ── 注文 API 応答メッセージ ───────────────────────────────────────────────
+    OrderNewResult {
+        pane_id: uuid::Uuid,
+        result: Result<exchange::adapter::tachibana::NewOrderResponse, String>,
+    },
+    OrderModifyResult {
+        pane_id: uuid::Uuid,
+        /// 訂正・取消成功時の注文番号
+        result: Result<String, String>,
+    },
+    OrdersListResult {
+        pane_id: uuid::Uuid,
+        result: Result<Vec<exchange::adapter::tachibana::OrderRecord>, String>,
+    },
+    OrderDetailResult {
+        pane_id: uuid::Uuid,
+        order_num: String,
+        result: Result<Vec<exchange::adapter::tachibana::ExecutionRecord>, String>,
+    },
+    BuyingPowerResult {
+        pane_id: uuid::Uuid,
+        result: Result<
+            (
+                exchange::adapter::tachibana::BuyingPowerResponse,
+                exchange::adapter::tachibana::MarginPowerResponse,
+            ),
+            String,
+        >,
+    },
+    HoldingsResult {
+        pane_id: uuid::Uuid,
+        result: Result<u64, String>,
+    },
 }
 
 pub struct Dashboard {
@@ -61,6 +95,8 @@ pub struct Dashboard {
     pub popout: HashMap<window::Id, (pane_grid::State<pane::State>, WindowSpec)>,
     pub streams: UniqueStreams,
     layout_id: uuid::Uuid,
+    /// 本日営業日 (YYYYMMDD)。初回注文成功時に NewOrderResponse.eig_day から取得する。
+    eig_day: Option<String>,
 }
 
 impl Default for Dashboard {
@@ -71,6 +107,7 @@ impl Default for Dashboard {
             streams: UniqueStreams::default(),
             popout: HashMap::new(),
             layout_id: uuid::Uuid::new_v4(),
+            eig_day: None,
         }
     }
 }
@@ -93,6 +130,10 @@ pub enum Event {
     ReloadReplayKlines {
         old_stream: Option<StreamKind>,
         new_stream: StreamKind,
+    },
+    /// MiniTickersList ペインから銘柄を切り替えたとき、main.rs でリプレイ同期を行うために伝搬する。
+    SwitchTickersInGroup {
+        ticker_info: TickerInfo,
     },
 }
 
@@ -143,6 +184,7 @@ impl Dashboard {
             streams: UniqueStreams::default(),
             popout,
             layout_id,
+            eig_day: None,
         }
     }
 
@@ -398,7 +440,12 @@ impl Dashboard {
                                 .chain(self.refresh_streams(main_window.id))
                             }
                             pane::Effect::SwitchTickersInGroup(ticker_info) => {
-                                self.switch_tickers_in_group(main_window.id, ticker_info)
+                                // main.rs でリプレイ同期（ReloadKlineStream / SyncReplayBuffers）を
+                                // 行うため、Task を直接実行せずにイベントとして伝搬する。
+                                return (
+                                    Task::none(),
+                                    Some(Event::SwitchTickersInGroup { ticker_info }),
+                                );
                             }
                             pane::Effect::FocusWidget(id) => {
                                 return (iced::widget::operation::focus(id), None);
@@ -414,6 +461,81 @@ impl Dashboard {
                                         new_stream,
                                     }),
                                 );
+                            }
+                            // ── 注文関連 Effect ──────────────────────────────────────
+                            pane::Effect::SubmitNewOrder(req) => {
+                                let pane_id = state.unique_id();
+                                Task::perform(
+                                    order_connector::submit_new_order(req),
+                                    move |result| Message::OrderNewResult { pane_id, result },
+                                )
+                            }
+                            pane::Effect::SubmitCorrectOrder(req) => {
+                                let pane_id = state.unique_id();
+                                Task::perform(
+                                    order_connector::submit_correct_order(req),
+                                    move |result| Message::OrderModifyResult {
+                                        pane_id,
+                                        result: result.map(|r| r.order_number),
+                                    },
+                                )
+                            }
+                            pane::Effect::SubmitCancelOrder(req) => {
+                                let pane_id = state.unique_id();
+                                Task::perform(
+                                    order_connector::submit_cancel_order(req),
+                                    move |result| Message::OrderModifyResult {
+                                        pane_id,
+                                        result: result.map(|r| r.order_number),
+                                    },
+                                )
+                            }
+                            pane::Effect::FetchOrders => {
+                                let pane_id = state.unique_id();
+                                let eig_day = self.eig_day_or_today();
+                                Task::perform(
+                                    order_connector::fetch_orders(eig_day),
+                                    move |result| Message::OrdersListResult { pane_id, result },
+                                )
+                            }
+                            pane::Effect::FetchOrderDetail(order_num, detail_eig_day) => {
+                                let pane_id = state.unique_id();
+                                Task::perform(
+                                    order_connector::fetch_order_detail(
+                                        order_num.clone(),
+                                        detail_eig_day,
+                                    ),
+                                    move |result| Message::OrderDetailResult {
+                                        pane_id,
+                                        order_num,
+                                        result,
+                                    },
+                                )
+                            }
+                            pane::Effect::FetchBuyingPower => {
+                                let pane_id = state.unique_id();
+                                Task::perform(order_connector::fetch_buying_power(), move |result| {
+                                    Message::BuyingPowerResult { pane_id, result }
+                                })
+                            }
+                            pane::Effect::FetchHoldings { issue_code } => {
+                                let pane_id = state.unique_id();
+                                Task::perform(
+                                    order_connector::fetch_holdings(issue_code),
+                                    move |result| Message::HoldingsResult { pane_id, result },
+                                )
+                            }
+                            pane::Effect::SyncIssueToOrderEntry {
+                                issue_code,
+                                issue_name,
+                                tick_size,
+                            } => {
+                                self.sync_issue_to_order_entry(
+                                    main_window.id,
+                                    issue_code,
+                                    issue_name,
+                                    tick_size,
+                                )
                             }
                         };
                         return (task, None);
@@ -453,9 +575,129 @@ impl Dashboard {
             Message::Notification(toast) => {
                 return (Task::none(), Some(Event::Notification(toast)));
             }
+            // ── 注文 API 応答ハンドラ ─────────────────────────────────────────
+            Message::OrderNewResult { pane_id, result } => {
+                use panel::order_entry::OrderSuccess;
+                let order_result = match result {
+                    Ok(ref resp) => {
+                        // 初回注文成功時に営業日を保存
+                        if !resp.eig_day.is_empty() {
+                            self.eig_day = Some(resp.eig_day.clone());
+                        }
+                        Ok(OrderSuccess {
+                            order_num: resp.order_number.clone(),
+                            warning: if resp.warning_code == "0" || resp.warning_code.is_empty() {
+                                None
+                            } else {
+                                Some(resp.warning_text.clone())
+                            },
+                        })
+                    }
+                    Err(e) => Err(e),
+                };
+                if let Some(state) = self.get_mut_pane_state_by_uuid(main_window.id, pane_id)
+                    && let pane::Content::OrderEntry(panel) = &mut state.content
+                {
+                    panel.update(panel::order_entry::Message::OrderCompleted(order_result));
+                }
+            }
+            Message::OrderModifyResult { pane_id, result } => {
+                if let Some(state) = self.get_mut_pane_state_by_uuid(main_window.id, pane_id)
+                    && let pane::Content::OrderList(panel) = &mut state.content
+                {
+                    panel.update(panel::order_list::Message::ModifyCompleted(result));
+                }
+            }
+            Message::OrdersListResult { pane_id, result } => {
+                if let Some(state) = self.get_mut_pane_state_by_uuid(main_window.id, pane_id)
+                    && let pane::Content::OrderList(panel) = &mut state.content
+                {
+                    match result {
+                        Ok(orders) => {
+                            panel.update(panel::order_list::Message::OrdersUpdated(orders));
+                        }
+                        Err(e) => {
+                            panel.update(panel::order_list::Message::ModifyCompleted(Err(e)));
+                        }
+                    }
+                }
+            }
+            Message::OrderDetailResult {
+                pane_id,
+                order_num,
+                result,
+            } => {
+                if let Some(state) = self.get_mut_pane_state_by_uuid(main_window.id, pane_id)
+                    && let pane::Content::OrderList(panel) = &mut state.content
+                    && let Ok(executions) = result
+                {
+                    panel.update(panel::order_list::Message::ExecutionsUpdated {
+                        order_num,
+                        executions,
+                    });
+                }
+            }
+            Message::BuyingPowerResult { pane_id, result } => {
+                if let Some(state) = self.get_mut_pane_state_by_uuid(main_window.id, pane_id)
+                    && let pane::Content::BuyingPower(panel) = &mut state.content
+                {
+                    match result {
+                        Ok((cash, margin)) => {
+                            panel.update(panel::buying_power::Message::BuyingPowerUpdated {
+                                cash_buying_power: cash.cash_buying_power,
+                                nisa_growth_buying_power: cash.nisa_growth_buying_power,
+                                shortage_flag: cash.shortage_flag,
+                            });
+                            panel.update(panel::buying_power::Message::MarginPowerUpdated {
+                                margin_new_order_power: margin.margin_new_order_power,
+                                maintenance_margin_rate: margin.maintenance_margin_rate,
+                                margin_call_flag: margin.margin_call_flag,
+                            });
+                        }
+                        Err(e) => {
+                            panel.update(panel::buying_power::Message::FetchFailed(e));
+                        }
+                    }
+                }
+            }
+            Message::HoldingsResult { pane_id, result } => {
+                if let Some(state) = self.get_mut_pane_state_by_uuid(main_window.id, pane_id)
+                    && let pane::Content::OrderEntry(panel) = &mut state.content
+                {
+                    panel.update(panel::order_entry::Message::HoldingsUpdated(result.ok()));
+                }
+            }
         }
 
         (Task::none(), None)
+    }
+
+    /// 営業日を返す。未取得の場合は今日の日付 (YYYYMMDD) をローカル時計から生成する。
+    fn eig_day_or_today(&self) -> String {
+        self.eig_day.clone().unwrap_or_else(|| {
+            let now = chrono::Local::now();
+            now.format("%Y%m%d").to_string()
+        })
+    }
+
+    /// 全 OrderEntry パネルに銘柄情報を同期する（LinkGroup と独立した単方向連動）。
+    fn sync_issue_to_order_entry(
+        &mut self,
+        main_window: window::Id,
+        issue_code: String,
+        issue_name: String,
+        tick_size: Option<f64>,
+    ) -> Task<Message> {
+        for (_, _, state) in self.iter_all_panes_mut(main_window) {
+            if let pane::Content::OrderEntry(panel) = &mut state.content {
+                panel.update(panel::order_entry::Message::SyncIssue {
+                    issue_code: issue_code.clone(),
+                    issue_name: issue_name.clone(),
+                    tick_size,
+                });
+            }
+        }
+        Task::none()
     }
 
     fn new_pane(
@@ -668,6 +910,7 @@ impl Dashboard {
         tickers_table: &'a TickersTable,
         timezone: UserTimezone,
         is_replay: bool,
+        theme: &'a Theme,
     ) -> Element<'a, Message> {
         let mut pane_grid = PaneGrid::new(&self.panes, |id, pane, maximized| {
             let is_focused = self.focus == Some((main_window.id, id));
@@ -681,6 +924,7 @@ impl Dashboard {
                 timezone,
                 tickers_table,
                 is_replay,
+                theme,
             )
         })
         .min_size(240)
@@ -705,6 +949,7 @@ impl Dashboard {
         main_window: &'a Window,
         tickers_table: &'a TickersTable,
         timezone: UserTimezone,
+        theme: &'a Theme,
     ) -> Element<'a, Message> {
         if let Some((state, _)) = self.popout.get(&window) {
             let content = container(
@@ -720,6 +965,7 @@ impl Dashboard {
                         timezone,
                         tickers_table,
                         false, // popout windows don't support replay
+                        theme,
                     )
                 })
                 .on_click(pane::Message::PaneClicked),
@@ -832,6 +1078,39 @@ impl Dashboard {
         Task::done(Message::Notification(Toast::warn(
             "No focused pane found".to_string(),
         )))
+    }
+
+    /// フォーカスペインを Horizontal Split し、新ペインに ticker_info + content_kind を設定する。
+    /// Split 成功時は Some(Task)、フォーカスなし（ペイン数 > 1）・Split 失敗時は None を返す。
+    pub fn split_focused_and_init(
+        &mut self,
+        main_window: window::Id,
+        ticker_info: TickerInfo,
+        content_kind: ContentKind,
+    ) -> Option<Task<Message>> {
+        // フォーカスが無く唯一ペインがある場合は自動フォーカス（init_focused_pane と同じ挙動）
+        if self.focus.is_none()
+            && self.panes.len() == 1
+            && let Some((pane_id, _)) = self.panes.iter().next()
+        {
+            self.focus = Some((main_window, *pane_id));
+        }
+
+        let (window, focused_pane) = self.focus?;
+
+        // Horizontal Split
+        let (new_pane, _) = self.panes.split(
+            pane_grid::Axis::Horizontal,
+            focused_pane,
+            pane::State::new(),
+        )?;
+
+        // フォーカスを新ペインへ移動
+        self.focus = Some((window, new_pane));
+
+        // 新ペインに銘柄とチャート種類を設定
+        let task = self.init_pane(main_window, window, new_pane, ticker_info, content_kind);
+        Some(task)
     }
 
     pub fn switch_tickers_in_group(
@@ -1350,6 +1629,23 @@ impl Dashboard {
 
     /// リプレイ用にペインの content をクリアし、各ペインの kline StreamKind + pane_id を返す。
     /// settings / streams はそのまま保持する。
+    /// Kline ストリームを収集する（チャートはクリアしない）。
+    /// Play バリデーション用。
+    pub fn peek_kline_streams(&self, main_window: window::Id) -> Vec<(uuid::Uuid, StreamKind)> {
+        let mut kline_targets = Vec::new();
+        for (_, _, state) in self.iter_all_panes(main_window) {
+            let pane_id = state.unique_id();
+            if let Some(streams) = state.streams.ready_iter() {
+                for stream in streams {
+                    if matches!(stream, StreamKind::Kline { .. }) {
+                        kline_targets.push((pane_id, *stream));
+                    }
+                }
+            }
+        }
+        kline_targets
+    }
+
     pub fn prepare_replay(&mut self, main_window: window::Id) -> Vec<(uuid::Uuid, StreamKind)> {
         let mut kline_targets = Vec::new();
 
@@ -1544,11 +1840,211 @@ mod tests {
         assert!(!dashboard.has_tachibana_stream_pane(main_window));
     }
 
+    // --- split_focused_and_init tests ---
+
+    fn make_ticker_info() -> exchange::TickerInfo {
+        exchange::TickerInfo::new(
+            exchange::Ticker::new("BTCUSDT", exchange::adapter::Exchange::BinanceLinear),
+            0.1,
+            0.001,
+            None,
+        )
+    }
+
+    fn single_pane_dashboard() -> Dashboard {
+        Dashboard::from_config(
+            Configuration::Pane(pane::State::default()),
+            vec![],
+            uuid::Uuid::new_v4(),
+        )
+    }
+
+    #[test]
+    fn split_focused_and_init_returns_none_when_no_focus_and_multiple_panes() {
+        // Dashboard::default() already has 5 panes and focus == None
+        let mut dashboard = Dashboard::default();
+        let main_window = window::Id::unique();
+        let pane_count_before = dashboard.panes.len();
+        assert!(pane_count_before > 1);
+        assert!(dashboard.focus.is_none());
+
+        let result = dashboard.split_focused_and_init(
+            main_window,
+            make_ticker_info(),
+            data::layout::pane::ContentKind::CandlestickChart,
+        );
+
+        assert!(result.is_none());
+        assert_eq!(dashboard.panes.len(), pane_count_before, "pane count must not change");
+    }
+
+    #[test]
+    fn split_focused_and_init_auto_focuses_and_splits_when_single_pane_no_focus() {
+        let mut dashboard = single_pane_dashboard();
+        let main_window = window::Id::unique();
+        assert_eq!(dashboard.panes.len(), 1);
+        assert!(dashboard.focus.is_none());
+
+        let result = dashboard.split_focused_and_init(
+            main_window,
+            make_ticker_info(),
+            data::layout::pane::ContentKind::CandlestickChart,
+        );
+
+        assert!(result.is_some());
+        assert_eq!(dashboard.panes.len(), 2);
+        assert!(dashboard.focus.is_some());
+    }
+
+    #[test]
+    fn split_focused_and_init_splits_focused_pane_and_moves_focus() {
+        let mut dashboard = Dashboard::default();
+        let main_window = window::Id::unique();
+        let first_pane = *dashboard.panes.iter().next().map(|(p, _)| p).unwrap();
+        let pane_count_before = dashboard.panes.len();
+        dashboard.focus = Some((main_window, first_pane));
+
+        let result = dashboard.split_focused_and_init(
+            main_window,
+            make_ticker_info(),
+            data::layout::pane::ContentKind::CandlestickChart,
+        );
+
+        assert!(result.is_some());
+        assert_eq!(dashboard.panes.len(), pane_count_before + 1);
+        // Focus must have moved to the newly created pane
+        let (_, focused) = dashboard.focus.unwrap();
+        assert_ne!(focused, first_pane, "focus should move to the new pane");
+    }
+
+    #[test]
+    fn split_focused_and_init_preserves_original_pane_count_when_focus_window_differs() {
+        // フォーカスが popout ウィンドウにある状態で split → panes 数が +1 されること
+        let mut dashboard = single_pane_dashboard();
+        let main_window = window::Id::unique();
+        let popout_window = window::Id::unique();
+        let pane_id = *dashboard.panes.iter().next().map(|(p, _)| p).unwrap();
+        dashboard.focus = Some((popout_window, pane_id));
+        let pane_count_before = dashboard.panes.len();
+
+        let result = dashboard.split_focused_and_init(
+            main_window,
+            make_ticker_info(),
+            data::layout::pane::ContentKind::CandlestickChart,
+        );
+
+        assert!(result.is_some());
+        assert_eq!(
+            dashboard.panes.len(),
+            pane_count_before + 1,
+            "pane count must increase by 1 even when focus is on a popout window"
+        );
+    }
+
+    #[test]
+    fn split_focused_and_init_focus_window_matches_original_focus_window() {
+        // split 後の focus.0 が split 前と同じ window::Id を指すこと
+        let mut dashboard = single_pane_dashboard();
+        let main_window = window::Id::unique();
+        let popout_window = window::Id::unique();
+        let pane_id = *dashboard.panes.iter().next().map(|(p, _)| p).unwrap();
+        dashboard.focus = Some((popout_window, pane_id));
+
+        let result = dashboard.split_focused_and_init(
+            main_window,
+            make_ticker_info(),
+            data::layout::pane::ContentKind::CandlestickChart,
+        );
+
+        assert!(result.is_some());
+        let (focus_window, _) = dashboard.focus.unwrap();
+        assert_eq!(
+            focus_window, popout_window,
+            "focus window must remain the same after split"
+        );
+        assert_ne!(focus_window, main_window);
+    }
+
+    #[test]
+    fn split_focused_and_init_returns_some_twice_in_succession() {
+        // 2 回連続で呼んだとき、1 回目・2 回目ともに Some を返し、ペイン数が毎回 +1 されること
+        let mut dashboard = single_pane_dashboard();
+        let main_window = window::Id::unique();
+        assert_eq!(dashboard.panes.len(), 1);
+        assert!(dashboard.focus.is_none());
+
+        // 1 回目: focus なし・ペイン 1 → auto-focus して split
+        let result1 = dashboard.split_focused_and_init(
+            main_window,
+            make_ticker_info(),
+            data::layout::pane::ContentKind::CandlestickChart,
+        );
+        assert!(result1.is_some(), "1 回目は Some を返すこと");
+        assert_eq!(dashboard.panes.len(), 2, "1 回目後 pane count = 2");
+        assert!(dashboard.focus.is_some(), "1 回目後 focus が設定されていること");
+
+        // 2 回目: focus あり → そのまま split
+        let result2 = dashboard.split_focused_and_init(
+            main_window,
+            make_ticker_info(),
+            data::layout::pane::ContentKind::CandlestickChart,
+        );
+        assert!(result2.is_some(), "2 回目も Some を返すこと");
+        assert_eq!(dashboard.panes.len(), 3, "2 回目後 pane count = 3");
+    }
+
     // compile-time: clear_chart_for_replay returns (), not Vec<...>
     fn _type_check_clear_chart_for_replay_returns_unit(
         d: &mut super::Dashboard,
         id: iced::window::Id,
     ) {
         let _: () = d.clear_chart_for_replay(id);
+    }
+
+    /// MiniTickersList で銘柄切り替えを行うと SwitchTickersInGroup イベントが返ること。
+    /// このイベントが main.rs に伝搬することで ReloadKlineStream が発火される（リプレイ修正）。
+    #[test]
+    fn mini_tickers_list_switch_emits_switch_tickers_in_group_event() {
+        use crate::modal::pane::{
+            Modal,
+            mini_tickers_list::{MiniPanel, Message as MiniMsg, RowSelection},
+        };
+        use crate::window::Window;
+
+        let main_window = Window::new(iced::window::Id::unique());
+        let layout_id = uuid::Uuid::new_v4();
+        let mut dashboard = Dashboard::default();
+
+        // 最初のペインを取得し、MiniTickersList モーダルを開いた状態にする
+        let pane = *dashboard.panes.iter().next().map(|(p, _)| p).unwrap();
+        let state = dashboard.panes.get_mut(pane).unwrap();
+        state.modal = Some(Modal::MiniTickersList(MiniPanel::new()));
+
+        let ticker_info = exchange::TickerInfo::new(
+            exchange::Ticker::new("BTCUSDT", exchange::adapter::Exchange::BinanceLinear),
+            0.1,
+            0.001,
+            None,
+        );
+
+        // ペイン左上クリック → MiniTickersList → Switch 選択を模倣するメッセージ
+        let msg = Message::Pane(
+            main_window.id,
+            pane::Message::PaneEvent(
+                pane,
+                pane::Event::MiniTickersListInteraction(MiniMsg::RowSelected(
+                    RowSelection::Switch(ticker_info),
+                )),
+            ),
+        );
+
+        let (_task, event) = dashboard.update(msg, &main_window, &layout_id);
+
+        // SwitchTickersInGroup イベントが返ること（None だとリプレイが更新されないバグ）
+        assert!(
+            matches!(&event, Some(Event::SwitchTickersInGroup { ticker_info: ti }) if *ti == ticker_info),
+            "expected Some(Event::SwitchTickersInGroup {{ ticker_info }}) but got {:?}",
+            event
+        );
     }
 }

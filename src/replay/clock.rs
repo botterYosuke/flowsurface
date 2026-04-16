@@ -6,6 +6,7 @@ pub const BASE_STEP_DELAY_MS: u64 = 100;
 
 /// バーステップ離散クロック。
 /// `tick()` を各フレームで呼び、発火タイミングなら 1 ステップ進めて emit range を返す。
+#[derive(Debug)]
 pub struct StepClock {
     /// 現在の仮想時刻 (Unix ms)。常にバー境界値。
     now_ms: u64,

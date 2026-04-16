@@ -1,4 +1,7 @@
+pub mod buying_power;
 pub mod ladder;
+pub mod order_entry;
+pub mod order_list;
 pub mod timeandsales;
 
 use iced::{
@@ -7,11 +10,15 @@ use iced::{
 };
 use std::time::Instant;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum Message {
     Scrolled(f32),
     ResetScroll,
     Invalidate(Option<Instant>),
+    // ── 注文パネルメッセージ ──────────────────────────────────────────────────
+    OrderEntry(order_entry::Message),
+    OrderList(order_list::Message),
+    BuyingPower(buying_power::Message),
 }
 
 pub enum Action {}
@@ -51,5 +58,7 @@ pub fn update<T: Panel>(panel: &mut T, message: Message) {
         Message::Invalidate(now) => {
             panel.invalidate(now);
         }
+        // 注文パネルメッセージは各パネルの update() で処理する
+        Message::OrderEntry(_) | Message::OrderList(_) | Message::BuyingPower(_) => {}
     }
 }
