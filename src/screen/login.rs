@@ -87,6 +87,15 @@ mod tests {
     }
 
     #[test]
+    fn error_code_minus62_maps_to_outside_service_hours_message() {
+        let msg = tachibana_error_message("-62");
+        assert!(
+            msg.contains("サービス時間外") || msg.contains("8:30"),
+            "コード -62 はサービス時間外メッセージを示すべき: {msg}"
+        );
+    }
+
+    #[test]
     fn unknown_error_code_returns_generic_message() {
         let msg = tachibana_error_message("99999");
         assert!(
@@ -116,6 +125,9 @@ pub struct LoginScreen {
 /// Tachibana エラーコードを日本語メッセージに変換する。
 pub fn tachibana_error_message(code: &str) -> &'static str {
     match code {
+        "-62" => {
+            "サービス時間外です。営業日 8:30 以降にお試しください。"
+        }
         "10001" | "10002" | "10003" => "ユーザIDまたはパスワードが正しくありません。",
         "10004" => "アカウントがロックされています。サポートにお問い合わせください。",
         "UNREAD_NOTICES" => {
