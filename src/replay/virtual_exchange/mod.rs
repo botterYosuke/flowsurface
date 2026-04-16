@@ -49,4 +49,55 @@ impl VirtualExchangeEngine {
     pub fn portfolio_snapshot(&self, current_price: f64) -> PortfolioSnapshot {
         self.order_book.portfolio_snapshot(current_price)
     }
+
+    /// 現在 pending な注文の一覧を返す（HTTP API / UI 表示用）。
+    pub fn get_orders(&self) -> &[VirtualOrder] {
+        self.order_book.pending_orders()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_order(ticker: &str) -> VirtualOrder {
+        VirtualOrder {
+            order_id: uuid::Uuid::new_v4().to_string(),
+            ticker: ticker.to_string(),
+            side: PositionSide::Long,
+            qty: 0.1,
+            order_type: VirtualOrderType::Market,
+            placed_time_ms: 0,
+            status: VirtualOrderStatus::Pending,
+        }
+    }
+
+    #[test]
+    fn get_orders_returns_empty_initially() {
+        let engine = VirtualExchangeEngine::new(1_000_000.0);
+        assert_eq!(engine.get_orders().len(), 0);
+    }
+
+    #[test]
+    fn get_orders_returns_pending_after_place() {
+        let mut engine = VirtualExchangeEngine::new(1_000_000.0);
+        engine.place_order(make_order("BTCUSDT"));
+        assert_eq!(engine.get_orders().len(), 1);
+    }
+
+    #[test]
+    fn get_orders_returns_multiple_orders() {
+        let mut engine = VirtualExchangeEngine::new(1_000_000.0);
+        engine.place_order(make_order("BTCUSDT"));
+        engine.place_order(make_order("BTCUSDT"));
+        assert_eq!(engine.get_orders().len(), 2);
+    }
+
+    #[test]
+    fn get_orders_empty_after_reset() {
+        let mut engine = VirtualExchangeEngine::new(1_000_000.0);
+        engine.place_order(make_order("BTCUSDT"));
+        engine.reset();
+        assert_eq!(engine.get_orders().len(), 0);
+    }
 }

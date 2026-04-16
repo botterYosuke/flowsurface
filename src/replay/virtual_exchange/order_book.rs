@@ -169,9 +169,9 @@ impl VirtualOrderBook {
         self.portfolio.snapshot(current_price)
     }
 
-    /// UI 表示用の全注文一覧（pending + filled + cancelled）
-    #[allow(dead_code)]
-    pub fn orders(&self) -> &[VirtualOrder] {
+    /// 現在 pending な注文の一覧（HTTP API / UI 表示用）。
+    /// 約定後は on_tick() 内で削除されるため、pending 状態のものだけが返る。
+    pub fn pending_orders(&self) -> &[VirtualOrder] {
         &self.pending
     }
 
@@ -244,7 +244,7 @@ mod tests {
 
         assert_eq!(fills.len(), 1, "1件約定するはず");
         assert!((fills[0].fill_price - 92_000.0).abs() < 1.0);
-        assert_eq!(book.orders().len(), 0, "約定後は pending から消えるはず");
+        assert_eq!(book.pending_orders().len(), 0, "約定後は pending から消えるはず");
     }
 
     #[test]
@@ -283,7 +283,7 @@ mod tests {
         let fills = book.on_tick("BTCUSDT", &trades, 2_000);
 
         assert_eq!(fills.len(), 0, "指値未達では約定しないはず");
-        assert_eq!(book.orders().len(), 1, "pending に残るはず");
+        assert_eq!(book.pending_orders().len(), 1, "pending に残るはず");
     }
 
     #[test]
@@ -313,7 +313,7 @@ mod tests {
 
         book.reset();
 
-        assert_eq!(book.orders().len(), 0, "reset 後は pending が空のはず");
+        assert_eq!(book.pending_orders().len(), 0, "reset 後は pending が空のはず");
         let snap = book.portfolio_snapshot(90_000.0);
         assert_eq!(snap.open_positions.len(), 0, "reset 後は open ポジションが空のはず");
         assert!((snap.cash - 1_000_000.0).abs() < 1.0, "reset 後は cash が初期値に戻るはず");
@@ -329,6 +329,6 @@ mod tests {
         let fills = book.on_tick("ETHUSDT", &trades, 2_000);
 
         assert_eq!(fills.len(), 0, "ticker 不一致では約定しないはず");
-        assert_eq!(book.orders().len(), 1, "pending に残るはず");
+        assert_eq!(book.pending_orders().len(), 1, "pending に残るはず");
     }
 }

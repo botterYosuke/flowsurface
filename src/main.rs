@@ -1239,6 +1239,16 @@ impl Flowsurface {
                                     reply_tx.send_status(400, r#"{"error":"REPLAY mode only. Start replay first."}"#.to_string());
                                 }
                             }
+                            VirtualExchangeCommand::GetOrders => {
+                                if let Some(engine) = &self.virtual_engine {
+                                    let orders = engine.get_orders();
+                                    reply_tx.send(
+                                        serde_json::json!({ "orders": orders }).to_string(),
+                                    );
+                                } else {
+                                    reply_tx.send_status(400, r#"{"error":"REPLAY mode only. Start replay first."}"#.to_string());
+                                }
+                            }
                         }
                     }
                     #[cfg(debug_assertions)]

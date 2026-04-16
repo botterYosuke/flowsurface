@@ -35,6 +35,8 @@ pub enum VirtualExchangeCommand {
     GetPortfolio,
     /// 観測データを取得する（GET /api/replay/state）— Phase 1 骨格のみ
     GetState,
+    /// pending 注文の一覧を取得する（GET /api/replay/orders）
+    GetOrders,
 }
 
 /// 認証状態確認コマンド。
@@ -396,6 +398,9 @@ fn route(method: &str, path: &str, body: &str) -> Result<ApiCommand, RouteError>
         }
         ("GET", "/api/replay/state") => {
             Ok(ApiCommand::VirtualExchange(VirtualExchangeCommand::GetState))
+        }
+        ("GET", "/api/replay/orders") => {
+            Ok(ApiCommand::VirtualExchange(VirtualExchangeCommand::GetOrders))
         }
 
         // ── debug ビルドで有効（keyring クリア） ─────────────────────────
@@ -1073,5 +1078,23 @@ mod tests {
         assert!(matches!(r3, Err(RouteError::NotFound)));
         assert!(matches!(r4, Err(RouteError::NotFound)));
         assert!(matches!(r5, Err(RouteError::NotFound)));
+    }
+
+    // ── route tests: GET /api/replay/orders ──
+
+    #[test]
+    fn route_get_replay_orders() {
+        let cmd = route("GET", "/api/replay/orders", "").unwrap();
+        assert!(matches!(
+            cmd,
+            ApiCommand::VirtualExchange(VirtualExchangeCommand::GetOrders)
+        ));
+    }
+
+    #[test]
+    fn route_post_replay_orders_not_found() {
+        // POST はマッチしない（GET のみ）
+        let result = route("POST", "/api/replay/orders", "");
+        assert!(matches!(result, Err(RouteError::NotFound)));
     }
 }
