@@ -3,3 +3,8 @@
 /.vscode
 *.log
 .env
+
+# VitePress
+node_modules/
+docs/.vitepress/dist
+docs/.vitepress/cache

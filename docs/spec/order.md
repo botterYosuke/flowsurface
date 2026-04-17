@@ -1,5 +1,13 @@
 # 注文機能仕様書
 
+> **関連ドキュメント**:
+> | 知りたいこと | 参照先 |
+> |---|---|
+> | HTTP API エンドポイント全覧 | [replay.md §11](replay.md#11-http-制御-api) |
+> | 仮想約定エンジンの HTTP リクエスト/レスポンス形式 | [replay.md §11.2–11.3](replay.md#112-エンドポイント一覧) |
+> | リプレイ状態モデル・StepClock・EventStore | [replay.md](replay.md) |
+> | 立花証券 API プロトコル・EVENT I/F | [tachibana.md](tachibana.md) |
+
 ## 概要
 
 flowsurface に立花証券 e 支店 API を使った注文機能を追加した。
@@ -1228,18 +1236,20 @@ if is_replay_now && is_step_forward {
 ```json
 {
   "ticker": "BTCUSDT",
-  "side": "Long",
+  "side": "buy",
   "qty": 0.1,
   "order_type": "market"
 }
 // 指値の場合:
 {
   "ticker": "BTCUSDT",
-  "side": "Short",
+  "side": "sell",
   "qty": 0.5,
   "order_type": { "limit": 92000.0 }
 }
 ```
+
+> **注意**: HTTP API の `side` は `"buy"` / `"sell"`（小文字）。内部の `PositionSide` enum は `Long` / `Short` だが、HTTP リクエストに `"Long"` を送ると `400 Bad Request` になる。レスポンス（`GET /api/replay/orders`）では `"Long"` / `"Short"` で返る（Rust enum シリアライズ）。
 
 ---
 
