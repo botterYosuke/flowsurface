@@ -60,7 +60,7 @@ ORDER_RESP=$(curl -s -X POST "$API/tachibana/order" \
   -H "Content-Type: application/json" \
   -d '{
     "issue_code":       "7203",
-    "qty":              "1",
+    "qty":              "100",
     "side":             "3",
     "price":            "0",
     "account_type":     "1",

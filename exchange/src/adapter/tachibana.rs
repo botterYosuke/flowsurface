@@ -4134,6 +4134,8 @@ mod tests {
     /// Phase 4-2: 発注パスワード誤りのとき ApiError が返る（sResultCode 非ゼロ）
     #[tokio::test]
     async fn submit_new_order_returns_error_on_wrong_password_response() {
+        // NOTE: sResultCode="91001" は実機確認で得られたプレースホルダー値。
+        // 正確なコードは立花証券 API 仕様書で確認後に更新すること。
         let mut server = mockito::Server::new_async().await;
         let _mock = server
             .mock("POST", mockito::Matcher::Any)
@@ -4221,6 +4223,8 @@ mod tests {
     /// Phase 4-4: 存在しない銘柄コードのとき ApiError が返る（sResultCode 非ゼロ）
     #[tokio::test]
     async fn submit_new_order_returns_error_on_invalid_issue_code_response() {
+        // NOTE: sResultCode="11001" は実機確認で得られたプレースホルダー値。
+        // 正確なコードは立花証券 API 仕様書で確認後に更新すること。
         let mut server = mockito::Server::new_async().await;
         let _mock = server
             .mock("POST", mockito::Matcher::Any)

@@ -117,9 +117,7 @@ if [ "$HAS_ERROR" = "true" ]; then
   echo "  エラーメッセージ: $ERR_MSG"
   pass "Step 4: エラーレスポンス取得（code=$ERR_CODE）"
 else
-  # セッション未確立等の理由でエラーフィールドが違う形式になる場合も考慮
-  echo "  WARN: error フィールドなし、レスポンス: $ORDER_RESP"
-  pass "Step 4: JSON レスポンス確認（クラッシュなし）"
+  fail "Step 4" "無効銘柄コードに対して error フィールドが返らなかった: $ORDER_RESP"
 fi
 
 stop_app
