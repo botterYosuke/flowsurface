@@ -859,7 +859,10 @@ pub async fn init_issue_master(
         if let Err(e) = std::fs::write(path, json) {
             log::warn!("Failed to write Tachibana master disk cache: {e}");
         } else {
-            log::info!("Tachibana master cache saved to disk ({} records)", records.len());
+            log::info!(
+                "Tachibana master cache saved to disk ({} records)",
+                records.len()
+            );
         }
     }
     Ok(())
@@ -884,7 +887,10 @@ pub fn load_master_from_disk(
     if records.is_empty() {
         return None;
     }
-    log::info!("Tachibana master loaded from disk cache ({} records)", records.len());
+    log::info!(
+        "Tachibana master loaded from disk cache ({} records)",
+        records.len()
+    );
     if let Ok(mut guard) = ISSUE_MASTER_CACHE.write() {
         *guard = Some(Arc::new(records.clone()));
     }
@@ -1448,7 +1454,11 @@ pub struct OrderListRequest {
 /// CLMOrderList 注文一覧レスポンス。
 #[derive(Debug, Deserialize)]
 pub struct OrderListResponse {
-    #[serde(rename = "aOrderList", deserialize_with = "deserialize_tachibana_list", default)]
+    #[serde(
+        rename = "aOrderList",
+        deserialize_with = "deserialize_tachibana_list",
+        default
+    )]
     pub orders: Vec<OrderRecord>,
 }
 
@@ -1501,7 +1511,11 @@ pub struct OrderDetailRequest {
 /// CLMOrderListDetail 約定明細レスポンス。
 #[derive(Debug, Deserialize)]
 pub struct OrderDetailResponse {
-    #[serde(rename = "aYakuzyouSikkouList", deserialize_with = "deserialize_tachibana_list", default)]
+    #[serde(
+        rename = "aYakuzyouSikkouList",
+        deserialize_with = "deserialize_tachibana_list",
+        default
+    )]
     pub executions: Vec<ExecutionRecord>,
 }
 
@@ -1590,6 +1604,20 @@ pub fn serialize_order_request<T: Serialize>(
             "sJsonOfmt".to_string(),
             serde_json::Value::String("5".to_string()),
         );
+        // 新規注文時: 逆指値・建日種類関連フィールドのデフォルト（通常現物=なし）を付与
+        // 公式サンプル e_api_order_genbutsu_buy_tel.py の request 電文例より
+        if clm_id == "CLMKabuNewOrder" {
+            obj.entry("sGyakusasiOrderType")
+                .or_insert(serde_json::Value::String("0".to_string()));
+            obj.entry("sGyakusasiZyouken")
+                .or_insert(serde_json::Value::String("0".to_string()));
+            obj.entry("sGyakusasiPrice")
+                .or_insert(serde_json::Value::String("*".to_string()));
+            obj.entry("sTatebiType")
+                .or_insert(serde_json::Value::String("*".to_string()));
+            obj.entry("sTategyokuZyoutoekiKazeiC")
+                .or_insert(serde_json::Value::String("*".to_string()));
+        }
     }
     Ok(serde_json::to_string(&value)?)
 }
@@ -3884,6 +3912,210 @@ mod tests {
         assert!(
             json.contains("p_sd_date"),
             "p_sd_date が付与されるべき: {json}"
+        );
+    }
+
+    // ── Phase 1: serialize_order_request デフォルトフィールド検証 ───────────────
+
+    /// CLMKabuNewOrder では逆指値・建日種類の5フィールドがデフォルト付与される
+    #[test]
+    fn serialize_order_request_new_order_adds_new_order_default_fields() {
+        let req = NewOrderRequest {
+            account_type: "1".to_string(),
+            issue_code: "7203".to_string(),
+            market_code: "00".to_string(),
+            side: "3".to_string(),
+            condition: "0".to_string(),
+            price: "0".to_string(),
+            qty: "100".to_string(),
+            cash_margin: "0".to_string(),
+            expire_day: "0".to_string(),
+            second_password: "pw".to_string(),
+        };
+        let json = serialize_order_request(&req, "CLMKabuNewOrder").unwrap();
+        assert!(
+            json.contains(r#""sGyakusasiOrderType":"0""#),
+            "sGyakusasiOrderType=0 が必要: {json}"
+        );
+        assert!(
+            json.contains(r#""sGyakusasiZyouken":"0""#),
+            "sGyakusasiZyouken=0 が必要: {json}"
+        );
+        assert!(
+            json.contains(r#""sGyakusasiPrice":"*""#),
+            "sGyakusasiPrice=* が必要: {json}"
+        );
+        assert!(
+            json.contains(r#""sTatebiType":"*""#),
+            "sTatebiType=* が必要: {json}"
+        );
+        assert!(
+            json.contains(r#""sTategyokuZyoutoekiKazeiC":"*""#),
+            "sTategyokuZyoutoekiKazeiC=* が必要: {json}"
+        );
+    }
+
+    /// CLMKabuNewOrder 以外では逆指値・建日種類のデフォルトフィールドは付与されない
+    #[test]
+    fn serialize_order_request_non_new_order_omits_new_order_default_fields() {
+        let req = CancelOrderRequest {
+            order_number: "11223344".to_string(),
+            eig_day: "20260416".to_string(),
+            second_password: "pw".to_string(),
+        };
+        let json = serialize_order_request(&req, "CLMKabuCancelOrder").unwrap();
+        assert!(
+            !json.contains("sGyakusasiOrderType"),
+            "CancelOrder に sGyakusasiOrderType は不要: {json}"
+        );
+        assert!(
+            !json.contains("sTatebiType"),
+            "CancelOrder に sTatebiType は不要: {json}"
+        );
+        assert!(
+            !json.contains("sTategyokuZyoutoekiKazeiC"),
+            "CancelOrder に sTategyokuZyoutoekiKazeiC は不要: {json}"
+        );
+    }
+
+    /// 信用新規買い（制度6M）のフィールドが正しくシリアライズされる
+    #[test]
+    fn new_order_request_credit_new_buy_serializes_cash_margin() {
+        let req = NewOrderRequest {
+            account_type: "1".to_string(),
+            issue_code: "7203".to_string(),
+            market_code: "00".to_string(),
+            side: "3".to_string(),
+            condition: "0".to_string(),
+            price: "0".to_string(),
+            qty: "100".to_string(),
+            cash_margin: "2".to_string(),
+            expire_day: "0".to_string(),
+            second_password: "pw".to_string(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(
+            json.contains(r#""sGenkinShinyouKubun":"2""#),
+            "信用新規(制度6M) の sGenkinShinyouKubun=2 が必要: {json}"
+        );
+    }
+
+    /// 信用返済（制度）のフィールドが正しくシリアライズされる
+    #[test]
+    fn new_order_request_credit_close_buy_serializes_cash_margin() {
+        let req = NewOrderRequest {
+            account_type: "1".to_string(),
+            issue_code: "7203".to_string(),
+            market_code: "00".to_string(),
+            side: "3".to_string(),
+            condition: "0".to_string(),
+            price: "0".to_string(),
+            qty: "100".to_string(),
+            cash_margin: "4".to_string(),
+            expire_day: "0".to_string(),
+            second_password: "pw".to_string(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(
+            json.contains(r#""sGenkinShinyouKubun":"4""#),
+            "信用返済(制度) の sGenkinShinyouKubun=4 が必要: {json}"
+        );
+    }
+
+    /// NISA 口座の発注で sZyoutoekiKazeiC=5 がシリアライズされる
+    #[test]
+    fn new_order_request_nisa_account_serializes_account_type() {
+        let req = NewOrderRequest {
+            account_type: "5".to_string(),
+            issue_code: "7203".to_string(),
+            market_code: "00".to_string(),
+            side: "3".to_string(),
+            condition: "0".to_string(),
+            price: "0".to_string(),
+            qty: "100".to_string(),
+            cash_margin: "0".to_string(),
+            expire_day: "0".to_string(),
+            second_password: "pw".to_string(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(
+            json.contains(r#""sZyoutoekiKazeiC":"5""#),
+            "NISA 口座の sZyoutoekiKazeiC=5 が必要: {json}"
+        );
+    }
+
+    /// 成行売り注文で sBaibaiKubun=1 がシリアライズされる
+    #[test]
+    fn new_order_request_market_sell_serializes_side() {
+        let req = NewOrderRequest {
+            account_type: "1".to_string(),
+            issue_code: "7203".to_string(),
+            market_code: "00".to_string(),
+            side: "1".to_string(),
+            condition: "0".to_string(),
+            price: "0".to_string(),
+            qty: "100".to_string(),
+            cash_margin: "0".to_string(),
+            expire_day: "0".to_string(),
+            second_password: "pw".to_string(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(
+            json.contains(r#""sBaibaiKubun":"1""#),
+            "成行売り sBaibaiKubun=1 が必要: {json}"
+        );
+        assert!(
+            json.contains(r#""sOrderPrice":"0""#),
+            "成行の sOrderPrice=0 が必要: {json}"
+        );
+    }
+
+    /// 指値買い注文で sOrderPrice に値段が入る
+    #[test]
+    fn new_order_request_limit_buy_serializes_price_and_side() {
+        let req = NewOrderRequest {
+            account_type: "1".to_string(),
+            issue_code: "7203".to_string(),
+            market_code: "00".to_string(),
+            side: "3".to_string(),
+            condition: "0".to_string(),
+            price: "2500".to_string(),
+            qty: "100".to_string(),
+            cash_margin: "0".to_string(),
+            expire_day: "0".to_string(),
+            second_password: "pw".to_string(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(
+            json.contains(r#""sOrderPrice":"2500""#),
+            "指値買い sOrderPrice=2500 が必要: {json}"
+        );
+        assert!(
+            json.contains(r#""sBaibaiKubun":"3""#),
+            "買い sBaibaiKubun=3 が必要: {json}"
+        );
+    }
+
+    /// serialize_order_request が CLMKabuCorrectOrder には新規注文デフォルトを付与しない
+    #[test]
+    fn serialize_order_request_correct_order_omits_new_order_defaults() {
+        let req = CorrectOrderRequest {
+            order_number: "12345678".to_string(),
+            eig_day: "20260416".to_string(),
+            condition: "*".to_string(),
+            price: "2600".to_string(),
+            qty: "*".to_string(),
+            expire_day: "*".to_string(),
+            second_password: "pw".to_string(),
+        };
+        let json = serialize_order_request(&req, "CLMKabuCorrectOrder").unwrap();
+        assert!(
+            !json.contains("sGyakusasiOrderType"),
+            "CorrectOrder に sGyakusasiOrderType は不要: {json}"
+        );
+        assert!(
+            !json.contains("sTatebiType"),
+            "CorrectOrder に sTatebiType は不要: {json}"
         );
     }
 }

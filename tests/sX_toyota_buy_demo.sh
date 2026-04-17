@@ -10,6 +10,16 @@
 set -euo pipefail
 source "$(dirname "$0")/common_helpers.sh"
 
+# F-2: デモ環境ガード（本番誤発注防止）
+[ "${DEV_IS_DEMO:-}" = "true" ] \
+  || { echo "ERROR: DEV_IS_DEMO=true を設定してください（本番誤発注防止）"; exit 1; }
+[ -n "${DEV_USER_ID:-}" ] \
+  || { echo "ERROR: DEV_USER_ID が未設定です"; exit 1; }
+[ -n "${DEV_PASSWORD:-}" ] \
+  || { echo "ERROR: DEV_PASSWORD が未設定です"; exit 1; }
+[ -n "${DEV_SECOND_PASSWORD:-}" ] \
+  || { echo "ERROR: DEV_SECOND_PASSWORD が未設定です"; exit 1; }
+
 echo "=== TOYOTA Live モード 注文パネル デモテスト ==="
 backup_state
 trap 'stop_app; restore_state' EXIT ERR
@@ -110,14 +120,11 @@ echo "── Step 5: Tachibana 認証状態確認"
 
 AUTH=$(curl -s "$API/auth/tachibana/status")
 echo "  auth status: $AUTH"
-SESSION=$(node -e "try{const d=JSON.parse(process.argv[1]);console.log(d.session||'none');}catch(e){console.log('none');}" "$AUTH")
-echo "  session=$SESSION"
-if [ "$SESSION" != "none" ] && [ -n "$SESSION" ]; then
-  pass "Step 5: Tachibana セッション確立済み (session=$SESSION)"
-else
-  echo "  INFO: Tachibana セッションなし（ログインが必要）"
-  pass "Step 5: 認証 API 応答確認 (session=none — ログイン待ち)"
-fi
+echo "  auth status: $AUTH"
+# F-1: セッション未確立の場合は fail にする
+wait_tachibana_session 60 \
+  && pass "Step 5: Tachibana デモセッション確立" \
+  || fail "Step 5" "セッション未確立 — DEV_IS_DEMO=true でデモログインが必要"
 
 # ── Step 6: スクリーンショット取得 ───────────────────────────────────────────
 echo ""
@@ -126,6 +133,40 @@ SHOT_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$API/app/screenshot"
 [ "$SHOT_CODE" = "200" ] \
   && pass "Step 6: スクリーンショット保存 → /tmp/screenshot.png" \
   || fail "Step 6" "HTTP=$SHOT_CODE"
+
+# ── Step 7: TOYOTA 100株 成行買い注文 ─────────────────────────────────────────
+echo ""
+echo "── Step 7: TOYOTA (7203) 100株 成行買い注文"
+
+  ORDER_RESP=$(curl -s -X POST "$API/tachibana/order" \
+    -H "Content-Type: application/json" \
+    -d '{
+      "issue_code":   "7203",
+      "qty":          "100",
+      "side":         "3",
+      "price":        "0",
+      "account_type": "1",
+      "market_code":  "00",
+      "condition":    "0",
+      "cash_margin":  "0",
+      "expire_day":   "0"
+    }')
+  echo "  response: $ORDER_RESP"
+  ORDER_NUM=$(node -e "
+    try {
+      const d = JSON.parse(process.argv[1]);
+      console.log(d.order_number || 'none');
+    } catch(e) { console.log('none'); }
+  " "$ORDER_RESP")
+  if [ "$ORDER_NUM" != "none" ] && [ -n "$ORDER_NUM" ]; then
+    pass "Step 7: 注文受付済み (order_number=$ORDER_NUM)"
+  else
+    ERROR=$(node -e "
+      try { console.log(JSON.parse(process.argv[1]).error||'unknown'); }
+      catch(e) { console.log('parse error'); }
+    " "$ORDER_RESP")
+    fail "Step 7" "注文失敗: $ERROR"
+  fi
 
 stop_app
 print_summary

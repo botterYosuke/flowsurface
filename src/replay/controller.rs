@@ -1696,7 +1696,9 @@ mod tests {
         let kline_s = kline_stream();
         let trade_s = trade_stream();
         // 10 trades within the 5-minute window (now = 600_000)
-        let trades: Vec<_> = (1u64..=10).map(|i| dummy_trade(600_000 - i * 10_000)).collect();
+        let trades: Vec<_> = (1u64..=10)
+            .map(|i| dummy_trade(600_000 - i * 10_000))
+            .collect();
 
         let mut store = EventStore::new();
         store.ingest_loaded(
@@ -1761,7 +1763,11 @@ mod tests {
 
         let data = ctrl.get_api_state(50).expect("should return Some");
         let returned = &data.trades[0].1;
-        assert_eq!(returned.len(), 1, "only the inside-window trade should appear");
+        assert_eq!(
+            returned.len(),
+            1,
+            "only the inside-window trade should appear"
+        );
         assert_eq!(returned[0].time, inside.time);
     }
 }

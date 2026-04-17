@@ -217,6 +217,22 @@ enum Message {
             String,
         >,
     },
+    TachibanaOrderApiResult {
+        reply: replay_api::ReplySender,
+        result: Result<exchange::adapter::tachibana::NewOrderResponse, String>,
+    },
+    FetchOrdersApiResult {
+        reply: replay_api::ReplySender,
+        result: Result<Vec<exchange::adapter::tachibana::OrderRecord>, String>,
+    },
+    FetchOrderDetailApiResult {
+        reply: replay_api::ReplySender,
+        result: Result<Vec<exchange::adapter::tachibana::ExecutionRecord>, String>,
+    },
+    ModifyOrderApiResult {
+        reply: replay_api::ReplySender,
+        result: Result<exchange::adapter::tachibana::ModifyOrderResponse, String>,
+    },
     Replay(ReplayMessage),
     ReplayApi(replay_api::ApiMessage),
 }
@@ -322,20 +338,7 @@ impl Flowsurface {
                         connector::auth::persist_session(&session);
                         let dashboard_task = self.transition_to_dashboard();
                         let master_task = Self::start_master_download(session);
-                        let disk_cache_task: Task<Message> = {
-                            let path = data::data_path(Some("market_data/tachibana_master_cache.json"));
-                            match exchange::adapter::tachibana::load_master_from_disk(&path) {
-                                Some(metadata) => Task::done(Message::Sidebar(
-                                    dashboard::sidebar::Message::TickersTable(
-                                        dashboard::tickers_table::Message::UpdateMetadata(
-                                            exchange::adapter::Venue::Tachibana,
-                                            metadata,
-                                        ),
-                                    ),
-                                )),
-                                None => Task::none(),
-                            }
-                        };
+                        let disk_cache_task = Self::make_disk_cache_task();
                         return Task::batch([dashboard_task, disk_cache_task, master_task]);
                     }
                     Err(error_msg) => {
@@ -352,20 +355,7 @@ impl Flowsurface {
                     let dashboard_task = self.transition_to_dashboard();
                     let master_task = Self::start_master_download(session);
                     // ディスクキャッシュが存在する場合、ダウンロード完了前に即座に metadata を供給する
-                    let disk_cache_task: Task<Message> = {
-                        let path = data::data_path(Some("market_data/tachibana_master_cache.json"));
-                        match exchange::adapter::tachibana::load_master_from_disk(&path) {
-                            Some(metadata) => Task::done(Message::Sidebar(
-                                dashboard::sidebar::Message::TickersTable(
-                                    dashboard::tickers_table::Message::UpdateMetadata(
-                                        exchange::adapter::Venue::Tachibana,
-                                        metadata,
-                                    ),
-                                ),
-                            )),
-                            None => Task::none(),
-                        }
-                    };
+                    let disk_cache_task = Self::make_disk_cache_task();
                     return Task::batch([dashboard_task, disk_cache_task, master_task]);
                 }
                 // 再ログイン失敗 → ログイン画面を表示（e2e-mock ではスキップ）
@@ -411,6 +401,76 @@ impl Flowsurface {
                         "margin_new_order_power": margin.margin_new_order_power,
                         "maintenance_margin_rate": margin.maintenance_margin_rate,
                         "margin_call_flag": margin.margin_call_flag,
+                    })
+                    .to_string(),
+                    Err(e) => serde_json::json!({ "error": e }).to_string(),
+                };
+                reply.send(body);
+            }
+            Message::TachibanaOrderApiResult { reply, result } => {
+                let body = match result {
+                    Ok(resp) => serde_json::json!({
+                        "order_number": resp.order_number,
+                        "eig_day": resp.eig_day,
+                        "delivery_amount": resp.delivery_amount,
+                        "commission": resp.commission,
+                        "consumption_tax": resp.consumption_tax,
+                        "order_datetime": resp.order_datetime,
+                        "warning_code": resp.warning_code,
+                        "warning_text": resp.warning_text,
+                    })
+                    .to_string(),
+                    Err(e) => serde_json::json!({ "error": e }).to_string(),
+                };
+                reply.send(body);
+            }
+            Message::FetchOrdersApiResult { reply, result } => {
+                let body = match result {
+                    Ok(orders) => serde_json::to_string(&serde_json::json!({ "orders": orders
+                        .iter()
+                        .map(|o| serde_json::json!({
+                            "order_num": o.order_num,
+                            "issue_code": o.issue_code,
+                            "order_qty": o.order_qty,
+                            "current_qty": o.current_qty,
+                            "order_price": o.order_price,
+                            "order_datetime": o.order_datetime,
+                            "status_text": o.status_text,
+                            "executed_qty": o.executed_qty,
+                            "executed_price": o.executed_price,
+                            "eig_day": o.eig_day,
+                        }))
+                        .collect::<Vec<_>>()
+                    }))
+                    .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string()),
+                    Err(e) => serde_json::json!({ "error": e }).to_string(),
+                };
+                reply.send(body);
+            }
+            Message::FetchOrderDetailApiResult { reply, result } => {
+                let body = match result {
+                    Ok(executions) => {
+                        serde_json::to_string(&serde_json::json!({ "executions": executions
+                            .iter()
+                            .map(|e| serde_json::json!({
+                                "exec_qty": e.exec_qty,
+                                "exec_price": e.exec_price,
+                                "exec_datetime": e.exec_datetime,
+                            }))
+                            .collect::<Vec<_>>()
+                        }))
+                        .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string())
+                    }
+                    Err(e) => serde_json::json!({ "error": e }).to_string(),
+                };
+                reply.send(body);
+            }
+            Message::ModifyOrderApiResult { reply, result } => {
+                let body = match result {
+                    Ok(resp) => serde_json::json!({
+                        "order_number": resp.order_number,
+                        "eig_day": resp.eig_day,
+                        "order_datetime": resp.order_datetime,
                     })
                     .to_string(),
                     Err(e) => serde_json::json!({ "error": e }).to_string(),
@@ -1298,7 +1358,55 @@ impl Flowsurface {
                     ApiCommand::FetchBuyingPower => {
                         return Task::perform(
                             connector::order::fetch_buying_power(),
-                            move |result| Message::BuyingPowerApiResult { reply: reply_tx, result },
+                            move |result| Message::BuyingPowerApiResult {
+                                reply: reply_tx,
+                                result,
+                            },
+                        );
+                    }
+                    ApiCommand::TachibanaNewOrder { req } => {
+                        return Task::perform(
+                            connector::order::submit_new_order(*req),
+                            move |result| Message::TachibanaOrderApiResult {
+                                reply: reply_tx,
+                                result,
+                            },
+                        );
+                    }
+                    ApiCommand::FetchTachibanaOrders { eig_day } => {
+                        return Task::perform(
+                            connector::order::fetch_orders(eig_day),
+                            move |result| Message::FetchOrdersApiResult {
+                                reply: reply_tx,
+                                result,
+                            },
+                        );
+                    }
+                    ApiCommand::FetchTachibanaOrderDetail { order_num, eig_day } => {
+                        return Task::perform(
+                            connector::order::fetch_order_detail(order_num, eig_day),
+                            move |result| Message::FetchOrderDetailApiResult {
+                                reply: reply_tx,
+                                result,
+                            },
+                        );
+                    }
+                    ApiCommand::TachibanaCorrectOrder { req } => {
+                        return Task::perform(
+                            connector::order::submit_correct_order(*req),
+                            move |result| Message::ModifyOrderApiResult {
+                                reply: reply_tx,
+                                result,
+                            },
+                        );
+                    }
+                    ApiCommand::TachibanaOrderCancel { req } => {
+                        return Task::perform(
+                            connector::order::submit_cancel_order(*req),
+                            move |result| Message::ModifyOrderApiResult {
+                                reply: reply_tx,
+                                result,
+                            },
                         );
                     }
                     ApiCommand::VirtualExchange(cmd) => {
@@ -2571,9 +2679,7 @@ impl Flowsurface {
                     .await
                     {
                         Ok(()) => {
-                            return Ok(
-                                exchange::adapter::tachibana::cached_ticker_metadata().await
-                            );
+                            return Ok(exchange::adapter::tachibana::cached_ticker_metadata().await);
                         }
                         Err(e) => {
                             log::warn!("Tachibana master download attempt {attempt} failed: {e}");
@@ -2601,6 +2707,23 @@ impl Flowsurface {
                 }
             },
         )
+    }
+
+    /// ディスクキャッシュから銘柄マスタを読み込み、TickersTable へ即座に反映する Task を返す。
+    /// キャッシュが存在しない場合は `Task::none()` を返す。
+    fn make_disk_cache_task() -> Task<Message> {
+        let path = data::data_path(Some("market_data/tachibana_master_cache.json"));
+        match exchange::adapter::tachibana::load_master_from_disk(&path) {
+            Some(metadata) => {
+                Task::done(Message::Sidebar(dashboard::sidebar::Message::TickersTable(
+                    dashboard::tickers_table::Message::UpdateMetadata(
+                        exchange::adapter::Venue::Tachibana,
+                        metadata,
+                    ),
+                )))
+            }
+            None => Task::none(),
+        }
     }
 
     fn load_layout(&mut self, layout_uid: uuid::Uuid, main_window: window::Id) -> Task<Message> {
