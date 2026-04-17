@@ -935,8 +935,9 @@ pub enum Message {
 ## 仮想約定エンジン（`src/replay/virtual_exchange/`）
 
 REPLAY モード中に証券 API を呼ばずに仮想注文を処理するエンジン。
-`main.rs` が `Option<Arc<tokio::sync::Mutex<VirtualExchangeEngine>>>` として保持し、
-HTTP API スレッドとも共有する。
+`main.rs` が `Option<VirtualExchangeEngine>` として保持する（Arc/Mutex 不使用 — iced の
+同期 update() コンテキスト内で直接アクセスするため、排他制御は不要）。
+HTTP API スレッドからのアクセスは `replay_api.rs` の `ApiCommand` チャネル経由で行う。
 
 ### モジュール構成
 
@@ -969,8 +970,29 @@ pub struct Position {
 pub struct VirtualPortfolio {
     pub initial_cash: f64,
     pub cash: f64,
-    positions: Vec<Position>,
+    positions: Vec<Position>,       // private; 外部からは公開メソッド経由のみアクセス
 }
+
+// --- VirtualPortfolio の主要メソッド ---
+//
+// record_open(pos)
+//   約定時に呼ぶ。Long: cash -= entry_price * qty / Short: cash += entry_price * qty
+//
+// record_close(order_id, exit_price, exit_time_ms)
+//   クローズ時に呼ぶ。realized_pnl を確定し売却代金/買戻コストを cash に反映する。
+//   Long close: cash += exit_price * qty / Short close: cash -= exit_price * qty
+//
+// oldest_open_long_order_id(ticker) -> Option<&str>
+//   指定 ticker のオープン中 Long ポジションの中で entry_time_ms が最小（最古）の
+//   order_id を返す（FIFO クローズ用）。
+//   ※ 返り値の &str は self.portfolio を借用するため、呼び出し後に可変借用する場合は
+//     `.map(str::to_string)` でクローンしてから record_close() を呼ぶこと。
+//
+// unrealized_pnl(current_price) -> f64
+//   単一銘柄前提。Phase 2 で複数銘柄対応予定。
+//
+// snapshot(current_price) -> PortfolioSnapshot
+//   HTTP GET /api/replay/portfolio のレスポンスに使用する。
 
 #[derive(serde::Serialize)]
 pub struct PortfolioSnapshot {
@@ -1025,6 +1047,33 @@ pub struct FillEvent {
 | 指値売り | `trade.price >= limit_price` のトレードが来た tick で約定 |
 
 `place()` は `Pending` 状態で登録するのみ。約定は必ず次の `on_tick()` で行う。
+
+### ポジションのネットアウト（sell → Long close）
+
+Sell 注文の約定時、`on_tick()` は以下の優先順位でポジションを処理する:
+
+1. `portfolio.oldest_open_long_order_id(ticker)` でオープン中の Long ポジションを検索
+2. 見つかれば `record_close(long_id, fill_price, now_ms)` でクローズ（FIFO）
+3. 見つからなければ `record_open(Position { side: Short, ... })` で新規 Short を開く
+
+```rust
+// order_book.rs on_tick() 内（簡略化）
+match order.side {
+    PositionSide::Short => {
+        let existing_long_id = self.portfolio
+            .oldest_open_long_order_id(ticker)
+            .map(str::to_string);  // borrow checker 対策: &str → String にクローン
+        if let Some(long_id) = existing_long_id {
+            self.portfolio.record_close(&long_id, fp, now_ms);
+        } else {
+            self.portfolio.record_open(Position { side: PositionSide::Short, ... });
+        }
+    }
+    PositionSide::Long => {
+        self.portfolio.record_open(Position { side: PositionSide::Long, ... });
+    }
+}
+```
 
 ### REPLAY モード Safety Guard
 
@@ -1107,22 +1156,58 @@ pub fn split_focused_and_init_order(
 ```rust
 pub struct Flowsurface {
     // 既存...
-    virtual_engine: Option<Arc<tokio::sync::Mutex<VirtualExchangeEngine>>>,
+    virtual_engine: Option<replay::virtual_exchange::VirtualExchangeEngine>,
 }
 ```
 
 **ライフサイクル:**
 - Live → Replay 遷移: `VirtualExchangeEngine::new(1_000_000.0)` で初期化（既存なら `reset()`）
 - Replay → Live 遷移: `engine.reset()`
+- `StepForward` 時: エンジンをリセット**しない**（下記参照）
 
-**Tick 処理（毎 tick）:**
+**StepForward 時のエンジンリセット抑止（2026-04-17 修正）:**
+
+`StepForward` メッセージを `handle_message()` に渡すと内部でリプレイ時刻が進み、
+`time_before != time_after` の条件が真になってエンジンが毎回リセットされるバグがあった。
+以下のパターンで `is_step_forward` フラグを先に取り出してガードする:
+
 ```rust
-// replay dispatcher から Trade が来たとき
-if let Some(engine) = &self.virtual_engine {
-    let fills = tokio::task::block_in_place(|| {
-        engine.blocking_lock().on_tick(&ticker, &trades, clock_ms)
-    });
-    // fills を VirtualOrderFilled メッセージとして発行
+// StepForward かどうかを handle_message() に渡す前に判定
+let is_step_forward = matches!(
+    msg,
+    replay::ReplayMessage::User(replay::ReplayUserMessage::StepForward)
+);
+let task = self.replay.handle_message(msg);
+
+// StepForward でない場合のみリセット
+} else if is_replay_now && time_before != time_after && !is_step_forward
+    && let Some(engine) = &mut self.virtual_engine
+{
+    engine.reset();
+}
+```
+
+**StepForward 時の合成トレード注入:**
+
+Trades EventStore は未統合（`ingest_loaded(..., LoadedData { klines, trades: vec![] })`）のため
+`on_tick()` に実際のトレードが届かない。StepForward 後に kline の close 価格から合成
+トレードを生成して注文約定を駆動する:
+
+```rust
+// controller.rs に追加した synthetic_trades_at_current_time()
+pub fn synthetic_trades_at_current_time(&self) -> Vec<(StreamKind, Vec<Trade>)> {
+    // Active セッションの klines ストアから現在時刻以下の最新 kline を取得し
+    // close 価格で Trade { qty: 1.0 } を生成して返す
+}
+
+// main.rs の StepForward ハンドラ（簡略）
+if is_replay_now && is_step_forward {
+    if let Some(engine) = &mut self.virtual_engine {
+        for (stream, trades) in self.replay.synthetic_trades_at_current_time() {
+            let fills = engine.on_tick(&ticker, &trades, clock_ms);
+            // fills → VirtualOrderFilled メッセージとしてディスパッチ
+        }
+    }
 }
 ```
 
@@ -1132,7 +1217,11 @@ if let Some(engine) = &self.virtual_engine {
 |---|---|---|
 | `POST` | `/api/replay/order` | 仮想注文を発注する |
 | `GET` | `/api/replay/portfolio` | ポートフォリオスナップショット取得 |
+| `GET` | `/api/replay/orders` | 仮想注文一覧取得（pending / filled / cancelled） |
 | `GET` | `/api/replay/state` | エンジン状態確認（REPLAY 中かどうか等） |
+| `POST` | `/api/replay/pause` | リプレイを一時停止する |
+| `POST` | `/api/replay/resume` | リプレイを再開する |
+| `POST` | `/api/replay/step-forward` | 1 step 前進する（StepForward） |
 
 **POST /api/replay/order リクエスト JSON:**
 
@@ -1210,11 +1299,20 @@ pub fn margin_call_color(theme: &Theme) -> Color
 | **`VirtualExchangeEngine`（ファサード）** | `src/replay/virtual_exchange/mod.rs` |
 | **仮想注文エンジンの main.rs 統合** | `src/main.rs` |
 | **HTTP API（POST /api/replay/order 等）** | `src/replay_api.rs` |
+| **GET /api/replay/orders エンドポイント** | `src/replay_api.rs` |
 | **仮想約定トースト通知** | `src/screen/dashboard.rs` |
 | **サイドバー注文ボタン・インラインパネル** | `src/screen/dashboard/sidebar.rs` |
 | **注文パネル専用 Split（`split_focused_and_init_order`）** | `src/screen/dashboard.rs` |
 | **`auto_focus_single_pane` 共通ヘルパー化** | `src/screen/dashboard.rs` |
 | **`ContentKind::ALL` から注文系除外** | `data/src/layout/pane.rs` |
+| **`record_open()` cash deduction/credit** | `src/replay/virtual_exchange/portfolio.rs` |
+| **`record_close()` sell proceeds / buyback return** | `src/replay/virtual_exchange/portfolio.rs` |
+| **`oldest_open_long_order_id()` FIFO クローズ** | `src/replay/virtual_exchange/portfolio.rs` |
+| **Sell 約定時の Long ネットアウト（A-2）** | `src/replay/virtual_exchange/order_book.rs` |
+| **StepForward 時のエンジンリセット抑止** | `src/main.rs` |
+| **`synthetic_trades_at_current_time()` 合成トレード生成** | `src/replay/controller.rs` |
+| **StepForward 時の合成トレード注入・約定駆動** | `src/main.rs` |
+| **E2E スクリプト `s40_virtual_order_fill_cycle.sh`** | `tests/e2e_scripts/` |
 
 ### 未実装・残課題
 
@@ -1229,9 +1327,10 @@ pub fn margin_call_color(theme: &Theme) -> Color
 | 逆指値 UI | 低 | 現在は通常注文固定。立花証券イベント API 接続後に検討 |
 | BBO（最良気配）表示 | 低 | 立花証券イベント API 接続後に追加 |
 | **仮想注文の UI 一覧表示（Phase 2）** | 中 | `VirtualOrderBook::orders()` を利用。仮想注文ペインの実装 |
-| **仮想ポジションのクローズ（Phase 2）** | 中 | `VirtualPortfolio::record_close()` は実装済み・未接続 |
-| **SeekBackward 時のエンジンリセット** | 中 | 現在は Live↔Replay 遷移時のみリセット |
+| **SeekBackward 時のエンジンリセット** | 中 | StepForward は対応済み。Seek（シーク）時はリセット対象のまま |
+| **Trades EventStore の本統合** | 中 | 現状は StepForward 時に kline close から合成トレードで代替。実トレード ingestion は Phase 2 |
 | **PnL 履歴グラフ（Phase 2）** | 低 | `exit_time_ms` フィールドは実装済み・未使用 |
+| **仮想注文の `placed_time_ms` 正確化** | 低 | 現状は pane.rs で `0` を設定。`replay.current_time_ms()` で上書きする設計（Phase 2） |
 
 ---
 
@@ -1252,11 +1351,12 @@ pub fn margin_call_color(theme: &Theme) -> Color
 | `src/style.rs` | 注文状態・売買・追証警告色追加 |
 | `src/replay/mod.rs` | `pub mod virtual_exchange;` 追加 |
 | `src/replay/virtual_exchange/mod.rs` | **新規** `VirtualExchangeEngine` ファサード |
-| `src/replay/virtual_exchange/portfolio.rs` | **新規** `VirtualPortfolio`・`PortfolioSnapshot`（ユニットテスト 4 件） |
-| `src/replay/virtual_exchange/order_book.rs` | **新規** `VirtualOrderBook`・`FillEvent`（ユニットテスト 7 件） |
-| `src/replay/controller.rs` | `current_time_ms()` メソッド追加 |
-| `src/replay_api.rs` | `ApiCommand::VirtualExchange` と 3 エンドポイント追加 |
-| `src/main.rs` | `virtual_engine` フィールド・Tick ごとの on_tick フック・仮想注文ハンドラ・`OpenOrderPane` ハンドラ・`Menu::Order` アーム |
+| `src/replay/virtual_exchange/portfolio.rs` | **新規 → 拡張** `VirtualPortfolio`・`PortfolioSnapshot`（ユニットテスト 12 件）。cash flow・close logic・`oldest_open_long_order_id()` 追加 |
+| `src/replay/virtual_exchange/order_book.rs` | **新規 → 拡張** `VirtualOrderBook`・`FillEvent`（ユニットテスト 13 件）。Sell 約定時 Long ネットアウト追加 |
+| `src/replay/controller.rs` | `current_time_ms()` + `synthetic_trades_at_current_time()` メソッド追加 |
+| `src/replay_api.rs` | `ApiCommand::VirtualExchange` と 4 エンドポイント追加（`GET /api/replay/orders` 含む） |
+| `src/main.rs` | `virtual_engine` フィールド（Arc/Mutex なし）・StepForward 合成トレード注入・StepForward リセット抑止・仮想注文ハンドラ・`OpenOrderPane` ハンドラ・`Menu::Order` アーム |
+| `tests/e2e_scripts/s40_virtual_order_fill_cycle.sh` | **新規** buy→fill→close→PnL E2E スクリプト（TC-A〜I） |
 | `data/src/config/sidebar.rs` | `Menu::Order` バリアント追加 |
 | `src/screen/dashboard/sidebar.rs` | `Message::OrderPaneSelected` / `Action::OpenOrderPane` 追加・注文ボタン・インラインパネル・相互排他ロジック |
 
@@ -1277,9 +1377,12 @@ pub fn margin_call_color(theme: &Theme) -> Color
 - `連鎖 if let ... && let ...` パターン（Rust 1.64+）でネストした `if let` をフラットにできる。
 - **REPLAY ガードのボローチェッカー対策**: `dashboard.update()` 内で `self.is_replay` を `let is_replay = self.is_replay;` としてコピーしてから `get_mut_pane()` で `self` を可変借用する。フラグを先にコピーしないと E0503（不変参照と可変参照の競合）が発生する。
 - **`Trade` struct に ticker フィールドはない**: `VirtualOrderBook::on_tick()` は ticker を引数で受け取る設計にした。呼び出し側（main.rs）が `StreamKind` から ticker 文字列を特定して渡す。
-- **`tokio::task::block_in_place()`**: iced の同期 `update()` コンテキストから `Arc<tokio::sync::Mutex<T>>` を同期ロックするために使用。`block_in_place` は tokio の multi-thread runtime でのみ動作する。
+- **`virtual_engine` は Arc/Mutex 不使用**: iced の `update()` は同期コンテキストなので `Option<VirtualExchangeEngine>` として直保持できる。Arc/Mutex や `block_in_place` は不要。HTTP API スレッドからのアクセスは `ApiCommand` チャネル経由で main.rs の update ループに委譲する。
 - **仮想注文の `placed_time_ms`**: pane.rs の `virtual_order_from_new_order_request()` では `0` を入れている。正確な時刻は `dashboard.rs` → `main.rs` の `SubmitVirtualOrder` ハンドラで `replay.current_time_ms()` を取得して上書きする設計にする（Phase 2）。
-- **`#[allow(dead_code)]` の活用**: Phase 2 で使用予定のメソッド（`record_close()`、`orders()`）と フィールド（`exit_time_ms`）には `#[allow(dead_code)]` を付けてコメントを残す。将来削除ではなく「設計上意図的」であることを示す。
+- **`#[allow(dead_code)]` は使用開始時に削除**: `record_close()` は Phase 1 で本接続したため `#[allow(dead_code)]` を削除済み。Phase 2 待ちのフィールド（`exit_time_ms`）には引き続き付ける。
+- **StepForward 前に `is_step_forward` フラグを取る**: `handle_message(msg)` は msg を消費するため、StepForward 判定を先に行う必要がある。`let is_step_forward = matches!(msg, ...)` のパターンを使う。
+- **`oldest_open_long_order_id()` の borrow checker**: `Option<&str>` は `self.portfolio` を借用する。直後に `record_close(&mut self.portfolio)` を呼ぶと競合する。`.map(str::to_string)` で `String` にクローンしてから可変借用する。
+- **cash の不変条件**: Long open @P, qty q: `cash -= P*q` → Long close @Q: `cash += Q*q` → net cash delta = (Q-P)*q = realized_pnl。initial_cash を基準に `total_equity = cash + unrealized_pnl` が常に成立する。
 - **注文パネルを `ALL` から除外すると `set_content_and_streams` の bypass が必要**: `set_content_and_streams` は `tickers[0]` に無条件アクセスするため、TickerInfo 不要な注文パネルには使えない。`Content::placeholder()` を `pub` にして `split_focused_and_init_order` から呼び出す設計にした。
 - **`Menu::Order` の modal 処理**: `main.rs` の `view_with_menu()` は `match menu` で全バリアントを網羅する。`Order` は modal を出さずサイドバーインラインで表示するため、アームは `base` をそのまま返す。
 - **`split_focused_and_init_order` は `Option<Task>` でなく `Task` を返す**: フォーカスなし複数ペイン時も Toast 警告を含む `Task` を返すため、呼び出し側で `None` 分岐が不要。`split_focused_and_init`（`Option<Task>` 返し）との設計差異に注意。

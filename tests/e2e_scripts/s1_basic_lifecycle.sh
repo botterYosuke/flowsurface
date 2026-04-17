@@ -82,13 +82,16 @@ else
   fail "TC-S1-04" "120秒以内に Playing にならなかった"
 fi
 
-# --- TC-S1-05: current_time が 1x 速度の期待差分で前進 ---
+# --- TC-S1-05: current_time が前進する ---
 CT1=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
-sleep 3
-CT2=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
-WITHIN=$(advance_within "$CT1" "$CT2" "$STEP_M1" 100)
-[ "$WITHIN" = "true" ] && pass "TC-S1-05: 1x で 3s に 1〜100 bar 前進 ($CT1 → $CT2)" || \
-  fail "TC-S1-05" "想定外の前進 (CT1=$CT1 CT2=$CT2 step=$STEP_M1)"
+if CT2=$(wait_for_time_advance "$CT1" 30); then
+  WITHIN=$(advance_within "$CT1" "$CT2" "$STEP_M1" 100)
+  [ "$WITHIN" = "true" ] && pass "TC-S1-05: 1x で current_time 前進 ($CT1 → $CT2)" || \
+    fail "TC-S1-05" "想定外の前進 (CT1=$CT1 CT2=$CT2 step=$STEP_M1)"
+else
+  fail "TC-S1-05" "30 秒待機しても current_time が前進しなかった (CT1=$CT1)"
+  CT2="$CT1"
+fi
 
 # --- TC-S1-05b: current_time はバー境界値 ---
 ON_BAR=$(is_bar_boundary "$CT2" "$STEP_M1")

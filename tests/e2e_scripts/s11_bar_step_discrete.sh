@@ -141,5 +141,34 @@ else
     || fail "TC-S11-05" "delta=$DELTA (expected 60000, M1 優先のはず)"
 fi
 
+# ── TC-S11-06: M1 StepForward 10 連続 → 毎回 delta が厳密に 60000ms ─────────
+# TC-S11-02 は倍数チェック（2 バー同時前進でも pass）。本 TC は厳密な exact match を検証する。
+setup_single_pane "BinanceLinear:BTCUSDT" "M1" "$(utc_offset -3)" "$(utc_offset -1)"
+start_app
+if ! wait_playing 30; then
+  fail "TC-S11-06-pre" "Playing 到達せず"
+else
+  curl -s -X POST "$API/replay/pause" > /dev/null
+  if ! wait_status Paused 10; then
+    fail "TC-S11-06-pre" "Paused に遷移せず"
+  else
+    MONOTONE_OK=true
+    for i in $(seq 1 10); do
+      TB=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
+      curl -s -X POST "$API/replay/step-forward" > /dev/null
+      sleep 0.5
+      wait_status Paused 10 || true
+      TA=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
+      DELTA=$(node -e "console.log(String(BigInt('$TA') - BigInt('$TB')))")
+      if [ "$DELTA" = "60000" ]; then
+        pass "TC-S11-06-$i: StepForward #$i delta=60000ms（exact）"
+      else
+        fail "TC-S11-06-$i" "delta=$DELTA (expected exactly 60000 — 複数バー同時前進の疑い)"
+        MONOTONE_OK=false
+      fi
+    done
+  fi
+fi
+
 print_summary
 [ $FAIL -eq 0 ]

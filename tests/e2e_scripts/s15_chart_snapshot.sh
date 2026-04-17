@@ -31,15 +31,6 @@ if ! wait_playing 30; then
   exit 1
 fi
 
-# 前提確認: chart-snapshot API が実装済みか確認（未実装なら全 TC PENDING）
-PROBE=$(curl -s -o /dev/null -w "%{http_code}" "$API/pane/chart-snapshot?pane_id=00000000-0000-0000-0000-000000000000" || echo "000")
-if [ "$PROBE" = "404" ]; then
-  pend "TC-S15-*" "GET /api/pane/chart-snapshot 未実装 → S15 全 TC を PENDING"
-  print_summary
-  exit 0
-fi
-echo "  chart-snapshot API 確認 (probe=$PROBE)"
-
 # Pause してからペイン ID を取得
 curl -s -X POST "$API/replay/pause" > /dev/null
 if ! wait_status Paused 10; then

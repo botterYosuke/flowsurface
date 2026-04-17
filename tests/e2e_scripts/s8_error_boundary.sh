@@ -49,15 +49,23 @@ done
 CODE=$(curl -s -o /dev/null -w "%{http_code}" "$API/nonexistent")
 [ "$CODE" = "404" ] && pass "TC-S8-01: 存在しないパス → 404" || fail "TC-S8-01" "code=$CODE"
 
-# --- TC-S8-02: 不正 JSON → 400 ---
-CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$API/replay/play" \
+# --- TC-S8-02: 不正 JSON → 400 + error フィールド ---
+RESP=$(curl -s -w "\n%{http_code}" -X POST "$API/replay/play" \
   -H "Content-Type: application/json" -d 'not json')
-[ "$CODE" = "400" ] && pass "TC-S8-02: 不正 JSON → 400" || fail "TC-S8-02" "code=$CODE"
+CODE=$(echo "$RESP" | tail -1)
+BODY=$(echo "$RESP" | head -1)
+HAS_ERR=$(node -e "try{const d=JSON.parse(process.argv[1]);console.log(d.error?'true':'false');}catch(e){console.log('false');}" "$BODY")
+[ "$CODE" = "400" ] && pass "TC-S8-02a: 不正 JSON → 400" || fail "TC-S8-02a" "code=$CODE"
+[ "$HAS_ERR" = "true" ] && pass "TC-S8-02b: 不正 JSON → error フィールドあり" || fail "TC-S8-02b" "body=$BODY"
 
-# --- TC-S8-03: 必須フィールド欠損 → 400 ---
-CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$API/replay/play" \
+# --- TC-S8-03: 必須フィールド欠損 → 400 + error フィールド ---
+RESP=$(curl -s -w "\n%{http_code}" -X POST "$API/replay/play" \
   -H "Content-Type: application/json" -d '{"start":"2026-04-10 09:00"}')
-[ "$CODE" = "400" ] && pass "TC-S8-03: end 欠損 → 400" || fail "TC-S8-03" "code=$CODE"
+CODE=$(echo "$RESP" | tail -1)
+BODY=$(echo "$RESP" | head -1)
+HAS_ERR=$(node -e "try{const d=JSON.parse(process.argv[1]);console.log(d.error?'true':'false');}catch(e){console.log('false');}" "$BODY")
+[ "$CODE" = "400" ] && pass "TC-S8-03a: end 欠損 → 400" || fail "TC-S8-03a" "code=$CODE"
+[ "$HAS_ERR" = "true" ] && pass "TC-S8-03b: end 欠損 → error フィールドあり" || fail "TC-S8-03b" "body=$BODY"
 
 # --- TC-S8-04: GET on POST endpoint → 404 ---
 CODE=$(curl -s -o /dev/null -w "%{http_code}" "$API/replay/toggle")
@@ -106,22 +114,51 @@ else
   fail "TC-S8-06c" "current_time が null（clock 未起動）"
 fi
 
-# --- TC-S8-07: 不正なフォーマット → 400 ---
+# --- TC-S8-07: 不正なフォーマット → 400 + error フィールド ---
 for bad_date in "2026/04/10 09:00" "2026-04-10" "not-a-date" ""; do
-  CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$API/replay/play" \
+  RESP=$(curl -s -w "\n%{http_code}" -X POST "$API/replay/play" \
     -H "Content-Type: application/json" \
     -d "{\"start\":\"$bad_date\",\"end\":\"2026-04-10 15:00\"}")
-  [ "$CODE" = "400" ] && pass "TC-S8-07: 不正フォーマット '$bad_date' → 400" || \
-    fail "TC-S8-07" "'$bad_date' → $CODE (expected 400)"
+  CODE=$(echo "$RESP" | tail -1)
+  BODY=$(echo "$RESP" | head -1)
+  HAS_ERR=$(node -e "try{const d=JSON.parse(process.argv[1]);console.log(d.error?'true':'false');}catch(e){console.log('false');}" "$BODY")
+  [ "$CODE" = "400" ] && pass "TC-S8-07a: 不正フォーマット '$bad_date' → 400" || \
+    fail "TC-S8-07a" "'$bad_date' → $CODE (expected 400)"
+  [ "$HAS_ERR" = "true" ] && pass "TC-S8-07b: '$bad_date' → error フィールドあり" || \
+    fail "TC-S8-07b" "'$bad_date' body=$BODY"
 done
 
-# --- TC-S8-08: pane/split に不正 UUID → 400 ---
-CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$API/pane/split" \
+# --- TC-S8-07c: datetime 境界値（不正日付 → 400 / 有効うるう年日付 → 200）---
+for inv_date in "2026-02-30 10:00" "2026-04-10 25:00" "2026-13-01 09:00"; do
+  RESP=$(curl -s -w "\n%{http_code}" -X POST "$API/replay/play" \
+    -H "Content-Type: application/json" \
+    -d "{\"start\":\"$inv_date\",\"end\":\"2026-04-10 15:00\"}")
+  CODE=$(echo "$RESP" | tail -1)
+  BODY=$(echo "$RESP" | head -1)
+  HAS_ERR=$(node -e "try{const d=JSON.parse(process.argv[1]);console.log(d.error?'true':'false');}catch(e){console.log('false');}" "$BODY")
+  [ "$CODE" = "400" ] && pass "TC-S8-07c: 不正日付 '$inv_date' → 400" || \
+    fail "TC-S8-07c" "'$inv_date' → $CODE (expected 400)"
+  [ "$HAS_ERR" = "true" ] && pass "TC-S8-07d: '$inv_date' → error フィールドあり" || \
+    fail "TC-S8-07d" "'$inv_date' body=$BODY"
+done
+# うるう年 2/29 は有効 → 200
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$API/replay/play" \
+  -H "Content-Type: application/json" \
+  -d '{"start":"2024-02-29 10:00","end":"2024-02-29 12:00"}')
+[ "$CODE" = "200" ] && pass "TC-S8-07e: うるう年 2024-02-29 → 200（有効日付）" || \
+  fail "TC-S8-07e" "code=$CODE (expected 200)"
+
+# --- TC-S8-08: pane/split に不正 UUID → 400 + error フィールド ---
+RESP=$(curl -s -w "\n%{http_code}" -X POST "$API/pane/split" \
   -H "Content-Type: application/json" \
   -d '{"pane_id":"not-a-uuid","axis":"Vertical"}')
-[ "$CODE" = "400" ] && pass "TC-S8-08: 不正 UUID → 400" || fail "TC-S8-08" "code=$CODE"
+CODE=$(echo "$RESP" | tail -1)
+BODY=$(echo "$RESP" | head -1)
+HAS_ERR=$(node -e "try{const d=JSON.parse(process.argv[1]);console.log(d.error?'true':'false');}catch(e){console.log('false');}" "$BODY")
+[ "$CODE" = "400" ] && pass "TC-S8-08a: 不正 UUID → 400" || fail "TC-S8-08a" "code=$CODE"
+[ "$HAS_ERR" = "true" ] && pass "TC-S8-08b: 不正 UUID → error フィールドあり" || fail "TC-S8-08b" "body=$BODY"
 
-# --- TC-S8-09: pane/split に不正 axis → 400 ---
+# --- TC-S8-09: pane/split に不正 axis → 400 + error フィールド ---
 PANE_LIST=$(curl -s "$API/pane/list")
 PANE_ID=$(node -e "
   const d = JSON.parse(process.argv[1]);
@@ -130,10 +167,44 @@ PANE_ID=$(node -e "
   console.log((arr[0]||{}).id || (arr[0]||{}).pane_id || '');
 " "$PANE_LIST" 2>/dev/null || echo "")
 if [ -n "$PANE_ID" ]; then
-  CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$API/pane/split" \
+  RESP=$(curl -s -w "\n%{http_code}" -X POST "$API/pane/split" \
     -H "Content-Type: application/json" \
     -d "{\"pane_id\":\"$PANE_ID\",\"axis\":\"Diagonal\"}")
-  [ "$CODE" = "400" ] && pass "TC-S8-09: 不正 axis → 400" || fail "TC-S8-09" "code=$CODE"
+  CODE=$(echo "$RESP" | tail -1)
+  BODY=$(echo "$RESP" | head -1)
+  HAS_ERR=$(node -e "try{const d=JSON.parse(process.argv[1]);console.log(d.error?'true':'false');}catch(e){console.log('false');}" "$BODY")
+  [ "$CODE" = "400" ] && pass "TC-S8-09a: 不正 axis → 400" || fail "TC-S8-09a" "code=$CODE"
+  [ "$HAS_ERR" = "true" ] && pass "TC-S8-09b: 不正 axis → error フィールドあり" || fail "TC-S8-09b" "body=$BODY"
+fi
+
+# --- TC-S8-10: pane_id edge case（POST /api/pane/set-ticker）---
+RESP=$(curl -s -w "\n%{http_code}" -X POST "$API/pane/set-ticker" \
+  -H "Content-Type: application/json" \
+  -d '{"pane_id":"","ticker":"BinanceLinear:BTCUSDT"}')
+CODE=$(echo "$RESP" | tail -1)
+[ "$CODE" = "400" ] && pass "TC-S8-10a: pane_id 空文字 → 400" || fail "TC-S8-10a" "code=$CODE"
+
+RESP=$(curl -s -w "\n%{http_code}" -X POST "$API/pane/set-ticker" \
+  -H "Content-Type: application/json" \
+  -d '{"pane_id":"not-a-uuid","ticker":"BinanceLinear:BTCUSDT"}')
+CODE=$(echo "$RESP" | tail -1)
+[ "$CODE" = "404" ] || [ "$CODE" = "400" ] && pass "TC-S8-10b: 不正 UUID → 404 or 400" || \
+  fail "TC-S8-10b" "code=$CODE (expected 404 or 400)"
+
+# --- TC-S8-11: set-timeframe validation ---
+if [ -n "$PANE_ID" ]; then
+  for bad_tf in "M999" ""; do
+    RESP=$(curl -s -w "\n%{http_code}" -X POST "$API/pane/set-timeframe" \
+      -H "Content-Type: application/json" \
+      -d "{\"pane_id\":\"$PANE_ID\",\"timeframe\":\"$bad_tf\"}")
+    CODE=$(echo "$RESP" | tail -1)
+    BODY=$(echo "$RESP" | head -1)
+    HAS_ERR=$(node -e "try{const d=JSON.parse(process.argv[1]);console.log(d.error?'true':'false');}catch(e){console.log('false');}" "$BODY")
+    [ "$CODE" = "400" ] && pass "TC-S8-11a: timeframe='$bad_tf' → 400" || \
+      fail "TC-S8-11a" "timeframe='$bad_tf' code=$CODE (expected 400)"
+    [ "$HAS_ERR" = "true" ] && pass "TC-S8-11b: timeframe='$bad_tf' → error フィールドあり" || \
+      fail "TC-S8-11b" "timeframe='$bad_tf' body=$BODY"
+  done
 fi
 
 restore_state

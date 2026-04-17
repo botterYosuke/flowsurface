@@ -128,6 +128,17 @@ impl VirtualPortfolio {
             .map(|p| p.order_id.as_str())
     }
 
+    /// 指定 ticker の open Short ポジションの order_id を返す（最古優先 = FIFO）
+    pub fn oldest_open_short_order_id(&self, ticker: &str) -> Option<&str> {
+        self.positions
+            .iter()
+            .filter(|p| {
+                p.ticker == ticker && p.side == PositionSide::Short && p.exit_price.is_none()
+            })
+            .min_by_key(|p| p.entry_time_ms)
+            .map(|p| p.order_id.as_str())
+    }
+
     /// 未実現 PnL（現在価格で評価）。単一銘柄を前提とする。
     pub fn unrealized_pnl(&self, current_price: f64) -> f64 {
         self.positions

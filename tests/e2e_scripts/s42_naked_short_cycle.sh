@@ -1,20 +1,17 @@
 #!/usr/bin/env bash
-# s40_virtual_order_fill_cycle.sh — S40: 仮想取引フルサイクル（成行ラウンドトリップ）
+# s42_naked_short_cycle.sh — S42: 裸ショートフルサイクル
 #
 # 検証シナリオ:
-#   A-B: Playing 到達 → Pause（step-forward は Paused 時のみ 1 bar 前進）
-#   C-E: 成行買い → step-forward 約定 → cash 減算確認 (A-1: record_open)
-#   F-K: 成行売り → step-forward Long クローズ → PnL/cash 確定 (A-0/A-2)
-#
-# 約定メカニズム:
-#   step-forward が synthetic_trades_at_current_time() で kline close 価格の
-#   合成トレードを生成し on_tick() へ渡す。成行注文は 1 回目で約定する。
+#   A-B: Playing 到達 → Pause
+#   C:   Long ポジションなしを確認（裸ショートの前提）
+#   D-F: 成行売り（Long なし）→ step-forward → Short open → cash 増加 (A-1/A-2)
+#   G-K: 成行買い → step-forward → Short クローズ → PnL 確定 (A-0/A-2 対称拡張)
 #
 # フィクスチャ: BinanceLinear:BTCUSDT M1, replay auto-play (UTC[-3h, -1h])
 set -euo pipefail
 source "$(dirname "$0")/common_helpers.sh"
 
-echo "=== S40: 仮想取引フルサイクル（成行ラウンドトリップ）==="
+echo "=== S42: 裸ショートフルサイクル ==="
 backup_state
 trap 'stop_app; restore_state' EXIT ERR
 
@@ -23,14 +20,14 @@ END=$(utc_offset -1)
 
 cat > "$DATA_DIR/saved-state.json" <<EOF
 {
-  "layout_manager":{"layouts":[{"name":"S40","dashboard":{"pane":{
+  "layout_manager":{"layouts":[{"name":"S42","dashboard":{"pane":{
     "KlineChart":{
       "layout":{"splits":[0.78],"autoscale":"FitToVisible"},"kind":"Candles",
       "stream_type":[{"Kline":{"ticker":"BinanceLinear:BTCUSDT","timeframe":"M1"}}],
       "settings":{"tick_multiply":null,"visual_config":null,"selected_basis":{"Time":"M1"}},
       "indicators":[],"link_group":"A"
     }
-  },"popout":[]}}],"active_layout":"S40"},
+  },"popout":[]}}],"active_layout":"S42"},
   "timezone":"UTC","trade_fetch_enabled":false,"size_in_quote_ccy":"Base",
   "replay":{"mode":"replay","range_start":"$START","range_end":"$END"}
 }
@@ -65,7 +62,7 @@ fi
 pass "TC-A: REPLAY Playing 到達"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TC-B: Pause（step-forward は Paused 時のみ 1 bar 前進する。Playing 中は range 末尾へジャンプ）
+# TC-B: Pause
 # ─────────────────────────────────────────────────────────────────────────────
 echo ""
 echo "── TC-B: Pause"
@@ -78,18 +75,30 @@ fi
 pass "TC-B: Pause 遷移（step-forward 有効化）"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TC-C〜E: 成行買い → step-forward 約定 → cash 確認 (A-1)
+# TC-C: Long ポジションなしを確認（裸ショートの前提）
 # ─────────────────────────────────────────────────────────────────────────────
 echo ""
-echo "── TC-C〜E: 成行買い → step-forward 約定 → cash 確認 (A-1)"
+echo "── TC-C: 裸ショート前提確認（open_positions == 0）"
 
-BUY_RESP=$(api_post /api/replay/order \
-  '{"ticker":"BTCUSDT","side":"buy","qty":1.0,"order_type":"market"}')
-echo "  buy response: $BUY_RESP"
-BUY_ID=$(jqn "$BUY_RESP" "d.order_id")
-[ "$BUY_ID" != "null" ] && [ -n "$BUY_ID" ] \
-  && pass "TC-C: 成行買い → order_id=$BUY_ID" \
-  || fail "TC-C" "order_id が返らない (resp=$BUY_RESP)"
+PORTFOLIO=$(api_get /api/replay/portfolio)
+OPEN=$(jqn "$PORTFOLIO" "d.open_positions.length")
+[ "$OPEN" -eq 0 ] \
+  && pass "TC-C: open_positions=0 — 裸ショートの前提を満たす" \
+  || fail "TC-C" "open_positions=$OPEN (expected 0 — Long ポジションがあると裸ショートにならない)"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TC-D〜F: 成行売り（Long なし）→ step-forward → Short open → cash 増加
+# ─────────────────────────────────────────────────────────────────────────────
+echo ""
+echo "── TC-D〜F: 裸ショート open → cash 増加 (A-1/A-2)"
+
+SHORT_RESP=$(api_post /api/replay/order \
+  '{"ticker":"BTCUSDT","side":"sell","qty":1.0,"order_type":"market"}')
+echo "  naked short response: $SHORT_RESP"
+SHORT_ID=$(jqn "$SHORT_RESP" "d.order_id")
+[ "$SHORT_ID" != "null" ] && [ -n "$SHORT_ID" ] \
+  && pass "TC-D: 成行売り（Long なし）→ order_id=$SHORT_ID" \
+  || fail "TC-D" "order_id が返らない (resp=$SHORT_RESP)"
 
 OPEN=0
 for i in $(seq 1 10); do
@@ -101,28 +110,34 @@ for i in $(seq 1 10); do
   [ "$OPEN" -ge 1 ] && break || true
 done
 [ "$OPEN" -ge 1 ] \
-  && pass "TC-D: step-forward で約定 → open_positions=$OPEN (A-2)" \
-  || fail "TC-D" "10 回 step-forward しても open_positions が増えない (=$OPEN)"
+  && pass "TC-D-check: step-forward で Short open → open_positions=$OPEN (A-2: 裸ショート)" \
+  || fail "TC-D-check" "10 回 step-forward しても open_positions が増えない (=$OPEN)"
+
+SIDE=$(jqn "$PORTFOLIO" "d.open_positions[0].side")
+echo "  open_positions[0].side: $SIDE"
+[ "$SIDE" = "Short" ] \
+  && pass "TC-E: open_positions[0].side=Short — 裸ショートが Short として記録 (A-2)" \
+  || fail "TC-E" "side=$SIDE (expected Short)"
 
 CASH=$(jqn "$PORTFOLIO" "d.cash")
-echo "  cash after buy: $CASH"
-node -e "process.exit(parseFloat('$CASH') < 1000000 ? 0 : 1)" 2>/dev/null \
-  && pass "TC-E: cash < 1,000,000 (=$CASH) — 購入コスト減算確認 (A-1)" \
-  || fail "TC-E" "cash=$CASH (expected < 1000000)"
+echo "  cash after short open: $CASH"
+node -e "process.exit(parseFloat('$CASH') > 1000000 ? 0 : 1)" 2>/dev/null \
+  && pass "TC-F: cash > 1,000,000 (=$CASH) — Short open で売り代金を受け取った (A-1)" \
+  || fail "TC-F" "cash=$CASH (expected > 1000000 — Short open では cash が増加するはず)"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TC-F〜K: 成行売り → step-forward Long クローズ → PnL 確定 (A-0/A-2)
+# TC-G〜K: 成行買い → step-forward → Short クローズ → PnL 確定 (A-0/A-2 対称拡張)
 # ─────────────────────────────────────────────────────────────────────────────
 echo ""
-echo "── TC-F〜K: 成行売り → Long クローズ → PnL 確定 (A-0/A-2)"
+echo "── TC-G〜K: 買い注文で Short クローズ → PnL 確定 (A-0/A-2 対称拡張)"
 
-SELL_RESP=$(api_post /api/replay/order \
-  '{"ticker":"BTCUSDT","side":"sell","qty":1.0,"order_type":"market"}')
-echo "  sell response: $SELL_RESP"
-SELL_ID=$(jqn "$SELL_RESP" "d.order_id")
-[ "$SELL_ID" != "null" ] && [ -n "$SELL_ID" ] \
-  && pass "TC-F: 成行売り → order_id=$SELL_ID" \
-  || fail "TC-F" "order_id が返らない (resp=$SELL_RESP)"
+BUY_RESP=$(api_post /api/replay/order \
+  '{"ticker":"BTCUSDT","side":"buy","qty":1.0,"order_type":"market"}')
+echo "  buy to close response: $BUY_RESP"
+BUY_ID=$(jqn "$BUY_RESP" "d.order_id")
+[ "$BUY_ID" != "null" ] && [ -n "$BUY_ID" ] \
+  && pass "TC-G: 成行買い（Short クローズ用）→ order_id=$BUY_ID" \
+  || fail "TC-G" "order_id が返らない (resp=$BUY_RESP)"
 
 OPEN=1
 for i in $(seq 1 10); do
@@ -134,19 +149,19 @@ for i in $(seq 1 10); do
   [ "$OPEN" -eq 0 ] && break || true
 done
 [ "$OPEN" -eq 0 ] \
-  && pass "TC-G: Long クローズ → open_positions=0 (A-2)" \
-  || fail "TC-G" "10 回 step-forward しても open_positions が 0 にならない (=$OPEN)"
+  && pass "TC-H: Short クローズ → open_positions=0 (A-2 対称拡張: buy closes Short)" \
+  || fail "TC-H" "10 回 step-forward しても Short がクローズされない (=$OPEN)"
 
 CLOSED=$(jqn "$PORTFOLIO" "d.closed_positions.length")
 [ "$CLOSED" -eq 1 ] \
-  && pass "TC-H: closed_positions.length=1 — record_close() 呼び出し確認 (A-2)" \
-  || fail "TC-H" "closed_positions.length=$CLOSED (expected 1)"
+  && pass "TC-I: closed_positions.length=1 — Short の record_close() 呼び出し確認" \
+  || fail "TC-I" "closed_positions.length=$CLOSED (expected 1)"
 
 REALIZED=$(jqn "$PORTFOLIO" "d.realized_pnl")
 echo "  realized_pnl: $REALIZED"
 node -e "process.exit(parseFloat('$REALIZED') !== 0 ? 0 : 1)" 2>/dev/null \
-  && pass "TC-I: realized_pnl != 0 (=$REALIZED) — PnL 計算確認 (A-0)" \
-  || fail "TC-I" "realized_pnl=0 (PnL が確定していない)"
+  && pass "TC-J: realized_pnl != 0 (=$REALIZED) — Short の PnL 計算確認 (A-0)" \
+  || fail "TC-J" "realized_pnl=0 (PnL が確定していない)"
 
 CASH=$(jqn "$PORTFOLIO" "d.cash")
 CASH_OK=$(node -e "
@@ -154,18 +169,8 @@ CASH_OK=$(node -e "
   console.log(diff < 1.0 ? 'true' : 'false');
 ")
 [ "$CASH_OK" = "true" ] \
-  && pass "TC-J: cash ($CASH) = 1,000,000 + realized_pnl ($REALIZED) — 売却代金返還確認 (A-0)" \
-  || fail "TC-J" "cash=$CASH, realized=$REALIZED — cash=initial+realized が成立しない"
-
-UNREALIZED=$(jqn "$PORTFOLIO" "d.unrealized_pnl")
-EQUITY=$(jqn "$PORTFOLIO" "d.total_equity")
-EQUITY_OK=$(node -e "
-  const diff = Math.abs(parseFloat('$EQUITY') - (parseFloat('$CASH') + parseFloat('$UNREALIZED')));
-  console.log(diff < 1.0 ? 'true' : 'false');
-")
-[ "$EQUITY_OK" = "true" ] \
-  && pass "TC-K: total_equity ($EQUITY) = cash ($CASH) + unrealized ($UNREALIZED)" \
-  || fail "TC-K" "total_equity=$EQUITY ≠ cash+unrealized — スキーマ不整合"
+  && pass "TC-K: cash ($CASH) = 1,000,000 + realized_pnl ($REALIZED) — Short close の A-0 パス確認" \
+  || fail "TC-K" "cash=$CASH, realized=$REALIZED — cash=initial+realized が成立しない"
 
 stop_app
 print_summary

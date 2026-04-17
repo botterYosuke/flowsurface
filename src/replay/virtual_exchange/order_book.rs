@@ -163,17 +163,26 @@ impl VirtualOrderBook {
                         }
                     }
                     PositionSide::Long => {
-                        self.portfolio.record_open(Position {
-                            order_id: order.order_id.clone(),
-                            ticker: order.ticker.clone(),
-                            side: PositionSide::Long,
-                            qty: order.qty,
-                            entry_price: fp,
-                            entry_time_ms: now_ms,
-                            exit_price: None,
-                            exit_time_ms: None,
-                            realized_pnl: None,
-                        });
+                        // Long 注文: 既存 Short があればクローズ（ネットアウト）、なければ新規 Long
+                        let existing_short_id = self
+                            .portfolio
+                            .oldest_open_short_order_id(ticker)
+                            .map(str::to_string);
+                        if let Some(short_id) = existing_short_id {
+                            self.portfolio.record_close(&short_id, fp, now_ms);
+                        } else {
+                            self.portfolio.record_open(Position {
+                                order_id: order.order_id.clone(),
+                                ticker: order.ticker.clone(),
+                                side: PositionSide::Long,
+                                qty: order.qty,
+                                entry_price: fp,
+                                entry_time_ms: now_ms,
+                                exit_price: None,
+                                exit_time_ms: None,
+                                realized_pnl: None,
+                            });
+                        }
                     }
                 }
             }

@@ -530,7 +530,9 @@ fn parse_sidebar_select_ticker(body: &str) -> Result<ApiCommand, RouteError> {
     }))
 }
 
-/// body から省略可能な文字列フィールドを取り出す（存在しなければ None）。
+/// body から省略可能な文字列フィールドを取り出す。
+/// フィールドが存在しない場合、または値が JSON `null` の場合は `None` を返す。
+/// （必須フィールド用の `body_str_field` は null を 400 として拒否する。）
 fn body_opt_str_field(body: &str, key: &str) -> Result<Option<String>, RouteError> {
     let parsed: serde_json::Value =
         serde_json::from_str(body).map_err(|_| RouteError::BadRequest)?;
@@ -1098,5 +1100,32 @@ mod tests {
         // POST はマッチしない（GET のみ）
         let result = route("POST", "/api/replay/orders", "");
         assert!(matches!(result, Err(RouteError::NotFound)));
+    }
+
+    // ── body_opt_str_field tests ──
+
+    #[test]
+    fn opt_str_field_present() {
+        let r = body_opt_str_field(r#"{"kind":"Candles"}"#, "kind").unwrap();
+        assert_eq!(r, Some("Candles".to_string()));
+    }
+
+    #[test]
+    fn opt_str_field_missing_key() {
+        let r = body_opt_str_field(r#"{"ticker":"BTCUSDT"}"#, "kind").unwrap();
+        assert_eq!(r, None);
+    }
+
+    #[test]
+    fn opt_str_field_null_equals_omission() {
+        // 仕様: JSON null はフィールド省略と等価 → None
+        let r = body_opt_str_field(r#"{"kind":null}"#, "kind").unwrap();
+        assert_eq!(r, None);
+    }
+
+    #[test]
+    fn opt_str_field_invalid_json() {
+        let r = body_opt_str_field("not json", "kind");
+        assert!(matches!(r, Err(RouteError::BadRequest)));
     }
 }

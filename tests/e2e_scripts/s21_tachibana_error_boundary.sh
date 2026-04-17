@@ -74,31 +74,31 @@ if ! wait_playing 60; then
   exit 1
 fi
 
-# TC-S21-01: pane/split に不正 UUID
+# TC-S21-01: pane/split に存在しない UUID → HTTP 404
 HTTP_SPLIT=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$API/pane/split" \
   -H "Content-Type: application/json" \
   -d "{\"pane_id\":\"$FAKE_UUID\",\"axis\":\"Vertical\"}")
 ALIVE=$(curl -s "$API/replay/status" > /dev/null 2>&1 && echo "true" || echo "false")
-[ "$HTTP_SPLIT" = "200" ] && [ "$ALIVE" = "true" ] \
-  && pass "TC-S21-01: pane/split 不正 UUID → HTTP=$HTTP_SPLIT & アプリ生存" \
+[ "$HTTP_SPLIT" = "404" ] && [ "$ALIVE" = "true" ] \
+  && pass "TC-S21-01: pane/split 存在しない UUID → HTTP=$HTTP_SPLIT & アプリ生存" \
   || fail "TC-S21-01" "HTTP=$HTTP_SPLIT alive=$ALIVE"
 
-# TC-S21-02: pane/close に不正 UUID
+# TC-S21-02: pane/close に存在しない UUID → HTTP 404
 HTTP_CLOSE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$API/pane/close" \
   -H "Content-Type: application/json" \
   -d "{\"pane_id\":\"$FAKE_UUID\"}")
 ALIVE=$(curl -s "$API/replay/status" > /dev/null 2>&1 && echo "true" || echo "false")
-[ "$HTTP_CLOSE" = "200" ] && [ "$ALIVE" = "true" ] \
-  && pass "TC-S21-02: pane/close 不正 UUID → HTTP=$HTTP_CLOSE & アプリ生存" \
+[ "$HTTP_CLOSE" = "404" ] && [ "$ALIVE" = "true" ] \
+  && pass "TC-S21-02: pane/close 存在しない UUID → HTTP=$HTTP_CLOSE & アプリ生存" \
   || fail "TC-S21-02" "HTTP=$HTTP_CLOSE alive=$ALIVE"
 
-# TC-S21-03: pane/set-ticker に不正 UUID（別の Tachibana 銘柄）
+# TC-S21-03: pane/set-ticker に存在しない UUID（別の Tachibana 銘柄）→ HTTP 404
 HTTP_TICKER=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$API/pane/set-ticker" \
   -H "Content-Type: application/json" \
   -d "{\"pane_id\":\"$FAKE_UUID\",\"ticker\":\"TachibanaSpot:6758\"}")
 ALIVE=$(curl -s "$API/replay/status" > /dev/null 2>&1 && echo "true" || echo "false")
-[ "$HTTP_TICKER" = "200" ] && [ "$ALIVE" = "true" ] \
-  && pass "TC-S21-03: pane/set-ticker 不正 UUID → HTTP=$HTTP_TICKER & アプリ生存" \
+[ "$HTTP_TICKER" = "404" ] && [ "$ALIVE" = "true" ] \
+  && pass "TC-S21-03: pane/set-ticker 存在しない UUID → HTTP=$HTTP_TICKER & アプリ生存" \
   || fail "TC-S21-03" "HTTP=$HTTP_TICKER alive=$ALIVE"
 
 stop_app
