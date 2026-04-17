@@ -51,6 +51,7 @@ jobs:
         env:
           FLOWSURFACE_EXE: ${{ github.workspace }}/target/debug/flowsurface.exe
           E2E_TICKER: HyperliquidLinear:BTC
+          DEV_IS_DEMO: "true"
         run: bash tests/s1_basic_lifecycle.sh
 
       - name: "S2 Persistence (HyperliquidLinear:BTC)"
@@ -58,6 +59,7 @@ jobs:
         env:
           FLOWSURFACE_EXE: ${{ github.workspace }}/target/debug/flowsurface.exe
           E2E_TICKER: HyperliquidLinear:BTC
+          DEV_IS_DEMO: "true"
         run: bash tests/s2_persistence.sh
 
       - name: Upload debug log on failure
