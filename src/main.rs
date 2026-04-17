@@ -174,6 +174,8 @@ struct Flowsurface {
     /// REPLAYモードの仮想約定エンジン。
     /// HTTP API は `Message::ReplayApi` 経由でアクセスするため Arc<Mutex> 不要。
     virtual_engine: Option<replay::virtual_exchange::VirtualExchangeEngine>,
+    /// CI=true 環境変数が設定されている場合 true。起動時に一度だけ評価する。
+    is_headless: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -295,6 +297,7 @@ impl Flowsurface {
                     None
                 }
             },
+            is_headless: std::env::var("CI").is_ok(),
         };
 
         if let Some(err) = audio_init_err {
@@ -1828,14 +1831,16 @@ impl Flowsurface {
 
         // リプレイモード中は WebSocket ストリームを購読しない
         if self.replay.is_replay() {
-            // headless CI 環境では window::frames() が発火しないため、
-            // タイマーを補助 tick ソースとして追加する。
-            let replay_tick =
-                iced::time::every(std::time::Duration::from_millis(100)).map(Message::Tick);
+            // headless 環境（CI=true）では window::frames() が発火しないため
+            // タイマーを tick ソースとして使用する。GUI 環境では frames() のみ。
+            let replay_tick = if self.is_headless {
+                iced::time::every(std::time::Duration::from_millis(100)).map(Message::Tick)
+            } else {
+                tick
+            };
             return Subscription::batch(vec![
                 window_events,
                 sidebar,
-                tick,
                 replay_tick,
                 hotkeys,
                 replay_api,
