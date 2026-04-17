@@ -387,11 +387,13 @@ impl Flowsurface {
                 self.login_window = Some(login_window_id);
                 #[cfg(debug_assertions)]
                 {
-                    // DEV AUTO-LOGIN: リリースビルドでは削除される
-                    return Task::batch([
-                        open_login_window.discard(),
-                        Task::done(Message::Login(login::Message::LoginSubmit)),
-                    ]);
+                    // DEV AUTO-LOGIN: DEV_USER_ID が設定されている場合のみ自動送信
+                    if !self.login_screen.user_id.is_empty() {
+                        return Task::batch([
+                            open_login_window.discard(),
+                            Task::done(Message::Login(login::Message::LoginSubmit)),
+                        ]);
+                    }
                 }
                 #[cfg(not(debug_assertions))]
                 return open_login_window.discard();
