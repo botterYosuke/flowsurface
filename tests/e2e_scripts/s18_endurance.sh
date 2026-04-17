@@ -1,7 +1,15 @@
 #!/usr/bin/env bash
 # s18_endurance.sh — スイート S18: 耐久テスト
-# 長時間再生・高速操作でのメモリリークやデッドロックがないことを確認する
-# 警告: このスクリプトは完走に 15〜30 分かかる
+#
+# 検証シナリオ:
+#   TC-S18-01: 2h range を 10x 速度で完走 → Paused 到達（最大 900s 待機）
+#   TC-S18-02-fwd/bwd: StepForward × 500 + StepBackward × 500 → crash なし・status=Paused
+#
+# 仕様根拠:
+#   長時間再生・高速操作でのメモリリーク・デッドロック検証
+#
+# フィクスチャ: BinanceLinear:BTCUSDT M1, UTC[-4h, -2h] (2h range) + UTC[-12h, -1h] (11h range)
+#   警告: 完走に 15〜30 分かかる
 set -euo pipefail
 source "$(dirname "$0")/common_helpers.sh"
 

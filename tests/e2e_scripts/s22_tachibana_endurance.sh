@@ -1,9 +1,17 @@
 #!/usr/bin/env bash
 # s22_tachibana_endurance.sh — スイート S22: 耐久テスト（TachibanaSpot）
-# TachibanaSpot:7203 D1 での長時間再生・高速操作でメモリリークやデッドロックがないことを確認する
-# ビルド要件: cargo build（デバッグビルド）
-# 前提条件: DEV_USER_ID / DEV_PASSWORD 環境変数が設定済みであること
-# 警告: このスクリプトは完走に 15〜30 分かかる
+#
+# 検証シナリオ:
+#   TC-S22-01: 長期 range (100 bar 相当) を 10x 速度で完走 → Paused 到達
+#   TC-S22-02-fwd/bwd: StepForward × N + StepBackward × N → crash なし（D1 版）
+#
+# 仕様根拠:
+#   TachibanaSpot D1 での長時間再生・高速操作でのメモリリーク・デッドロック検証
+#
+# フィクスチャ: TachibanaSpot:7203 D1, Tachibana セッション必須（DEV AUTO-LOGIN）
+#   ビルド: cargo build（debug）
+#   前提条件: DEV_USER_ID / DEV_PASSWORD 環境変数設定済み
+#   警告: 完走に 15〜30 分かかる
 set -euo pipefail
 source "$(dirname "$0")/common_helpers.sh"
 

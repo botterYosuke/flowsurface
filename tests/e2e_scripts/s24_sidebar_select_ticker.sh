@@ -2,18 +2,19 @@
 # s24_sidebar_select_ticker.sh — S24: POST /api/sidebar/select-ticker 経路の検証
 #
 # 検証シナリオ:
-#   A: Replay Paused 中に kind=null で ticker 変更 → pane の ticker が切り替わる
-#   B: Replay Playing 中に kind=null で ticker 変更 → status が Paused になる
-#   C: Playing 中変更後 Resume → Playing 復帰
-#   D: kind="KlineChart" を指定した場合 → HTTP 200、エラーなし
-#   E: 不正な pane_id → HTTP 400
-#   F: ticker フィールド欠落 → HTTP 400
+#   TC-A: Replay Paused 中に kind=null で ticker 変更 → pane の ticker が切り替わる
+#   TC-B: Replay Playing 中に kind=null で ticker 変更 → status が Paused になる
+#   TC-C: Playing 中変更後 Resume → Playing 復帰
+#   TC-D: kind="KlineChart" を指定した場合 → HTTP 200、エラーなし
+#   TC-E: 不正な pane_id → HTTP 400
+#   TC-F: ticker フィールド欠落 → HTTP 400
 #
-# 補足:
-#   kind=null  → switch_tickers_in_group 経路（リンクグループ内の全ペインを更新）
-#   kind=Some  → init_focused_pane 経路（ペインの種類ごとの初期化）
-#   /api/pane/set-ticker は直接 ticker を差し替えるが、sidebar/select-ticker は
-#   Sidebar::TickerSelected 経路を再現するため、リンクグループ伝播などが加わる。
+# 仕様根拠:
+#   docs/replay_header.md §9.1 — Sidebar::TickerSelected 経路
+#   kind=null → switch_tickers_in_group（リンクグループ全ペイン更新）
+#   kind=Some → init_focused_pane（ペイン種別ごとの初期化）
+#
+# フィクスチャ: BinanceLinear:BTCUSDT M1, auto-play (UTC[-3h, -1h])
 set -euo pipefail
 source "$(dirname "$0")/common_helpers.sh"
 

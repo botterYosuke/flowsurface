@@ -284,9 +284,7 @@ pub mod button {
                         Some(palette.background.weakest.color.into())
                     }
                 }
-                Status::Pressed => {
-                    Some(palette.background.weakest.color.into())
-                }
+                Status::Pressed => Some(palette.background.weakest.color.into()),
                 Status::Hovered => Some(palette.background.weak.color.into()),
                 Status::Disabled => {
                     if is_active {
@@ -816,9 +814,7 @@ pub fn order_status_color(status_text: &str, theme: &Theme) -> Color {
         "全部約定" => palette.primary.base.text,
         "一部約定" => palette.warning.base.color,
         "取消完了" => palette.secondary.strong.color,
-        "受付中" | "注文中" => {
-            palette.primary.base.text.scale_alpha(0.6)
-        }
+        "受付中" | "注文中" => palette.primary.base.text.scale_alpha(0.6),
         _ => palette.danger.base.color,
     }
 }

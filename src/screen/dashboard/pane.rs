@@ -67,7 +67,9 @@ pub enum Effect {
     FetchOrders,
     FetchOrderDetail(String, String), // (order_num, eig_day)
     FetchBuyingPower,
-    FetchHoldings { issue_code: String },
+    FetchHoldings {
+        issue_code: String,
+    },
     /// チャートペインの銘柄変更時に OrderEntry ペインへ配信する
     SyncIssueToOrderEntry {
         issue_code: String,
@@ -420,9 +422,7 @@ impl State {
                     (content, streams)
                 }
                 ContentKind::Starter => unreachable!(),
-                ContentKind::OrderEntry
-                | ContentKind::OrderList
-                | ContentKind::BuyingPower => {
+                ContentKind::OrderEntry | ContentKind::OrderList | ContentKind::BuyingPower => {
                     // 注文パネルは ticker_info / stream を必要としない — ここに到達するのはバグ
                     unreachable!("order panes do not use streams — caller must not reach here")
                 }
@@ -648,8 +648,12 @@ impl State {
             top_left_buttons = top_left_buttons.push(tickers_list_btn);
         } else if !matches!(
             self.content,
-            Content::Starter | Content::OrderEntry(_) | Content::OrderList(_) | Content::BuyingPower(_)
-        ) && !self.has_stream() {
+            Content::Starter
+                | Content::OrderEntry(_)
+                | Content::OrderList(_)
+                | Content::BuyingPower(_)
+        ) && !self.has_stream()
+        {
             let content = row![
                 text("Choose a ticker")
                     .size(13)
@@ -1150,19 +1154,46 @@ impl State {
                 let base = panel.view(theme, is_replay).map(move |msg| {
                     Message::PaneEvent(id, Event::PanelInteraction(panel::Message::OrderEntry(msg)))
                 });
-                self.compose_stack_view(base, id, None, compact_controls, || column![].into(), None, tickers_table)
+                self.compose_stack_view(
+                    base,
+                    id,
+                    None,
+                    compact_controls,
+                    || column![].into(),
+                    None,
+                    tickers_table,
+                )
             }
             Content::OrderList(panel) => {
                 let base = panel.view(theme).map(move |msg| {
                     Message::PaneEvent(id, Event::PanelInteraction(panel::Message::OrderList(msg)))
                 });
-                self.compose_stack_view(base, id, None, compact_controls, || column![].into(), None, tickers_table)
+                self.compose_stack_view(
+                    base,
+                    id,
+                    None,
+                    compact_controls,
+                    || column![].into(),
+                    None,
+                    tickers_table,
+                )
             }
             Content::BuyingPower(panel) => {
                 let base = panel.view(theme).map(move |msg| {
-                    Message::PaneEvent(id, Event::PanelInteraction(panel::Message::BuyingPower(msg)))
+                    Message::PaneEvent(
+                        id,
+                        Event::PanelInteraction(panel::Message::BuyingPower(msg)),
+                    )
                 });
-                self.compose_stack_view(base, id, None, compact_controls, || column![].into(), None, tickers_table)
+                self.compose_stack_view(
+                    base,
+                    id,
+                    None,
+                    compact_controls,
+                    || column![].into(),
+                    None,
+                    tickers_table,
+                )
             }
         };
 
@@ -1299,10 +1330,9 @@ impl State {
                     if let Some(action) = panel.update(msg) {
                         return match action {
                             panel::order_list::Action::FetchOrders => Some(Effect::FetchOrders),
-                            panel::order_list::Action::FetchOrderDetail {
-                                order_num,
-                                eig_day,
-                            } => Some(Effect::FetchOrderDetail(order_num, eig_day)),
+                            panel::order_list::Action::FetchOrderDetail { order_num, eig_day } => {
+                                Some(Effect::FetchOrderDetail(order_num, eig_day))
+                            }
                             panel::order_list::Action::SubmitCorrect(req) => {
                                 Some(Effect::SubmitCorrectOrder(*req))
                             }
@@ -2285,9 +2315,13 @@ impl Content {
             ContentKind::ComparisonChart => Content::Comparison(None),
             ContentKind::TimeAndSales => Content::TimeAndSales(None),
             ContentKind::Ladder => Content::Ladder(None),
-            ContentKind::OrderEntry => Content::OrderEntry(panel::order_entry::OrderEntryPanel::new()),
+            ContentKind::OrderEntry => {
+                Content::OrderEntry(panel::order_entry::OrderEntryPanel::new())
+            }
             ContentKind::OrderList => Content::OrderList(panel::order_list::OrderListPanel::new()),
-            ContentKind::BuyingPower => Content::BuyingPower(panel::buying_power::BuyingPowerPanel::new()),
+            ContentKind::BuyingPower => {
+                Content::BuyingPower(panel::buying_power::BuyingPowerPanel::new())
+            }
         }
     }
 
@@ -2643,7 +2677,9 @@ fn by_basis_default<T>(
 fn virtual_order_from_new_order_request(
     req: &exchange::adapter::tachibana::NewOrderRequest,
 ) -> Option<crate::replay::virtual_exchange::VirtualOrder> {
-    use crate::replay::virtual_exchange::{PositionSide, VirtualOrder, VirtualOrderStatus, VirtualOrderType};
+    use crate::replay::virtual_exchange::{
+        PositionSide, VirtualOrder, VirtualOrderStatus, VirtualOrderType,
+    };
 
     // tachibana API: side "3" = 買い, "1" = 売り
     let side = match req.side.as_str() {
@@ -2659,7 +2695,10 @@ fn virtual_order_from_new_order_request(
         VirtualOrderType::Market
     } else {
         let Ok(price) = req.price.parse::<f64>() else {
-            log::warn!("仮想注文: 指値価格のパース失敗 ({:?}) — 注文を破棄", req.price);
+            log::warn!(
+                "仮想注文: 指値価格のパース失敗 ({:?}) — 注文を破棄",
+                req.price
+            );
             return None;
         };
         VirtualOrderType::Limit { price }

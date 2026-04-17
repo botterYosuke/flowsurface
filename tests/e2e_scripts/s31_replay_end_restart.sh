@@ -1,24 +1,20 @@
 #!/usr/bin/env bash
 # s31_replay_end_restart.sh — S31: 混合データ（Tachibana D1 + ETHUSDT M1）終端到達後 ▶ で先頭から再スタート
-# ビルド要件: cargo build（debug ビルド）— inject-* エンドポイントは debug_assertions でのみ有効
-#
-# 修正された不具合:
-#   ▶ ボタンが終端（now_ms >= range.end）で Paused のとき Resume ではなく
-#   Play（先頭からの再スタート）を送るべきだったが、修正前は Resume を送っていた。
-#   → 終端到達後に ▶ を押しても current_time が end_time のまま動かなかった。
-#
-#   API テストでは /api/replay/play を再呼び出しすることで同じコードパスを検証する。
-#   混合データ（Tachibana D1 + ETHUSDT M1）でも再スタートが正常に動作することを確認する。
 #
 # 検証シナリオ:
 #   TC-A: Play → 10x 加速 → 終端到達 (Paused @ end_time)
 #   TC-B: Play 再呼び出し → レスポンスが Loading かつ再スタート開始
 #   TC-C: Play レスポンスの current_time が start_time 付近であること（先頭からの再開）
 #
-# フィクスチャ: TachibanaSpot:7203 D1 + BinanceLinear:ETHUSDT M1（2 ペイン構成）
-#              Tachibana 日次履歴を inject して D1 klines が存在する状態
+# 仕様根拠:
+#   修正された不具合: ▶ ボタンが終端 Paused のとき Resume ではなく Play を送るべきだった
+#   → 終端到達後に ▶ を押しても current_time が end_time のまま動かなかった
+#   API テストでは /api/replay/play を再呼び出しすることで同じコードパスを検証する
 #
-# 前提条件: DEV_USER_ID / DEV_PASSWORD 環境変数が設定済みであること
+# フィクスチャ: TachibanaSpot:7203 D1 + BinanceLinear:ETHUSDT M1（2ペイン）
+#   ビルド: cargo build（debug）
+#   前提条件: DEV_USER_ID / DEV_PASSWORD 環境変数設定済み
+#   注: inject-* エンドポイントは debug_assertions でのみ有効
 set -euo pipefail
 source "$(dirname "$0")/common_helpers.sh"
 

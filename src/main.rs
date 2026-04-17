@@ -11,9 +11,7 @@ mod screen;
 use screen::login::{self, LoginScreen};
 mod replay;
 mod replay_api;
-use replay::{
-    ReplayMessage, ReplaySystemEvent, ReplayUserMessage, controller::ReplayController,
-};
+use replay::{ReplayMessage, ReplaySystemEvent, ReplayUserMessage, controller::ReplayController};
 mod style;
 mod version;
 mod widget;
@@ -238,7 +236,9 @@ impl Flowsurface {
                     _ => replay::ReplayMode::Live,
                 };
                 if replay_mode == replay::ReplayMode::Replay {
-                    Some(replay::virtual_exchange::VirtualExchangeEngine::new(1_000_000.0))
+                    Some(replay::virtual_exchange::VirtualExchangeEngine::new(
+                        1_000_000.0,
+                    ))
                 } else {
                     None
                 }
@@ -415,8 +415,7 @@ impl Flowsurface {
                             let clock_ms = self.replay.current_time_ms().unwrap_or(0);
                             let fills = engine.on_tick(&ticker, &trades, clock_ms);
                             for fill in fills {
-                                let fill_msg =
-                                    dashboard::Message::VirtualOrderFilled(fill);
+                                let fill_msg = dashboard::Message::VirtualOrderFilled(fill);
                                 all_tasks.push(Task::done(Message::Dashboard {
                                     layout_id: None,
                                     event: fill_msg,
@@ -610,10 +609,9 @@ impl Flowsurface {
                                             "[auto-play] All panes ready — firing ReplayMessage::Play"
                                         );
                                         self.replay.clear_pending_auto_play();
-                                        let play_task =
-                                            Task::done(Message::Replay(ReplayMessage::User(
-                                            ReplayUserMessage::Play,
-                                        )));
+                                        let play_task = Task::done(Message::Replay(
+                                            ReplayMessage::User(ReplayUserMessage::Play),
+                                        ));
                                         return Task::batch([resolve_task, play_task]);
                                     }
 
@@ -639,7 +637,10 @@ impl Flowsurface {
                             old_stream,
                             new_stream,
                         }) => Task::done(Message::Replay(ReplayMessage::System(
-                            ReplaySystemEvent::ReloadKlineStream { old_stream, new_stream },
+                            ReplaySystemEvent::ReloadKlineStream {
+                                old_stream,
+                                new_stream,
+                            },
                         ))),
                         Some(dashboard::Event::SwitchTickersInGroup { ticker_info }) => {
                             let old_kline_streams: Vec<exchange::adapter::StreamKind> =
@@ -692,7 +693,9 @@ impl Flowsurface {
                             if let Some(engine) = &mut self.virtual_engine {
                                 let _order_id = engine.place_order(vo);
                             } else {
-                                log::warn!("仮想注文が来たが VirtualExchangeEngine が初期化されていません");
+                                log::warn!(
+                                    "仮想注文が来たが VirtualExchangeEngine が初期化されていません"
+                                );
                             }
                             Task::none()
                         }
@@ -902,10 +905,11 @@ impl Flowsurface {
                             // チャート種類付き選択: フォーカスペインを Split して新ペインに表示する。
                             // 新ペインを追加するだけなので既存ストリームを reload しない。
                             // SyncReplayBuffers のみ発火してバッファを同期する。
-                            match self
-                                .active_dashboard_mut()
-                                .split_focused_and_init(main_window_id, ticker_info, kind)
-                            {
+                            match self.active_dashboard_mut().split_focused_and_init(
+                                main_window_id,
+                                ticker_info,
+                                kind,
+                            ) {
                                 Some(task) => {
                                     let replay_task = Task::done(Message::Replay(
                                         ReplayMessage::System(ReplaySystemEvent::SyncReplayBuffers),
@@ -1036,6 +1040,11 @@ impl Flowsurface {
                 };
                 let was_replay = self.replay.is_replay();
                 let time_before = self.replay.current_time_ms();
+                // StepForward では engine をリセットしない（注文の pending 状態を維持する）
+                let is_step_forward = matches!(
+                    msg,
+                    replay::ReplayMessage::User(replay::ReplayUserMessage::StepForward)
+                );
                 let (task, toast) = self.replay.handle_message(msg, dashboard, main_window_id);
                 let time_after = self.replay.current_time_ms();
                 if let Some(t) = toast {
@@ -1044,19 +1053,23 @@ impl Flowsurface {
                 // replay 状態が切り替わった可能性があるため is_replay をシンクする
                 let is_replay_now = self.replay.is_replay();
                 self.active_dashboard_mut().is_replay = is_replay_now;
-                self.active_dashboard_mut().sync_virtual_mode(main_window_id);
+                self.active_dashboard_mut()
+                    .sync_virtual_mode(main_window_id);
 
                 // 仮想エンジンのライフサイクル管理:
                 // Live→Replay (Play): エンジンを生成/リセット
                 // Replay→Live: エンジンをリセット
-                // Seek (StepForward/StepBackward): 時刻変化を検出してリセット
+                // StepBackward / range 変更: 時刻が後退したためリセット
+                // StepForward: リセットしない（注文の pending 状態を維持し on_tick で約定させる）
                 if !was_replay && is_replay_now {
                     // Replay 開始 → エンジンを初期化
                     if self.virtual_engine.is_none() {
                         self.virtual_engine = Some(
                             replay::virtual_exchange::VirtualExchangeEngine::new(1_000_000.0),
                         );
-                        log::info!("VirtualExchangeEngine を初期化しました（初期 cash: 1,000,000）");
+                        log::info!(
+                            "VirtualExchangeEngine を初期化しました（初期 cash: 1,000,000）"
+                        );
                     } else if let Some(engine) = &mut self.virtual_engine {
                         engine.reset();
                         log::info!("VirtualExchangeEngine をリセットしました（再プレイ）");
@@ -1069,16 +1082,43 @@ impl Flowsurface {
                     }
                 } else if is_replay_now
                     && time_before != time_after
+                    && !is_step_forward
                     && let Some(engine) = &mut self.virtual_engine
                 {
-                    // Replay 中の seek 操作（StepForward/StepBackward/range 変更）
-                    // 時刻が変化した場合にポジション状態をリセットする
+                    // StepBackward / range 変更 → 時刻が変化したためリセット
+                    // （StepForward は除外: pending 注文を約定させるため状態を維持する）
                     engine.reset();
                     log::info!(
                         "VirtualExchangeEngine をリセットしました（seek: {:?} → {:?}）",
                         time_before,
                         time_after
                     );
+                }
+
+                // StepForward: kline close から合成 Trade を生成して on_tick() を呼ぶ
+                // これにより Trades EventStore が空でも成行注文が約定する
+                if is_replay_now && is_step_forward {
+                    let mut fill_tasks = Vec::new();
+                    if let Some(engine) = &mut self.virtual_engine {
+                        let clock_ms = self.replay.current_time_ms().unwrap_or(0);
+                        for (stream, trades) in self.replay.synthetic_trades_at_current_time() {
+                            let ticker = stream.ticker_info().ticker.to_string();
+                            let fills = engine.on_tick(&ticker, &trades, clock_ms);
+                            for fill in fills {
+                                let fill_msg =
+                                    crate::screen::dashboard::Message::VirtualOrderFilled(fill);
+                                fill_tasks.push(iced::Task::done(Message::Dashboard {
+                                    layout_id: None,
+                                    event: fill_msg,
+                                }));
+                            }
+                        }
+                    }
+                    if fill_tasks.is_empty() {
+                        return task.map(Message::Replay);
+                    }
+                    fill_tasks.push(task.map(Message::Replay));
+                    return iced::Task::batch(fill_tasks);
                 }
 
                 return task.map(Message::Replay);
@@ -1119,7 +1159,8 @@ impl Flowsurface {
                                 .map(|l| &mut l.dashboard)
                                 .expect("No active dashboard");
                             let (task, toast) =
-                                self.replay.play_with_range(start, end, dashboard, main_window_id);
+                                self.replay
+                                    .play_with_range(start, end, dashboard, main_window_id);
                             if let Some(t) = toast {
                                 self.notifications.push(t);
                             }
@@ -1168,8 +1209,8 @@ impl Flowsurface {
                         }
                     },
                     ApiCommand::Pane(cmd) => {
-                        let (body, task) = self.handle_pane_api(cmd);
-                        reply_tx.send(body);
+                        let (status, body, task) = self.handle_pane_api(cmd);
+                        reply_tx.send_status(status, body);
                         return task;
                     }
                     ApiCommand::Auth(cmd) => {
@@ -1177,12 +1218,18 @@ impl Flowsurface {
                         reply_tx.send(body);
                     }
                     ApiCommand::VirtualExchange(cmd) => {
+                        use replay::virtual_exchange::{
+                            PositionSide, VirtualOrder, VirtualOrderStatus, VirtualOrderType,
+                        };
                         use replay_api::VirtualExchangeCommand;
-                        use replay::virtual_exchange::{PositionSide, VirtualOrder, VirtualOrderStatus, VirtualOrderType};
 
                         match cmd {
                             VirtualExchangeCommand::PlaceOrder {
-                                ticker, side, qty, order_type, limit_price,
+                                ticker,
+                                side,
+                                qty,
+                                order_type,
+                                limit_price,
                             } => {
                                 if let Some(engine) = &mut self.virtual_engine {
                                     let order_side = if side == "buy" {
@@ -1208,45 +1255,65 @@ impl Flowsurface {
                                         status: VirtualOrderStatus::Pending,
                                     };
                                     let order_id = engine.place_order(vo);
-                                    reply_tx.send(serde_json::json!({
-                                        "order_id": order_id,
-                                        "status": "pending"
-                                    }).to_string());
+                                    reply_tx.send(
+                                        serde_json::json!({
+                                            "order_id": order_id,
+                                            "status": "pending"
+                                        })
+                                        .to_string(),
+                                    );
                                 } else {
-                                    reply_tx.send_status(400, r#"{"error":"REPLAY mode only. Start replay first."}"#.to_string());
+                                    reply_tx.send_status(
+                                        400,
+                                        r#"{"error":"REPLAY mode only. Start replay first."}"#
+                                            .to_string(),
+                                    );
                                 }
                             }
                             VirtualExchangeCommand::GetPortfolio => {
                                 if let Some(engine) = &self.virtual_engine {
                                     let snap = engine.portfolio_snapshot(0.0);
-                                    reply_tx.send(
-                                        serde_json::to_string(&snap)
-                                            .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string()),
-                                    );
+                                    reply_tx.send(serde_json::to_string(&snap).unwrap_or_else(
+                                        |_| r#"{"error":"serialization failed"}"#.to_string(),
+                                    ));
                                 } else {
-                                    reply_tx.send_status(400, r#"{"error":"REPLAY mode only. Start replay first."}"#.to_string());
+                                    reply_tx.send_status(
+                                        400,
+                                        r#"{"error":"REPLAY mode only. Start replay first."}"#
+                                            .to_string(),
+                                    );
                                 }
                             }
                             VirtualExchangeCommand::GetState => {
                                 if self.virtual_engine.is_some() {
                                     // Phase 1 骨格のみ
                                     let now_ms = self.replay.current_time_ms().unwrap_or(0);
-                                    reply_tx.send(serde_json::json!({
-                                        "current_time_ms": now_ms,
-                                        "not_implemented": true
-                                    }).to_string());
+                                    reply_tx.send(
+                                        serde_json::json!({
+                                            "current_time_ms": now_ms,
+                                            "not_implemented": true
+                                        })
+                                        .to_string(),
+                                    );
                                 } else {
-                                    reply_tx.send_status(400, r#"{"error":"REPLAY mode only. Start replay first."}"#.to_string());
+                                    reply_tx.send_status(
+                                        400,
+                                        r#"{"error":"REPLAY mode only. Start replay first."}"#
+                                            .to_string(),
+                                    );
                                 }
                             }
                             VirtualExchangeCommand::GetOrders => {
                                 if let Some(engine) = &self.virtual_engine {
                                     let orders = engine.get_orders();
-                                    reply_tx.send(
-                                        serde_json::json!({ "orders": orders }).to_string(),
-                                    );
+                                    reply_tx
+                                        .send(serde_json::json!({ "orders": orders }).to_string());
                                 } else {
-                                    reply_tx.send_status(400, r#"{"error":"REPLAY mode only. Start replay first."}"#.to_string());
+                                    reply_tx.send_status(
+                                        400,
+                                        r#"{"error":"REPLAY mode only. Start replay first."}"#
+                                            .to_string(),
+                                    );
                                 }
                             }
                         }
@@ -1336,7 +1403,13 @@ impl Flowsurface {
         } else {
             container(
                 dashboard
-                    .view_window(id, &self.main_window, tickers_table, self.timezone, &self.theme.0)
+                    .view_window(
+                        id,
+                        &self.main_window,
+                        tickers_table,
+                        self.timezone,
+                        &self.theme.0,
+                    )
                     .map(move |msg| Message::Dashboard {
                         layout_id: None,
                         event: msg,
@@ -1373,7 +1446,9 @@ impl Flowsurface {
             "● LIVE"
         };
         let mode_toggle = button(text(mode_label).size(11))
-            .on_press(Message::Replay(ReplayMessage::User(ReplayUserMessage::ToggleMode)))
+            .on_press(Message::Replay(ReplayMessage::User(
+                ReplayUserMessage::ToggleMode,
+            )))
             .style(move |theme, status| {
                 style::button::bordered_toggle_highlighted(theme, status, is_replay, is_highlighted)
             })
@@ -1440,8 +1515,7 @@ impl Flowsurface {
                     ReplayUserMessage::CycleSpeed,
                 )));
             }
-            let controls =
-                row![step_back_btn, play_pause_btn, step_fwd_btn, speed_btn].spacing(4);
+            let controls = row![step_back_btn, play_pause_btn, step_fwd_btn, speed_btn].spacing(4);
 
             header = header
                 .push(start_input.width(140))
@@ -1498,9 +1572,9 @@ impl Flowsurface {
             };
             match key {
                 keyboard::Key::Named(keyboard::key::Named::Escape) => Some(Message::GoBack),
-                keyboard::Key::Named(keyboard::key::Named::F5) => {
-                    Some(Message::Replay(ReplayMessage::User(ReplayUserMessage::ToggleMode)))
-                }
+                keyboard::Key::Named(keyboard::key::Named::F5) => Some(Message::Replay(
+                    ReplayMessage::User(ReplayUserMessage::ToggleMode),
+                )),
                 _ => None,
             }
         });
@@ -1581,13 +1655,16 @@ impl Flowsurface {
         }
     }
 
-    fn handle_pane_api(&mut self, cmd: replay_api::PaneCommand) -> (String, Task<Message>) {
+    fn handle_pane_api(
+        &mut self,
+        cmd: replay_api::PaneCommand,
+    ) -> (u16, String, Task<Message>) {
         use replay_api::PaneCommand;
 
         match cmd {
             PaneCommand::ListPanes => {
                 let json = self.build_pane_list_json();
-                (json, Task::none())
+                (200, json, Task::none())
             }
             PaneCommand::Split { pane_id, axis } => self.pane_api_split(pane_id, &axis),
             PaneCommand::Close { pane_id } => self.pane_api_close(pane_id),
@@ -1604,11 +1681,11 @@ impl Flowsurface {
             } => self.pane_api_sidebar_select_ticker(pane_id, &ticker, kind.as_deref()),
             PaneCommand::ListNotifications => {
                 let json = self.build_notification_list_json();
-                (json, Task::none())
+                (200, json, Task::none())
             }
             PaneCommand::GetChartSnapshot { pane_id } => {
                 let json = self.build_chart_snapshot_json(pane_id);
-                (json, Task::none())
+                (200, json, Task::none())
             }
             PaneCommand::OpenOrderPane { kind } => self.pane_api_open_order_pane(&kind),
         }
@@ -1730,11 +1807,12 @@ impl Flowsurface {
 
     /// `POST /api/sidebar/open-order-pane` ハンドラ。
     /// フォーカスペインを Horizontal Split し、指定種別の注文ペインを新ペインに表示する。
-    fn pane_api_open_order_pane(&mut self, kind_str: &str) -> (String, Task<Message>) {
+    fn pane_api_open_order_pane(&mut self, kind_str: &str) -> (u16, String, Task<Message>) {
         let kind = match Self::parse_content_kind(kind_str) {
             Some(k) => k,
             None => {
                 return (
+                    400,
                     format!(r#"{{"error":"invalid kind: {kind_str}"}}"#),
                     Task::none(),
                 );
@@ -1753,15 +1831,20 @@ impl Flowsurface {
             "action": "open-order-pane",
             "kind": kind_str,
         });
-        (ok.to_string(), task)
+        (200, ok.to_string(), task)
     }
 
-    fn pane_api_split(&mut self, pane_id: uuid::Uuid, axis_str: &str) -> (String, Task<Message>) {
+    fn pane_api_split(
+        &mut self,
+        pane_id: uuid::Uuid,
+        axis_str: &str,
+    ) -> (u16, String, Task<Message>) {
         let axis = match axis_str {
             "Vertical" | "vertical" => pane_grid::Axis::Vertical,
             "Horizontal" | "horizontal" => pane_grid::Axis::Horizontal,
             _ => {
                 return (
+                    400,
                     format!(
                         r#"{{"error":"invalid axis: {axis_str} (expected Vertical or Horizontal)"}}"#
                     ),
@@ -1772,6 +1855,7 @@ impl Flowsurface {
 
         let Some((window_id, pg_pane)) = self.find_pane_handle(pane_id) else {
             return (
+                404,
                 format!(r#"{{"error":"pane not found: {pane_id}"}}"#),
                 Task::none(),
             );
@@ -1785,12 +1869,13 @@ impl Flowsurface {
             ),
         });
         let ok = serde_json::json!({"ok": true, "action": "split", "pane_id": pane_id.to_string()});
-        (ok.to_string(), task)
+        (200, ok.to_string(), task)
     }
 
-    fn pane_api_close(&mut self, pane_id: uuid::Uuid) -> (String, Task<Message>) {
+    fn pane_api_close(&mut self, pane_id: uuid::Uuid) -> (u16, String, Task<Message>) {
         let Some((window_id, pg_pane)) = self.find_pane_handle(pane_id) else {
             return (
+                404,
                 format!(r#"{{"error":"pane not found: {pane_id}"}}"#),
                 Task::none(),
             );
@@ -1804,7 +1889,7 @@ impl Flowsurface {
             ),
         });
         let ok = serde_json::json!({"ok": true, "action": "close", "pane_id": pane_id.to_string()});
-        (ok.to_string(), task)
+        (200, ok.to_string(), task)
     }
 
     /// "BinanceLinear:BTCUSDT" を (Exchange, Ticker) にパースする。
@@ -1835,11 +1920,12 @@ impl Flowsurface {
         &mut self,
         pane_id: uuid::Uuid,
         ticker_str: &str,
-    ) -> (String, Task<Message>) {
+    ) -> (u16, String, Task<Message>) {
         let ticker = match Self::parse_ser_ticker(ticker_str) {
             Ok(t) => t,
             Err(err) => {
                 return (
+                    400,
                     format!(r#"{{"error":"{}"}}"#, err.replace('"', "'")),
                     Task::none(),
                 );
@@ -1853,6 +1939,7 @@ impl Flowsurface {
             .and_then(|opt| *opt);
         let Some(ticker_info) = ticker_info else {
             return (
+                404,
                 format!(
                     r#"{{"error":"ticker info not loaded yet: {ticker_str} (wait for metadata fetch)"}}"#
                 ),
@@ -1862,6 +1949,7 @@ impl Flowsurface {
 
         let Some((window_id, pg_pane)) = self.find_pane_handle(pane_id) else {
             return (
+                404,
                 format!(r#"{{"error":"pane not found: {pane_id}"}}"#),
                 Task::none(),
             );
@@ -1880,9 +1968,7 @@ impl Flowsurface {
                         .streams
                         .ready_iter()
                         .and_then(|mut it| {
-                            it.find(|s| {
-                                matches!(s, exchange::adapter::StreamKind::Kline { .. })
-                            })
+                            it.find(|s| matches!(s, exchange::adapter::StreamKind::Kline { .. }))
                         })
                         .copied()
                 })
@@ -1951,7 +2037,7 @@ impl Flowsurface {
             "pane_id": pane_id.to_string(),
             "ticker": ticker_str,
         });
-        (ok.to_string(), task)
+        (200, ok.to_string(), task)
     }
 
     fn parse_timeframe(s: &str) -> Option<exchange::Timeframe> {
@@ -1979,11 +2065,12 @@ impl Flowsurface {
         &mut self,
         pane_id: uuid::Uuid,
         tf_str: &str,
-    ) -> (String, Task<Message>) {
+    ) -> (u16, String, Task<Message>) {
         let tf = match Self::parse_timeframe(tf_str) {
             Some(tf) => tf,
             None => {
                 return (
+                    400,
                     format!(r#"{{"error":"invalid timeframe: {tf_str}"}}"#),
                     Task::none(),
                 );
@@ -1992,6 +2079,7 @@ impl Flowsurface {
 
         let Some((window_id, pg_pane)) = self.find_pane_handle(pane_id) else {
             return (
+                404,
                 format!(r#"{{"error":"pane not found: {pane_id}"}}"#),
                 Task::none(),
             );
@@ -2007,12 +2095,14 @@ impl Flowsurface {
                 .find(|(_, p, _)| *p == pg_pane)
             else {
                 return (
+                    404,
                     format!(r#"{{"error":"pane not found in dashboard: {pane_id}"}}"#),
                     Task::none(),
                 );
             };
             let Some(ti) = state.stream_pair() else {
                 return (
+                    400,
                     format!(
                         r#"{{"error":"pane has no active ticker to rebase timeframe: {pane_id}"}}"#
                     ),
@@ -2025,9 +2115,7 @@ impl Flowsurface {
                     .streams
                     .ready_iter()
                     .and_then(|mut it| {
-                        it.find(|s| {
-                            matches!(s, exchange::adapter::StreamKind::Kline { .. })
-                        })
+                        it.find(|s| matches!(s, exchange::adapter::StreamKind::Kline { .. }))
                     })
                     .copied()
             } else {
@@ -2085,7 +2173,7 @@ impl Flowsurface {
             "pane_id": pane_id.to_string(),
             "timeframe": tf_str,
         });
-        (ok.to_string(), task)
+        (200, ok.to_string(), task)
     }
 
     /// "CandlestickChart" / "HeatmapChart" / "ShaderHeatmap" ... を ContentKind にパースする。
@@ -2118,11 +2206,12 @@ impl Flowsurface {
         pane_id: uuid::Uuid,
         ticker_str: &str,
         kind_str: Option<&str>,
-    ) -> (String, Task<Message>) {
+    ) -> (u16, String, Task<Message>) {
         let ticker = match Self::parse_ser_ticker(ticker_str) {
             Ok(t) => t,
             Err(err) => {
                 return (
+                    400,
                     format!(r#"{{"error":"{}"}}"#, err.replace('"', "'")),
                     Task::none(),
                 );
@@ -2136,6 +2225,7 @@ impl Flowsurface {
             .and_then(|opt| *opt);
         let Some(ticker_info) = ticker_info else {
             return (
+                404,
                 format!(
                     r#"{{"error":"ticker info not loaded yet: {ticker_str} (wait for metadata fetch)"}}"#
                 ),
@@ -2147,7 +2237,7 @@ impl Flowsurface {
             Some(s) => match Self::parse_content_kind(s) {
                 Some(k) => Some(k),
                 None => {
-                    return (format!(r#"{{"error":"invalid kind: {s}"}}"#), Task::none());
+                    return (400, format!(r#"{{"error":"invalid kind: {s}"}}"#), Task::none());
                 }
             },
             None => None,
@@ -2155,6 +2245,7 @@ impl Flowsurface {
 
         let Some((window_id, pg_pane)) = self.find_pane_handle(pane_id) else {
             return (
+                404,
                 format!(r#"{{"error":"pane not found: {pane_id}"}}"#),
                 Task::none(),
             );
@@ -2195,7 +2286,7 @@ impl Flowsurface {
                 "ticker": ticker_str,
                 "kind": kind_str,
             });
-            return (ok.to_string(), task);
+            return (200, ok.to_string(), task);
         }
 
         // kind == None → switch_tickers_in_group 経路（旧フロー）
@@ -2256,7 +2347,7 @@ impl Flowsurface {
             "ticker": ticker_str,
             "kind": kind_str,
         });
-        (ok.to_string(), task)
+        (200, ok.to_string(), task)
     }
 
     /// ログインウィンドウを閉じてメインウィンドウ（ダッシュボード）を開く。

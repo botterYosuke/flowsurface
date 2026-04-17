@@ -1,6 +1,18 @@
 #!/usr/bin/env bash
 # s15_chart_snapshot.sh — スイート S15: chart-snapshot API テスト
-# GET /api/pane/chart-snapshot?pane_id=<uuid> の動作確認
+#
+# 検証シナリオ:
+#   TC-S15-01: oldest_ts ≤ start_time かつ差分 ≤ 301 bars（PRE_START_HISTORY_BARS=300 確認）
+#   TC-S15-02: StepForward 後 bar_count 増加または同数
+#   TC-S15-03: StepBackward 後も snapshot 取得可能（クラッシュなし）
+#   TC-S15-04: 存在しない pane_id → {"error":"..."} + アプリ生存
+#   TC-S15-05: Live モード中の snapshot 取得後もアプリ応答あり
+#
+# 仕様根拠:
+#   docs/replay_header.md §9.2 — GET /api/pane/chart-snapshot レスポンスフォーマット
+#
+# フィクスチャ: BinanceLinear:BTCUSDT M1, auto-play (UTC[-3h, -1h])
+#   注: chart-snapshot API 未実装環境では全 TC が PENDING
 set -euo pipefail
 source "$(dirname "$0")/common_helpers.sh"
 
@@ -18,15 +30,6 @@ if ! wait_playing 30; then
   fail "TC-S15-precond" "Playing 到達せず"
   exit 1
 fi
-
-# 前提確認: chart-snapshot API が実装済みか確認（未実装なら全 TC PENDING）
-PROBE=$(curl -s -o /dev/null -w "%{http_code}" "$API/pane/chart-snapshot?pane_id=00000000-0000-0000-0000-000000000000" || echo "000")
-if [ "$PROBE" = "404" ]; then
-  pend "TC-S15-*" "GET /api/pane/chart-snapshot 未実装 → S15 全 TC を PENDING"
-  print_summary
-  exit 0
-fi
-echo "  chart-snapshot API 確認 (probe=$PROBE)"
 
 # Pause してからペイン ID を取得
 curl -s -X POST "$API/replay/pause" > /dev/null

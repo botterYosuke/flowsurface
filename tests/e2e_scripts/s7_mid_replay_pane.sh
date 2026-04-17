@@ -1,5 +1,20 @@
 #!/usr/bin/env bash
 # s7_mid_replay_pane.sh — スイート S7: Mid-replay ペイン CRUD
+#
+# 検証シナリオ:
+#   TC-S7-01: Playing 中に split (Vertical) → ペイン数 2
+#   TC-S7-02: 新ペインに ETHUSDT 設定 → streams_ready=true
+#   TC-S7-02b: split 後 PANE0 の streams_ready 維持
+#   TC-S7-03: split 後も Playing 継続
+#   TC-S7-04: 新ペインで set-timeframe M5 → streams_ready=true
+#   TC-S7-05: 新ペインを close → ペイン数 1
+#   TC-S7-06: close 後も Playing 継続
+#   TC-S7-07: range end 到達後に split してもクラッシュなし
+#
+# 仕様根拠:
+#   docs/replay_header.md §9 — 再生中の動的ペイン追加・削除
+#
+# フィクスチャ: BinanceLinear:BTCUSDT M1, auto-play (UTC[-3h, -1h])
 set -euo pipefail
 source "$(dirname "$0")/common_helpers.sh"
 

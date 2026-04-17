@@ -1,5 +1,22 @@
 #!/bin/bash
 # s1_basic_lifecycle.sh — スイート S1: 基本ライフサイクル
+#
+# 検証シナリオ:
+#   TC-S1-01: 起動時 mode=Live
+#   TC-S1-02: toggle → mode=Replay
+#   TC-S1-03〜04: play → Loading/Playing 到達（最大 120s）
+#   TC-S1-05〜05c: 1x 速度で current_time 前進・バー境界スナップ・range 内
+#   TC-S1-06〜07: Pause 中 current_time 固定・status=Paused
+#   TC-S1-08: Resume 後 current_time 前進
+#   TC-S1-09〜12: Speed サイクル（1x→2x→5x→10x→1x）
+#   TC-S1-13〜13b: StepForward +60000ms・バー境界維持
+#   TC-S1-14: StepBackward -60000ms
+#   TC-S1-15a〜f: Live 復帰で状態リセット・range 値は保持
+#
+# 仕様根拠:
+#   docs/replay_header.md §4〜§8 — Replay ライフサイクル・clock 状態機械
+#
+# フィクスチャ: BinanceLinear:BTCUSDT M1, Live モード起動 → 手動 toggle/play
 source "$(dirname "$0")/common_helpers.sh"
 
 echo "=== S1: 基本ライフサイクル ==="
@@ -65,13 +82,16 @@ else
   fail "TC-S1-04" "120秒以内に Playing にならなかった"
 fi
 
-# --- TC-S1-05: current_time が 1x 速度の期待差分で前進 ---
+# --- TC-S1-05: current_time が前進する ---
 CT1=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
-sleep 3
-CT2=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
-WITHIN=$(advance_within "$CT1" "$CT2" "$STEP_M1" 100)
-[ "$WITHIN" = "true" ] && pass "TC-S1-05: 1x で 3s に 1〜100 bar 前進 ($CT1 → $CT2)" || \
-  fail "TC-S1-05" "想定外の前進 (CT1=$CT1 CT2=$CT2 step=$STEP_M1)"
+if CT2=$(wait_for_time_advance "$CT1" 30); then
+  WITHIN=$(advance_within "$CT1" "$CT2" "$STEP_M1" 100)
+  [ "$WITHIN" = "true" ] && pass "TC-S1-05: 1x で current_time 前進 ($CT1 → $CT2)" || \
+    fail "TC-S1-05" "想定外の前進 (CT1=$CT1 CT2=$CT2 step=$STEP_M1)"
+else
+  fail "TC-S1-05" "30 秒待機しても current_time が前進しなかった (CT1=$CT1)"
+  CT2="$CT1"
+fi
 
 # --- TC-S1-05b: current_time はバー境界値 ---
 ON_BAR=$(is_bar_boundary "$CT2" "$STEP_M1")

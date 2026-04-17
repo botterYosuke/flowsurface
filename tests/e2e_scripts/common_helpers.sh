@@ -328,3 +328,43 @@ ct_in_range() {
   local ct=$1 st=$2 et=$3
   node -e "console.log(BigInt('$ct') >= BigInt('$st') && BigInt('$ct') <= BigInt('$et'))"
 }
+
+# ── Tachibana DEV 共通ヘルパー ──────────────────────────────────────────────
+# TachibanaSpot:7203 D1 の saved-state を書き込み、アプリ起動 → セッション確立 →
+# streams_ready → Replay モード切替 → /api/replay/play を発行する。
+# 引数: start end （utc_offset の出力形式 "YYYY-MM-DD HH:MM"）
+# 前提: DEV_USER_ID / DEV_PASSWORD 環境変数が設定済みであること
+tachibana_replay_setup() {
+  local start=$1 end=$2
+  cat > "$DATA_DIR/saved-state.json" <<HEREDOC
+{
+  "layout_manager":{"layouts":[{"name":"Test-D1","dashboard":{"pane":{
+    "KlineChart":{
+      "layout":{"splits":[0.78],"autoscale":"FitToVisible"},"kind":"Candles",
+      "stream_type":[{"Kline":{"ticker":"TachibanaSpot:7203","timeframe":"D1"}}],
+      "settings":{"tick_multiply":null,"visual_config":null,"selected_basis":{"Time":"D1"}},
+      "indicators":["Volume"],"link_group":"A"
+    }
+  },"popout":[]}}],"active_layout":"Test-D1"},
+  "timezone":"UTC","trade_fetch_enabled":false,"size_in_quote_ccy":"Base"
+}
+HEREDOC
+  start_app
+  echo "  waiting for Tachibana session (DEV AUTO-LOGIN)..."
+  if ! wait_tachibana_session 120; then
+    echo "  ERROR: Tachibana session not established after 120s"
+    return 1
+  fi
+  echo "  Tachibana session established"
+  local pane_id
+  pane_id=$(node -e "const ps=(JSON.parse(process.argv[1]).panes||[]); console.log(ps[0]?ps[0].id:'');" \
+    "$(curl -s "$API/pane/list")")
+  if [ -n "$pane_id" ]; then
+    echo "  waiting for D1 klines (streams_ready)..."
+    wait_for_streams_ready "$pane_id" 120 || echo "  WARN: streams_ready timeout (continuing)"
+  fi
+  curl -s -X POST "$API/replay/toggle" > /dev/null
+  curl -s -X POST "$API/replay/play" \
+    -H "Content-Type: application/json" \
+    -d "{\"start\":\"$start\",\"end\":\"$end\"}" > /dev/null
+}

@@ -1,8 +1,17 @@
 #!/usr/bin/env bash
 # s20_tachibana_replay_resilience.sh — スイート S20: UI操作中の Replay 耐性テスト（TachibanaSpot）
-# TachibanaSpot:7203 D1 での Replay 再生中に各種 UI 操作を行っても壊れないことを確認する
-# ビルド要件: cargo build（デバッグビルド）
-# 前提条件: DEV_USER_ID / DEV_PASSWORD 環境変数が設定済みであること
+#
+# 検証シナリオ:
+#   TC-S20-01: speed 20 連打 + Resume → status=Playing（D1, 100ms/bar クラッシュなし）
+#   TC-S20-02a〜b: D1 StepForward delta=86400000ms・StepBackward 後 status=Paused
+#   TC-S20-03: Live ↔ Replay toggle 10 連打 → アプリ応答維持（D1 版）
+#
+# 仕様根拠:
+#   docs/replay_header.md §8 — 速度ボタン連打耐性, §4 — Live/Replay toggle 安定性（TachibanaSpot D1 版）
+#
+# フィクスチャ: TachibanaSpot:7203 D1, Tachibana セッション必須（DEV AUTO-LOGIN）
+#   ビルド: cargo build（debug）
+#   前提条件: DEV_USER_ID / DEV_PASSWORD 環境変数設定済み
 set -euo pipefail
 source "$(dirname "$0")/common_helpers.sh"
 
@@ -18,42 +27,7 @@ echo "=== S20: UI操作中の Replay 耐性テスト（TachibanaSpot:7203 D1）=
 backup_state
 trap 'stop_app; restore_state' EXIT ERR
 
-tachibana_replay_setup() {
-  local start=$1 end=$2
-  cat > "$DATA_DIR/saved-state.json" <<HEREDOC
-{
-  "layout_manager":{"layouts":[{"name":"Test-D1","dashboard":{"pane":{
-    "KlineChart":{
-      "layout":{"splits":[0.78],"autoscale":"FitToVisible"},"kind":"Candles",
-      "stream_type":[{"Kline":{"ticker":"TachibanaSpot:7203","timeframe":"D1"}}],
-      "settings":{"tick_multiply":null,"visual_config":null,"selected_basis":{"Time":"D1"}},
-      "indicators":["Volume"],"link_group":"A"
-    }
-  },"popout":[]}}],"active_layout":"Test-D1"},
-  "timezone":"UTC","trade_fetch_enabled":false,"size_in_quote_ccy":"Base"
-}
-HEREDOC
-  start_app
-  # DEV AUTO-LOGIN で Tachibana セッションが確立されるまで待機
-  echo "  waiting for Tachibana session (DEV AUTO-LOGIN)..."
-  if ! wait_tachibana_session 120; then
-    echo "  ERROR: Tachibana session not established after 120s"
-    return 1
-  fi
-  echo "  Tachibana session established"
-  # ペインの D1 kline データがフェッチ完了するまで待機
-  local pane_id
-  pane_id=$(node -e "const ps=(JSON.parse(process.argv[1]).panes||[]); console.log(ps[0]?ps[0].id:'');" \
-    "$(curl -s "$API/pane/list")")
-  if [ -n "$pane_id" ]; then
-    echo "  waiting for D1 klines (streams_ready)..."
-    wait_for_streams_ready "$pane_id" 120 || echo "  WARN: streams_ready timeout (continuing)"
-  fi
-  curl -s -X POST "$API/replay/toggle" > /dev/null
-  curl -s -X POST "$API/replay/play" \
-    -H "Content-Type: application/json" \
-    -d "{\"start\":\"$start\",\"end\":\"$end\"}" > /dev/null
-}
+# tachibana_replay_setup は common_helpers.sh に定義済み
 
 # ── TC-S20-01: 速度ボタン連打 ─────────────────────────────────────────────
 # D1 は 1x 速度で 100ms/bar。speed 20 連打（~2 秒） + 確認の間も Playing を維持するため

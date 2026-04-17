@@ -1,5 +1,12 @@
 # リプレイ機能 仕様書
 
+> **関連ドキュメント**:
+> | 知りたいこと | 参照先 |
+> |---|---|
+> | 注文パネル・仮想約定エンジンの型定義・UI 設計 | [order.md](order.md) |
+> | 立花証券 API プロトコル・認証・EVENT I/F | [tachibana.md](tachibana.md) |
+> | 立花証券リプレイ固有の設計判断（なぜ D1 のみか等） | [tachibana.md §8](tachibana.md#8-リプレイ対応の設計判断) |
+
 **最終更新**: 2026-04-16
 **対象バージョン**: `sasa/virtual` ブランチ (Phase 1〜8 + Tachibana Phase 1〜3 + R3 アーキテクチャ刷新 + Fixture 直接起動 + Auto-play タイムアウト廃止 + R4-1 Dead Code 除去 + R4-2 フィールド非公開化 + R4-5 テストヘルパー共通化 + R4-3 ReplaySession State Machine 導入 + R4-4 ReplayMessage 責務分割 + P1 seek_to 統一 + P2 play_with_range 追加 + Play リセット時の speed 引き継ぎ + **仮想約定エンジン（VirtualExchangeEngine）** 完了)
 **関連ドキュメント**:
@@ -777,6 +784,7 @@ REPLAY モード専用。LIVE モード時は 400 を返す。
 |---|---|---|---|
 | POST | `/api/replay/order` | `VirtualOrderRequest` (下記参照) | `{"order_id": "<uuid>", "status": "pending"}` |
 | GET | `/api/replay/portfolio` | — | `PortfolioSnapshot` (下記参照) |
+| GET | `/api/replay/orders` | — | `VirtualOrder[]` (下記参照) |
 | GET | `/api/replay/state` | — | `{"current_time_ms": <u64>, "not_implemented": true}` ※骨格のみ |
 
 **`VirtualOrderRequest` リクエストボディ**:
@@ -832,6 +840,7 @@ REPLAY モード専用。LIVE モード時は 400 を返す。
 | メソッド | パス | リクエストボディ | 用途 |
 |---|---|---|---|
 | POST | `/api/sidebar/select-ticker` | `{"pane_id": "<uuid>", "ticker": "...", "kind": "..." or null}` | Sidebar::TickerSelected 経路の再現（E2E テスト用）|
+| POST | `/api/sidebar/open-order-pane` | `{"kind": "OrderEntry"\|"OrderList"\|"BuyingPower"}` | 注文ペインを開く（E2E テスト用）|
 
 #### 通知 (`/api/notification/*`)
 
@@ -928,6 +937,43 @@ pub struct ReplayStatus {
 | `closed_positions` | array | クローズ済みポジション一覧 |
 
 `side` は `"Long"` \| `"Short"`。seek リセット後は全フィールドが初期値に戻る。
+
+#### 仮想注文一覧 (`GET /api/replay/orders`)
+
+```json
+[
+  {
+    "order_id": "<uuid>",
+    "ticker": "BTCUSDT",
+    "side": "Long",
+    "qty": 0.1,
+    "order_type": "Market",
+    "placed_time_ms": 1743492600000,
+    "status": "Pending"
+  },
+  {
+    "order_id": "<uuid>",
+    "ticker": "BTCUSDT",
+    "side": "Short",
+    "qty": 0.5,
+    "order_type": { "Limit": { "price": 92000.0 } },
+    "placed_time_ms": 1743492700000,
+    "status": { "Filled": { "fill_price": 91950.0, "fill_time_ms": 1743492800000 } }
+  }
+]
+```
+
+| フィールド | 型 | 説明 |
+|---|---|---|
+| `order_id` | string | UUID |
+| `ticker` | string | 銘柄コード |
+| `side` | string | `"Long"` \| `"Short"` |
+| `qty` | number | 注文数量 |
+| `order_type` | string \| object | `"Market"` または `{"Limit": {"price": <f64>}}` |
+| `placed_time_ms` | number | 注文登録時刻（Unix ms）。現状は `0` のことがある（Phase 2 で `replay.current_time_ms()` に修正予定）|
+| `status` | string \| object | `"Pending"` \| `"Cancelled"` \| `{"Filled": {"fill_price": <f64>, "fill_time_ms": <u64>}}` |
+
+> **注意**: リクエスト（`POST /api/replay/order`）の `side` は `"buy"`/`"sell"`（小文字）だが、レスポンスの `side` は内部 `PositionSide` enum のシリアライズ値（`"Long"`/`"Short"`）になる。
 
 #### ペインリスト (`GET /api/pane/list`)
 
@@ -1110,8 +1156,8 @@ curl -X POST http://127.0.0.1:9876/api/app/save
 - `src/replay/dispatcher.rs`: `dispatch_tick` のスライス抽出 / Waiting 検出 / 終端判定
 - `src/replay/testutil.rs`: テストヘルパー（`#[cfg(test)]`）— `dummy_trade` / `dummy_kline` / `trade_stream` / `kline_stream`
 - `src/replay/loader.rs`: `EventStore` 直接操作で loader 動作を検証
-- `src/replay/virtual_exchange/order_book.rs`: `VirtualOrderBook` ユニットテスト 7 件（成行・指値買い・指値売り・未達・往復PnL・リセット・ticker 不一致）
-- `src/replay/virtual_exchange/portfolio.rs`: `VirtualPortfolio` ユニットテスト 4 件（ロング未実現・ショート未実現・実現・スナップショット）
+- `src/replay/virtual_exchange/order_book.rs`: `VirtualOrderBook` ユニットテスト 13 件（成行・指値買い・指値売り・未達・往復PnL・リセット・ticker 不一致・Sell→Long ネットアウト・Long なし→Short 新規・実現損益（利益/損失）・cash round trip（利益/損失））
+- `src/replay/virtual_exchange/portfolio.rs`: `VirtualPortfolio` ユニットテスト 12 件（Long/Short open 時の cash deduction/credit・Long/Short close 時の cash 返還/回収・未実現PnL（Long/Short）・実現PnL・スナップショット・oldest_open_long_order_id 系 4 件）
 - `src/chart/kline.rs`: `ingest_historical_klines` / `reset_for_seek`
 - `src/screen/dashboard.rs`: `all_panes_have_ready_streams` の true/false 条件
 - `src/replay_api.rs`: ルーター/パーサーテスト

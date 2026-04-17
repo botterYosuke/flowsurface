@@ -320,10 +320,7 @@ impl OrderEntryPanel {
                 let prev_side = self.side;
                 self.side = side;
                 // 売りに切り替えたとき保有株数を取得
-                if side == Side::Sell
-                    && prev_side != Side::Sell
-                    && !self.issue_code.is_empty()
-                {
+                if side == Side::Sell && prev_side != Side::Sell && !self.issue_code.is_empty() {
                     return Some(Action::FetchHoldings {
                         issue_code: self.issue_code.clone(),
                     });
@@ -358,18 +355,16 @@ impl OrderEntryPanel {
             Message::ConfirmCancelled => {
                 self.confirm_modal = false;
             }
-            Message::Submitted => {
-                match self.build_request() {
-                    Ok(req) => {
-                        self.confirm_modal = false;
-                        self.loading = true;
-                        return Some(Action::Submit(Box::new(req)));
-                    }
-                    Err(e) => {
-                        self.last_result = Some(Err(e));
-                    }
+            Message::Submitted => match self.build_request() {
+                Ok(req) => {
+                    self.confirm_modal = false;
+                    self.loading = true;
+                    return Some(Action::Submit(Box::new(req)));
                 }
-            }
+                Err(e) => {
+                    self.last_result = Some(Err(e));
+                }
+            },
             Message::OrderCompleted(result) => {
                 self.loading = false;
                 // 成功後にパスワードをクリア（セキュリティ）
@@ -481,10 +476,16 @@ impl OrderEntryPanel {
                 .size(13)
                 .width(iced::Length::Fixed(80.0));
             let inc_btn = button(text("▲").size(12)).on_press(Message::PriceIncrementTick);
-            row![text("価格: ").size(13), price_type_picker, dec_btn, price_input, inc_btn]
-                .spacing(4)
-                .align_y(Alignment::Center)
-                .into()
+            row![
+                text("価格: ").size(13),
+                price_type_picker,
+                dec_btn,
+                price_input,
+                inc_btn
+            ]
+            .spacing(4)
+            .align_y(Alignment::Center)
+            .into()
         } else {
             row![text("価格: ").size(13), price_type_picker]
                 .spacing(4)
@@ -535,7 +536,8 @@ impl OrderEntryPanel {
                     .color(crate::style::side_color(&side_str, theme)),
                 text(format!(" {}株 {}", self.qty, price_str)).size(12),
             ];
-            let cancel_btn = button(text("キャンセル").size(13)).on_press(Message::ConfirmCancelled);
+            let cancel_btn =
+                button(text("キャンセル").size(13)).on_press(Message::ConfirmCancelled);
             let submit_btn = button(text("注文を発注する").size(13)).on_press(Message::Submitted);
             column![
                 text("注文確認").size(14),
@@ -572,17 +574,25 @@ impl OrderEntryPanel {
         let mut col = column![
             side_tabs,
             issue_label,
-            row![text("口座: ").size(13), account_picker].align_y(Alignment::Center).spacing(4),
-            row![text("現物/信用: ").size(13), cash_margin_picker].align_y(Alignment::Center).spacing(4),
+            row![text("口座: ").size(13), account_picker]
+                .align_y(Alignment::Center)
+                .spacing(4),
+            row![text("現物/信用: ").size(13), cash_margin_picker]
+                .align_y(Alignment::Center)
+                .spacing(4),
             qty_row,
             price_row,
-            row![text("期日: ").size(13), expire_picker].align_y(Alignment::Center).spacing(4),
+            row![text("期日: ").size(13), expire_picker]
+                .align_y(Alignment::Center)
+                .spacing(4),
         ]
         .spacing(8);
 
         if !virtual_mode {
             col = col.push(
-                row![text("パスワード: ").size(13), password_input].align_y(Alignment::Center).spacing(4),
+                row![text("パスワード: ").size(13), password_input]
+                    .align_y(Alignment::Center)
+                    .spacing(4),
             );
         }
 

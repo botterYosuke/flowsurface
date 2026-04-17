@@ -34,7 +34,6 @@ impl<T> SortedVec<T> {
     pub fn len(&self) -> usize {
         self.data.len()
     }
-
 }
 
 impl SortedVec<Trade> {
@@ -130,7 +129,6 @@ impl EventStore {
     pub fn trade_count(&self, stream: &StreamKind) -> usize {
         self.trades.get(stream).map_or(0, |sv| sv.len())
     }
-
 }
 
 #[cfg(test)]

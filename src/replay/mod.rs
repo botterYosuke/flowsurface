@@ -3,9 +3,9 @@ pub mod controller;
 pub mod dispatcher;
 pub mod loader;
 pub mod store;
-pub mod virtual_exchange;
 #[cfg(test)]
 pub(crate) mod testutil;
+pub mod virtual_exchange;
 
 use std::collections::HashSet;
 
@@ -171,7 +171,10 @@ pub enum ReplayLoadEvent {
 #[derive(Debug, Clone)]
 pub enum ReplaySystemEvent {
     SyncReplayBuffers,
-    ReloadKlineStream { old_stream: Option<StreamKind>, new_stream: StreamKind },
+    ReloadKlineStream {
+        old_stream: Option<StreamKind>,
+        new_stream: StreamKind,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -861,8 +864,14 @@ mod tests {
             },
             ..Default::default()
         };
-        assert!(state.is_loading(), "Loading variant → is_loading() must be true");
-        assert!(!state.is_playing(), "Loading variant → is_playing() must be false");
+        assert!(
+            state.is_loading(),
+            "Loading variant → is_loading() must be true"
+        );
+        assert!(
+            !state.is_playing(),
+            "Loading variant → is_playing() must be false"
+        );
     }
 
     /// ReplaySession::Active の active_streams に Kline ストリームのみ含まれること。
@@ -897,7 +906,11 @@ mod tests {
         let active_streams: HashSet<StreamKind> = kline_targets
             .iter()
             .filter_map(|(_, s)| {
-                if matches!(s, StreamKind::Kline { .. }) { Some(*s) } else { None }
+                if matches!(s, StreamKind::Kline { .. }) {
+                    Some(*s)
+                } else {
+                    None
+                }
             })
             .collect();
 

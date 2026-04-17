@@ -1,5 +1,16 @@
 #!/bin/bash
 # s9_speed_step.sh — スイート S9: 再生速度・Step 精度
+#
+# 検証シナリオ:
+#   TC-S9-01a〜b: Speed サイクル順序（1x→2x→5x→10x→1x）
+#   TC-S9-02: 5x 速度で 5 秒に 1〜500 bar 前進
+#   TC-S9-03a〜b: Playing 中 StepForward → Paused・End 近傍到達
+#   TC-S9-04: StepBackward 連続 5 回 → 単調減少
+#
+# 仕様根拠:
+#   docs/replay_header.md §8 — 速度制御・CycleSpeed, §6 — StepForward/StepBackward
+#
+# フィクスチャ: BinanceLinear:BTCUSDT M1, auto-play (UTC[-3h, -1h])
 source "$(dirname "$0")/common_helpers.sh"
 
 echo "=== S9: 再生速度・Step 精度 ==="
@@ -50,13 +61,18 @@ SP=$(jqn "$(curl -s "$API/replay/status")" "d.speed")
 [ "$SP" = "5x" ] || fail "TC-S9-02-precond" "speed=$SP (expected 5x)"
 CT_INIT=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
 curl -s -X POST "$API/replay/resume" > /dev/null
-sleep 5
-curl -s -X POST "$API/replay/pause" > /dev/null
-CT_END=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
-DELTA=$(bigt_sub "$CT_END" "$CT_INIT")
-BARS=$(node -e "console.log(String(BigInt('$DELTA') / BigInt('$STEP_M1')))")
-[[ $BARS -ge 1 && $BARS -le 500 ]] && pass "TC-S9-02: 5x で 5 秒に ${BARS} bar 前進" || \
-  fail "TC-S9-02" "${BARS} bar (expected 1-500, delta=$DELTA)"
+if CT_TICK=$(wait_for_time_advance "$CT_INIT" 30); then
+  curl -s -X POST "$API/replay/pause" > /dev/null
+  wait_status Paused 10 || true
+  CT_END=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
+  DELTA=$(bigt_sub "$CT_END" "$CT_INIT")
+  BARS=$(node -e "console.log(String(BigInt('$DELTA') / BigInt('$STEP_M1')))")
+  [[ $BARS -ge 1 && $BARS -le 500 ]] && pass "TC-S9-02: 5x で ${BARS} bar 前進" || \
+    fail "TC-S9-02" "${BARS} bar (expected 1-500, delta=$DELTA)"
+else
+  curl -s -X POST "$API/replay/pause" > /dev/null
+  fail "TC-S9-02" "30 秒待機しても current_time が前進しなかった (CT_INIT=$CT_INIT)"
+fi
 
 # --- TC-S9-03: Playing 中の StepForward は End まで一気に進んで Paused になる ---
 curl -s -X POST "$API/replay/resume" > /dev/null

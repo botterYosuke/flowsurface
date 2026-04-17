@@ -1,6 +1,17 @@
 #!/usr/bin/env bash
 # s11_bar_step_discrete.sh — スイート S11: バーステップ離散化
-# current_time の変化量が timeframe の倍数になることを確認する
+#
+# 検証シナリオ:
+#   TC-S11-01: M1 10x 再生中 delta が 60000ms の倍数
+#   TC-S11-02-1〜3: M1 StepForward × 3、各 delta = 60000ms
+#   TC-S11-03: M5 StepForward delta = 300000ms
+#   TC-S11-04: H1 StepForward delta = 3600000ms
+#   TC-S11-05: M1+M5 混在 StepForward → min TF (M1=60000ms) が優先
+#
+# 仕様根拠:
+#   docs/replay_header.md §6.2 — バーステップ離散化（step_size = min timeframe）
+#
+# フィクスチャ: BinanceLinear:BTCUSDT M1 / M5 / H1 / M1+ETHUSDT M5 混在（4パターン）
 set -euo pipefail
 source "$(dirname "$0")/common_helpers.sh"
 
@@ -128,6 +139,35 @@ else
   [ "$DELTA" = "60000" ] \
     && pass "TC-S11-05: M1+M5 混在 StepForward delta=60000ms（M1 優先）" \
     || fail "TC-S11-05" "delta=$DELTA (expected 60000, M1 優先のはず)"
+fi
+
+# ── TC-S11-06: M1 StepForward 10 連続 → 毎回 delta が厳密に 60000ms ─────────
+# TC-S11-02 は倍数チェック（2 バー同時前進でも pass）。本 TC は厳密な exact match を検証する。
+setup_single_pane "BinanceLinear:BTCUSDT" "M1" "$(utc_offset -3)" "$(utc_offset -1)"
+start_app
+if ! wait_playing 30; then
+  fail "TC-S11-06-pre" "Playing 到達せず"
+else
+  curl -s -X POST "$API/replay/pause" > /dev/null
+  if ! wait_status Paused 10; then
+    fail "TC-S11-06-pre" "Paused に遷移せず"
+  else
+    MONOTONE_OK=true
+    for i in $(seq 1 10); do
+      TB=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
+      curl -s -X POST "$API/replay/step-forward" > /dev/null
+      sleep 0.5
+      wait_status Paused 10 || true
+      TA=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
+      DELTA=$(node -e "console.log(String(BigInt('$TA') - BigInt('$TB')))")
+      if [ "$DELTA" = "60000" ]; then
+        pass "TC-S11-06-$i: StepForward #$i delta=60000ms（exact）"
+      else
+        fail "TC-S11-06-$i" "delta=$DELTA (expected exactly 60000 — 複数バー同時前進の疑い)"
+        MONOTONE_OK=false
+      fi
+    done
+  fi
 fi
 
 print_summary

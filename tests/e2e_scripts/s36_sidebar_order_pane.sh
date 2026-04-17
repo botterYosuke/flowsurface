@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
 # s36_sidebar_order_pane.sh — S36: /api/sidebar/open-order-pane による注文ペイン分割テスト
 #
-# シナリオ:
-#   BinanceLinear:BTCUSDT M1 の単一ペインで起動後、
-#   POST /api/sidebar/open-order-pane で OrderEntry / OrderList / BuyingPower を
-#   順に開き、各ペインが正しく作成されることを検証する。
-#
+# 検証シナリオ:
 #   TC-A: {"kind":"OrderEntry"} → ペイン数 2、新ペインの type = "Order Entry"
 #   TC-B: {"kind":"OrderList"}  → ペイン数 3、新ペインの type = "Order List"
 #   TC-C: {"kind":"BuyingPower"} → ペイン数 4、新ペインの type = "Buying Power"
 #   TC-D: エラー通知 0 件
 #   TC-E: 元ペイン (PANE0) の type が変わっていない（"Candlestick Chart" のまま）
+#
+# 仕様根拠:
+#   docs/order_windows.md §サイドバー注文ボタン — open-order-pane API
+#
+# フィクスチャ: BinanceLinear:BTCUSDT M1, auto-play (UTC[-3h, -1h])
 set -euo pipefail
 source "$(dirname "$0")/common_helpers.sh"
 

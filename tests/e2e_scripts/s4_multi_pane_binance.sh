@@ -1,5 +1,17 @@
 #!/bin/bash
 # s4_multi_pane_binance.sh — スイート S4: マルチペイン・Binance 混在
+#
+# 検証シナリオ:
+#   TC-S4-01: BTCUSDT M1 + ETHUSDT M1 + BTCUSDT Trades（3ペイン）で 15s 以内 Playing
+#   TC-S4-02: マルチペインで 1x 3秒に 1〜100 bar 前進
+#   TC-S4-03: 10秒後も Playing 継続・1〜300 bar 前進
+#   TC-S4-04: Pause → StepForward = min tf (M1) = 60000ms
+#
+# 仕様根拠:
+#   docs/replay_header.md §7 — マルチストリーム同期・min_step_size
+#
+# フィクスチャ: BinanceLinear:BTCUSDT M1 + ETHUSDT M1 + Trades（3ペイン）
+#   Live モード起動 → 手動 toggle/play
 source "$(dirname "$0")/common_helpers.sh"
 
 echo "=== S4: マルチペイン Binance 混在 ==="

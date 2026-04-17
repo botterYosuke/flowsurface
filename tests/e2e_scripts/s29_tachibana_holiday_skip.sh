@@ -2,24 +2,21 @@
 # s29_tachibana_holiday_skip.sh — S29: Tachibana D1 StepBackward が休場日（土日）をスキップすること
 #
 # 検証シナリオ（仕様 §10.1「離散ステップ」休場日スキップ）:
-#
-#   Tachibana の EventStore には土日祝の kline が存在しない。
-#   StepBackward は klines_in(0..current_time) の最大 time を検索するため、
-#   取引日（月〜金）にのみ landing する = 自然に休場日スキップが実現される。
-#
 #   TC-A: Paused 状態から StepForward で 2025-01-10 (金) 付近まで進める
 #   TC-B: 金曜から StepForward 1 回 → 2025-01-11 (土, kline なし) に current_time が移動
 #   TC-C: 土曜 current_time から StepBackward → 2025-01-10 (金) に戻る（休場日スキップ）
 #   TC-D: 金曜から StepBackward → 2025-01-09 (木) に戻る（通常ステップ）
-#   TC-E: StepBackward 連続 5 回 → 毎回取引日に着地すること（土日に止まらない）
+#   TC-E: StepBackward 連続 5 回 → 毎回取引日に着地（土日に止まらない）
 #
-# 前提条件:
-#   - cargo build (debug) ビルドが必要
-#   - DEV_USER_ID / DEV_PASSWORD 環境変数でセッション確立
-#   - セッションなしの場合は全テストを SKIP して exit 0
+# 仕様根拠:
+#   docs/replay_header.md §10.1 — 離散ステップ・休場日スキップ
+#   Tachibana の EventStore には土日祝の kline が存在しない。
+#   StepBackward は klines_in(0..current_time) の最大 time を検索するため自然に休場日スキップ。
 #
-# フィクスチャ: TachibanaSpot:7203 D1, 2025-01-07 00:00 〜 2025-01-15 00:00 (UTC)
-#   取引日: 01-07(火), 01-08(水), 01-09(木), 01-10(金), [01-11 土, 01-12 日], 01-13(月), 01-14(火), 01-15(水)
+# フィクスチャ: TachibanaSpot:7203 D1, 2025-01-07 00:00 〜 2025-01-15 00:00 (UTC)（固定日付）
+#   取引日: 01-07(火), 01-08(水), 01-09(木), 01-10(金), [01-11 土, 01-12 日], 01-13(月), 01-14(火)
+#   ビルド: cargo build（debug）
+#   前提条件: DEV_USER_ID / DEV_PASSWORD 環境変数設定済み（未設定時は全 TC を SKIP）
 set -euo pipefail
 source "$(dirname "$0")/common_helpers.sh"
 

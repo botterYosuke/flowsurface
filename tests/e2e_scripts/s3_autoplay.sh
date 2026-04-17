@@ -1,5 +1,17 @@
 #!/bin/bash
 # s3_autoplay.sh — スイート S3: 起動時 Auto-play
+#
+# 検証シナリオ:
+#   TC-S3-01: saved-state に range 設定済み → 手動操作なしで Playing 到達（30s 以内）
+#   TC-S3-02: current_time が range 内
+#   TC-S3-03: mode=Replay
+#   TC-S3-04: Pause → StepForward +60000ms
+#   TC-S3-05a〜c: range 未設定 → auto-play しない・status=null・error toast なし
+#
+# 仕様根拠:
+#   docs/replay_header.md §5.1 — auto-play（pending_auto_play フラグ）
+#
+# フィクスチャ: BinanceLinear:BTCUSDT M1, replay.range_start/end を saved-state に埋め込んで起動
 source "$(dirname "$0")/common_helpers.sh"
 
 echo "=== S3: Auto-play (Fixture 直接起動) ==="

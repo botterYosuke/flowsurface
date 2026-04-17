@@ -1,5 +1,12 @@
 # 立花証券 e支店 API 統合仕様書
 
+> **関連ドキュメント**:
+> | 知りたいこと | 参照先 |
+> |---|---|
+> | リプレイエンジン全体（状態モデル・HTTP API） | [replay.md](replay.md) |
+> | 注文パネル・仮想約定エンジンの UI/型設計 | [order.md](order.md) |
+> | 立花証券リプレイ固有の設計判断 | [本書 §8](#8-リプレイ対応の設計判断) |
+
 **最終更新**: 2026-04-16
 **対象コード**: `exchange/src/adapter/tachibana.rs` および関連ファイル
 
@@ -339,35 +346,6 @@ p_1_QOV, p_1_QUV, p_1_VWAP
 | `EVENT_HTTP_URL` | `RwLock<Option<String>>` | HTTP Long-polling URL |
 | `EVENT_WS_URL` | `RwLock<Option<String>>` | WebSocket URL（将来用） |
 
-### 3.10 注文機能 (`src/connector/order.rs`)
-
-`src/connector/auth.rs` / `fetcher.rs` と同じパターンで、`exchange` クレートの注文 API 関数をラップする。`Task::perform` から直接呼び出せるよう、引数にセッション・クライアントを取らず `get_session()` で内部取得する。
-
-| 関数 | 用途 |
-|------|------|
-| `submit_new_order(req)` | 新規注文（`NewOrderRequest` → `NewOrderResponse`） |
-| `submit_correct_order(req)` | 訂正注文（`CorrectOrderRequest` → `ModifyOrderResponse`） |
-| `submit_cancel_order(req)` | 取消注文（`CancelOrderRequest` → `ModifyOrderResponse`） |
-| `fetch_orders(eig_day)` | 注文一覧取得 |
-| `fetch_order_detail(order_num, eig_day)` | 約定明細取得 |
-| `fetch_buying_power()` | 現物余力・信用余力を **並列取得** (`tokio::join!`) して返す |
-| `fetch_holdings(issue_code)` | 売付可能株数取得（全数量ボタン用） |
-
-### 3.11 注文パネル (`src/screen/dashboard/panel/`)
-
-| ファイル | 型 | 概要 |
-|---------|-----|------|
-| `order_entry.rs` | `OrderEntryPanel` | 売買区分・価格種別・口座区分・現物/信用・数量入力・発注ボタン。`build_request()` で `NewOrderRequest` を構築。 |
-| `order_list.rs` | `OrderListPanel` | 注文一覧の表示・取消・訂正。`newly_executed()` で約定済み注文を通知。 |
-| `buying_power.rs` | `BuyingPowerPanel` | 現物買付余力・信用余力を表示。 |
-
-**注文リクエストの注意点**:
-- `second_password`（発注パスワード）は `Debug` を手動実装し `[REDACTED]` でマスク
-- `side`: `"1"` = 売、`"3"` = 買
-- `cash_margin`: `"0"` = 現物、`"2"` = 信用新規(制度6ヶ月)、`"4"` = 信用返済(制度)、`"6"` = 信用新規(一般)、`"8"` = 信用返済(一般)
-- `condition`: `"0"` = 指定なし、`"2"` = 寄付、`"4"` = 引け、`"6"` = 不成
-- `price`: `"0"` = 成行、数値文字列 = 指値
-
 ### 3.4 ストリーム接続 (`exchange/src/connect.rs`)
 
 | ストリーム | Tachibana の実装 |
@@ -430,6 +408,35 @@ keyring 設定（`data/src/config/tachibana.rs`）:
 - `fetch_ticker_stats(Tachibana)`: 空の HashMap を返す（未実装）
 - `fetch_klines(Tachibana)`: `InvalidRequest` エラー（`fetch_daily_history()` を使用）
 - `supports_kline_timeframe(Tachibana)`: `Timeframe::D1` のみ
+
+### 3.10 注文機能 (`src/connector/order.rs`)
+
+`src/connector/auth.rs` / `fetcher.rs` と同じパターンで、`exchange` クレートの注文 API 関数をラップする。`Task::perform` から直接呼び出せるよう、引数にセッション・クライアントを取らず `get_session()` で内部取得する。詳細な型定義・UI 設計は [docs/spec/order.md](order.md) を参照。
+
+| 関数 | 用途 |
+|------|------|
+| `submit_new_order(req)` | 新規注文（`NewOrderRequest` → `NewOrderResponse`） |
+| `submit_correct_order(req)` | 訂正注文（`CorrectOrderRequest` → `ModifyOrderResponse`） |
+| `submit_cancel_order(req)` | 取消注文（`CancelOrderRequest` → `ModifyOrderResponse`） |
+| `fetch_orders(eig_day)` | 注文一覧取得 |
+| `fetch_order_detail(order_num, eig_day)` | 約定明細取得 |
+| `fetch_buying_power()` | 現物余力・信用余力を **並列取得** (`tokio::join!`) して返す |
+| `fetch_holdings(issue_code)` | 売付可能株数取得（全数量ボタン用） |
+
+### 3.11 注文パネル (`src/screen/dashboard/panel/`)
+
+| ファイル | 型 | 概要 |
+|---------|-----|------|
+| `order_entry.rs` | `OrderEntryPanel` | 売買区分・価格種別・口座区分・現物/信用・数量入力・発注ボタン。`build_request()` で `NewOrderRequest` を構築。 |
+| `order_list.rs` | `OrderListPanel` | 注文一覧の表示・取消・訂正。`newly_executed()` で約定済み注文を通知。 |
+| `buying_power.rs` | `BuyingPowerPanel` | 現物買付余力・信用余力を表示。 |
+
+**注文リクエストの注意点**:
+- `second_password`（発注パスワード）は `Debug` を手動実装し `[REDACTED]` でマスク
+- `side`: `"1"` = 売、`"3"` = 買（立花証券 API フィールド値。HTTP API の `"buy"`/`"sell"` とは異なる）
+- `cash_margin`: `"0"` = 現物、`"2"` = 信用新規(制度6ヶ月)、`"4"` = 信用返済(制度)、`"6"` = 信用新規(一般)、`"8"` = 信用返済(一般)
+- `condition`: `"0"` = 指定なし、`"2"` = 寄付、`"4"` = 引け、`"6"` = 不成
+- `price`: `"0"` = 成行、数値文字列 = 指値
 
 ---
 
@@ -552,7 +559,7 @@ Shift-JIS リードバイト（`0x81..=0x9F | 0xE0..=0xEF`）を検出したら 
 
 ## 8. リプレイ対応の設計判断
 
-立花証券のリプレイサポート（D1 のみ）は、他取引所とは異なる 4 つの API 制約から独自の設計判断を伴っている。本節はその意思決定の背景を記録する。実装の仕様と操作手順は [docs/replay_header.md](replay_header.md) §10 を参照。
+立花証券のリプレイサポート（D1 のみ）は、他取引所とは異なる 4 つの API 制約から独自の設計判断を伴っている。本節はその意思決定の背景を記録する。実装の仕様と操作手順は [docs/spec/replay.md](spec/replay.md) §10「取引所別対応状況」を参照。
 
 ### 8.1 なぜ D1 のみ対応か
 
@@ -592,7 +599,9 @@ Shift-JIS リードバイト（`0x81..=0x9F | 0xE0..=0xEF`）を検出したら 
 - 1x → 1 秒 / 本
 - 10x → 100 ms / 本
 
-で D1 が進行する。詳細なアルゴリズムと代替案の比較は [docs/replay_header.md](replay_header.md) §7.1 / §15.2 を参照。
+で D1 が進行する。現在の `StepClock` ベースの設計については [docs/spec/replay.md](spec/replay.md) §7.1 / §15 を参照。
+
+> **アーキテクチャ注記（R3 以降）**: 本節で述べた「粗補正モード（`COARSE_CUTOFF_MS = 3_600_000ms` / `COARSE_BAR_MS = 1_000ms`）」および `TradeBuffer::drain_all_trade_buffers()` は R3 アーキテクチャ刷新（[docs/spec/replay.md §15](spec/replay.md#15-付録-実装履歴と設計判断) 参照）で廃止済み。現在は `StepClock + EventStore + dispatch_tick` による統一ステップ制御に置き換えられており、D1 も `BASE_STEP_DELAY_MS = 100ms`（1 ステップ = 1 本）で進行する。本節は「なぜ粗補正が必要だったか」という設計判断の背景として残している。
 
 **立花証券特有の副次要件**: `drain_all_trade_buffers()` が `pending_trade_streams` を除外するスキップ条件を持つため、trade_buffers が空の Tachibana ケースでは drain が no-op になり、無駄な iteration が発生しない。一方で **Binance の D1 kline + Heatmap ペイン混在** ケースでは drain が必要なので、単純な「D1 なら drain スキップ」ではなく trade_buffers の空判定ベースにした経緯がある（Phase 3 実装判断）。
 
@@ -602,7 +611,7 @@ Shift-JIS リードバイト（`0x81..=0x9F | 0xE0..=0xEF`）を検出したら 
 
 Phase 6 で `process_tick()` による統一経路へ移行し、`is_all_d1_klines()` / `advance_d1` / `process_d1_tick` を削除した。統一経路は `delta_to_next` ベースの threshold 切替（§8.4）で D1 要件を満たしつつ、M1+D1 混在も自然に扱える。
 
-この設計変更の背景と代替案の比較は [docs/replay_header.md](replay_header.md) §15.2 を参照。
+この設計変更の背景と代替案の比較は [docs/spec/replay.md §15](spec/replay.md#15-付録-実装履歴と設計判断) を参照。
 
 ### 8.6 日足自動再生の UX 判断
 

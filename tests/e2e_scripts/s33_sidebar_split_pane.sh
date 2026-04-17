@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
 # s33_sidebar_split_pane.sh — S33: sidebar/select-ticker + kind 指定によるペイン分割テスト
 #
-# シナリオ:
-#   BinanceLinear:BTCUSDT M1 の単一ペインで起動後、
-#   POST /api/sidebar/select-ticker に kind=KlineChart を付けて
-#   ETHUSDT・SOLUSDT を選択し、フォーカスペインを上書きせず
-#   Horizontal Split して新ペインに表示する新フローを検証する。
-#
+# 検証シナリオ:
 #   TC-A: kind=KlineChart で ETHUSDT を選択 → ペイン数が 2 になる
 #   TC-B: 新ペインの ticker が ETHUSDT である
 #   TC-C: 元ペインの ticker は BTCUSDT のまま（上書きされていない）
 #   TC-D: エラー通知が出ていない
 #   TC-E: 2 回目の split（SOLUSDT, kind=KlineChart）→ ペイン数が 3 になる
+#
+# 仕様根拠:
+#   docs/replay_header.md §9.1 — Sidebar::TickerSelected + kind 指定によるペイン分割フロー
+#   kind=KlineChart → init_focused_pane 経路（フォーカスペインを上書きせず Horizontal Split）
+#
+# フィクスチャ: BinanceLinear:BTCUSDT M1, auto-play (UTC[-3h, -1h])
 set -euo pipefail
 source "$(dirname "$0")/common_helpers.sh"
 
