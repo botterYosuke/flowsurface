@@ -321,7 +321,7 @@ if self.state.is_playing() {
 
 #### E2E テスト追加
 
-- ✅ `tests/e2e_scripts/s26_ticker_change_after_replay_end.sh` 作成（3 TC）
+- ✅ `tests/s26_ticker_change_after_replay_end.sh` 作成（3 TC）
   - TC-A: 終端到達後に銘柄変更 → `current_time` が `start_time` にリセットされる
   - TC-B: 銘柄変更後も `status=Paused`（自動再生なし）
   - TC-C: Resume → `Playing` に遷移できる

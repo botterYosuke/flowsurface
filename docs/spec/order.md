@@ -1322,7 +1322,7 @@ pub fn margin_call_color(theme: &Theme) -> Color
 | **StepForward 時のエンジンリセット抑止** | `src/main.rs` |
 | **`synthetic_trades_at_current_time()` 合成トレード生成** | `src/replay/controller.rs` |
 | **StepForward 時の合成トレード注入・約定駆動** | `src/main.rs` |
-| **E2E スクリプト `s40_virtual_order_fill_cycle.sh`** | `tests/e2e_scripts/` |
+| **E2E スクリプト `s40_virtual_order_fill_cycle.sh`** | `tests/` |
 
 ### 未実装・残課題
 
@@ -1366,7 +1366,7 @@ pub fn margin_call_color(theme: &Theme) -> Color
 | `src/replay/controller.rs` | `current_time_ms()` + `synthetic_trades_at_current_time()` メソッド追加 |
 | `src/replay_api.rs` | `ApiCommand::VirtualExchange` と 4 エンドポイント追加（`GET /api/replay/orders` 含む） |
 | `src/main.rs` | `virtual_engine` フィールド（Arc/Mutex なし）・StepForward 合成トレード注入・StepForward リセット抑止・仮想注文ハンドラ・`OpenOrderPane` ハンドラ・`Menu::Order` アーム |
-| `tests/e2e_scripts/s40_virtual_order_fill_cycle.sh` | **新規** buy→fill→close→PnL E2E スクリプト（TC-A〜I） |
+| `tests/s40_virtual_order_fill_cycle.sh` | **新規** buy→fill→close→PnL E2E スクリプト（TC-A〜I） |
 | `data/src/config/sidebar.rs` | `Menu::Order` バリアント追加 |
 | `src/screen/dashboard/sidebar.rs` | `Message::OrderPaneSelected` / `Action::OpenOrderPane` 追加・注文ボタン・インラインパネル・相互排他ロジック |
 

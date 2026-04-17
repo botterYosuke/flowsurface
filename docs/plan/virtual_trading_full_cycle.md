@@ -192,7 +192,7 @@ order.side == Long?
 
 ### Phase B: E2E テスト S40
 
-**ファイル**: `tests/e2e_scripts/s40_virtual_order_fill_cycle.sh`
+**ファイル**: `tests/s40_virtual_order_fill_cycle.sh`
 
 **シナリオ**: Playing → Pause → 成行買い → step-forward で約定 → portfolio 確認 →  
 成行売り → step-forward で約定 → PnL 確認
@@ -364,9 +364,9 @@ DIFF_ABS=$(echo "${DIFF#-}")  # 絶対値
 |---------|---------|
 | `src/replay/virtual_exchange/portfolio.rs` | `record_open()` cash 操作、`record_close()` cash 処理変更、`oldest_open_long/short_order_id()` 追加 |
 | `src/replay/virtual_exchange/order_book.rs` | `on_tick()` に対称クローズロジック追加（sell→Long close, buy→Short close） |
-| `tests/e2e_scripts/s40_virtual_order_fill_cycle.sh` | 新規作成（成行ラウンドトリップ） |
-| `tests/e2e_scripts/s41_limit_order_round_trip.sh` | 新規作成（指値ラウンドトリップ） |
-| `tests/e2e_scripts/s42_naked_short_cycle.sh` | 新規作成（裸ショートフルサイクル） |
+| `tests/s40_virtual_order_fill_cycle.sh` | 新規作成（成行ラウンドトリップ） |
+| `tests/s41_limit_order_round_trip.sh` | 新規作成（指値ラウンドトリップ） |
+| `tests/s42_naked_short_cycle.sh` | 新規作成（裸ショートフルサイクル） |
 | `docs/plan/e2e_order_panels_replay.md` | PEND 項目を更新 |
 
 ---

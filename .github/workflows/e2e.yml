@@ -75,25 +75,25 @@ jobs:
         shell: bash
         env:
           FLOWSURFACE_EXE: ${{ github.workspace }}/target/debug/flowsurface.exe
-        run: bash tests/e2e_scripts/s1_basic_lifecycle.sh
+        run: bash tests/s1_basic_lifecycle.sh
 
       - name: "S2  Persistence"
         shell: bash
         env:
           FLOWSURFACE_EXE: ${{ github.workspace }}/target/debug/flowsurface.exe
-        run: bash tests/e2e_scripts/s2_persistence.sh
+        run: bash tests/s2_persistence.sh
 
       - name: "S3  Autoplay"
         shell: bash
         env:
           FLOWSURFACE_EXE: ${{ github.workspace }}/target/debug/flowsurface.exe
-        run: bash tests/e2e_scripts/s3_autoplay.sh
+        run: bash tests/s3_autoplay.sh
 
       - name: "S4  Multi-pane Binance"
         shell: bash
         env:
           FLOWSURFACE_EXE: ${{ github.workspace }}/target/debug/flowsurface.exe
-        run: bash tests/e2e_scripts/s4_multi_pane_binance.sh
+        run: bash tests/s4_multi_pane_binance.sh
 
       - name: "S5  Tachibana mixed (live)"
         shell: bash
@@ -101,55 +101,55 @@ jobs:
           DEV_USER_ID: ${{ secrets.DEV_USER_ID }}
           DEV_PASSWORD: ${{ secrets.DEV_PASSWORD }}
           FLOWSURFACE_EXE_DEBUG: ${{ github.workspace }}/target/debug/flowsurface.exe
-        run: bash tests/e2e_scripts/s5_tachibana_mixed.sh
+        run: bash tests/s5_tachibana_mixed.sh
 
       - name: "S6  Mixed timeframes"
         shell: bash
         env:
           FLOWSURFACE_EXE: ${{ github.workspace }}/target/debug/flowsurface.exe
-        run: bash tests/e2e_scripts/s6_mixed_timeframes.sh
+        run: bash tests/s6_mixed_timeframes.sh
 
       - name: "S7  Mid-replay pane"
         shell: bash
         env:
           FLOWSURFACE_EXE: ${{ github.workspace }}/target/debug/flowsurface.exe
-        run: bash tests/e2e_scripts/s7_mid_replay_pane.sh
+        run: bash tests/s7_mid_replay_pane.sh
 
       - name: "S8  Error boundary"
         shell: bash
         env:
           FLOWSURFACE_EXE: ${{ github.workspace }}/target/debug/flowsurface.exe
-        run: bash tests/e2e_scripts/s8_error_boundary.sh
+        run: bash tests/s8_error_boundary.sh
 
       - name: "S9  Speed & step"
         shell: bash
         env:
           FLOWSURFACE_EXE: ${{ github.workspace }}/target/debug/flowsurface.exe
-        run: bash tests/e2e_scripts/s9_speed_step.sh
+        run: bash tests/s9_speed_step.sh
 
       - name: "S10 Range end"
         shell: bash
         env:
           FLOWSURFACE_EXE: ${{ github.workspace }}/target/debug/flowsurface.exe
-        run: bash tests/e2e_scripts/s10_range_end.sh
+        run: bash tests/s10_range_end.sh
 
       - name: "S11 Bar step discrete"
         shell: bash
         env:
           FLOWSURFACE_EXE: ${{ github.workspace }}/target/debug/flowsurface.exe
-        run: bash tests/e2e_scripts/s11_bar_step_discrete.sh
+        run: bash tests/s11_bar_step_discrete.sh
 
       - name: "S12 Pre-start history"
         shell: bash
         env:
           FLOWSURFACE_EXE: ${{ github.workspace }}/target/debug/flowsurface.exe
-        run: bash tests/e2e_scripts/s12_pre_start_history.sh
+        run: bash tests/s12_pre_start_history.sh
 
       - name: "S13 Step-backward quality"
         shell: bash
         env:
           FLOWSURFACE_EXE: ${{ github.workspace }}/target/debug/flowsurface.exe
-        run: bash tests/e2e_scripts/s13_step_backward_quality.sh
+        run: bash tests/s13_step_backward_quality.sh
 
       - name: "S14 Autoplay event-driven"
         shell: bash
@@ -157,26 +157,26 @@ jobs:
           DEV_USER_ID: ${{ secrets.DEV_USER_ID }}
           DEV_PASSWORD: ${{ secrets.DEV_PASSWORD }}
           FLOWSURFACE_EXE_DEBUG: ${{ github.workspace }}/target/debug/flowsurface.exe
-        run: bash tests/e2e_scripts/s14_autoplay_event_driven.sh
+        run: bash tests/s14_autoplay_event_driven.sh
 
       # S15〜S17: chart-snapshot / 操作耐性 / エラー境界（中程度）
       - name: "S15 Chart snapshot"
         shell: bash
         env:
           FLOWSURFACE_EXE: ${{ github.workspace }}/target/debug/flowsurface.exe
-        run: bash tests/e2e_scripts/s15_chart_snapshot.sh
+        run: bash tests/s15_chart_snapshot.sh
 
       - name: "S16 Replay resilience"
         shell: bash
         env:
           FLOWSURFACE_EXE: ${{ github.workspace }}/target/debug/flowsurface.exe
-        run: bash tests/e2e_scripts/s16_replay_resilience.sh
+        run: bash tests/s16_replay_resilience.sh
 
       - name: "S17 Error boundary"
         shell: bash
         env:
           FLOWSURFACE_EXE: ${{ github.workspace }}/target/debug/flowsurface.exe
-        run: bash tests/e2e_scripts/s17_error_boundary.sh
+        run: bash tests/s17_error_boundary.sh
 
   # ──────────────────────────────────────────────────────────────────────────
   # ジョブ 2: S18 耐久テスト（手動実行のみ、~30 分）
@@ -223,7 +223,7 @@ jobs:
         shell: bash
         env:
           FLOWSURFACE_EXE: ${{ github.workspace }}/target/debug/flowsurface.exe
-        run: bash tests/e2e_scripts/s18_endurance.sh
+        run: bash tests/s18_endurance.sh
 
   # ──────────────────────────────────────────────────────────────────────────
   # ジョブ 3: S19〜S22 本番 Tachibana 認証テスト（手動実行のみ）
@@ -274,7 +274,7 @@ jobs:
           DEV_USER_ID: ${{ secrets.DEV_USER_ID }}
           DEV_PASSWORD: ${{ secrets.DEV_PASSWORD }}
           FLOWSURFACE_EXE_DEBUG: ${{ github.workspace }}/target/debug/flowsurface.exe
-        run: bash tests/e2e_scripts/s19_tachibana_chart_snapshot.sh
+        run: bash tests/s19_tachibana_chart_snapshot.sh
 
       - name: "S20 Tachibana replay resilience"
         shell: bash
@@ -282,7 +282,7 @@ jobs:
           DEV_USER_ID: ${{ secrets.DEV_USER_ID }}
           DEV_PASSWORD: ${{ secrets.DEV_PASSWORD }}
           FLOWSURFACE_EXE_DEBUG: ${{ github.workspace }}/target/debug/flowsurface.exe
-        run: bash tests/e2e_scripts/s20_tachibana_replay_resilience.sh
+        run: bash tests/s20_tachibana_replay_resilience.sh
 
       - name: "S21 Tachibana error boundary"
         shell: bash
@@ -290,7 +290,7 @@ jobs:
           DEV_USER_ID: ${{ secrets.DEV_USER_ID }}
           DEV_PASSWORD: ${{ secrets.DEV_PASSWORD }}
           FLOWSURFACE_EXE_DEBUG: ${{ github.workspace }}/target/debug/flowsurface.exe
-        run: bash tests/e2e_scripts/s21_tachibana_error_boundary.sh
+        run: bash tests/s21_tachibana_error_boundary.sh
 
       - name: "S22 Tachibana endurance (~30 min)"
         shell: bash
@@ -298,4 +298,4 @@ jobs:
           DEV_USER_ID: ${{ secrets.DEV_USER_ID }}
           DEV_PASSWORD: ${{ secrets.DEV_PASSWORD }}
           FLOWSURFACE_EXE_DEBUG: ${{ github.workspace }}/target/debug/flowsurface.exe
-        run: bash tests/e2e_scripts/s22_tachibana_endurance.sh
+        run: bash tests/s22_tachibana_endurance.sh

@@ -41,7 +41,7 @@ cargo fmt --check
 cargo check
 
 # E2E テスト（アプリ起動後、別ターミナルで実行）
-bash tests/e2e_scripts/s1_basic_lifecycle.sh   # 例：個別スクリプト
+bash tests/s1_basic_lifecycle.sh   # 例：個別スクリプト
 # HTTP API はポート 9876 で受け付け（replay_api.rs）
 ```
 

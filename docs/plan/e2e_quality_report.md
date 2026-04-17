@@ -1,7 +1,7 @@
 # E2E テスト品質レポート
 
 > 生成日: 2026-04-17  
-> 対象: `tests/e2e_scripts/s1〜s40` + `common_helpers.sh` + `src/replay_api.rs`
+> 対象: `tests/s1〜s40` + `common_helpers.sh` + `src/replay_api.rs`
 
 ---
 
@@ -176,7 +176,7 @@ qty=0.00000001    # 最小 fractional → 実装依存（確認要）
 | s5_tachibana_mixed.sh:63-66 | inject-master 送信後に `M_OK=true` のみ確認。マスターレコードがペイン UI に反映されたか未検証 | `GET /api/pane/chart-snapshot` で bar_count が注入前後で変化したか確認 |
 | s7_mid_replay_pane.sh:95-97 | `streams_ready=true` の boolean のみ確認。実際のデータが available（klines 非空）かは未検証 | `chart-snapshot` の `bar_count > 0` を合わせて確認 |
 | s40_virtual_order_fill_cycle.sh | open_positions の件数確認が `>= 1` のみ（推定）。複数 open がバグでも PASS | `open_positions.length === 1` の exact match を検証 |
-| common_helpers.sh:23 | `jqn` が "null" 文字列を返す。JSON null と文字列 "null" の区別なし。`jqn` は `common_helpers.sh` 全体で広く使われており、影響が全スクリプトに及ぶ cross-cutting な問題 | `.field // "MISSING"` パターンで null を明示的に区別するか、`jq -e` で exit code を利用。**影響範囲が広いため、修正前に `grep -r jqn tests/e2e_scripts/` で呼び出し箇所を列挙してから対処する** |
+| common_helpers.sh:23 | `jqn` が "null" 文字列を返す。JSON null と文字列 "null" の区別なし。`jqn` は `common_helpers.sh` 全体で広く使われており、影響が全スクリプトに及ぶ cross-cutting な問題 | `.field // "MISSING"` パターンで null を明示的に区別するか、`jq -e` で exit code を利用。**影響範囲が広いため、修正前に `grep -r jqn tests/` で呼び出し箇所を列挙してから対処する** |
 | `replay_api.rs:534-541`（`body_opt_str_field`）が影響する TC | **仕様決定済み**: `"kind": null` を送ると `body_opt_str_field` がフィールド省略と同一視し `None` を返す動作は正式仕様（JSON 慣例）。`body_str_field`（必須フィールド）は null を 400 で拒否するが、省略可フィールドが null を `None` とするのは意図的な非対称。`parse_sidebar_select_ticker` が現在の唯一の影響先 | 仕様を docstring に明記済み（`replay_api.rs:533-535`）。ユニットテスト `opt_str_field_null_equals_omission` で仕様を固定済み。E2E テスト追加は不要（unit test で十分） |
 
 ---
@@ -208,6 +208,6 @@ qty=0.00000001    # 最小 fractional → 実装依存（確認要）
 
 ## 注記
 
-- 本レポートは `tests/e2e_scripts/` および `src/replay_api.rs` の静的読み込みのみに基づく。スクリプトの実行・動的解析は行っていない。
+- 本レポートは `tests/` および `src/replay_api.rs` の静的読み込みのみに基づく。スクリプトの実行・動的解析は行っていない。
 - PEND TC の "実装済み" 判定は `src/replay_api.rs` のルーティング実装を照合した結果。実際の動作確認はスクリプト実行で要検証。
 - s21_tachibana_error_boundary, s22_tachibana_endurance, s26〜s33, s35, s37, s39 の詳細は分析対象に含まれているが、上記 gap 分析は主要スクリプト（s1〜s20, s34, s36, s40）を重点的に分析した結果である。
