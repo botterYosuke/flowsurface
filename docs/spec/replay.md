@@ -7,16 +7,16 @@
 > | 立花証券 API プロトコル・認証・EVENT I/F | [tachibana.md](tachibana.md) |
 > | 立花証券リプレイ固有の設計判断（なぜ D1 のみか等） | [tachibana.md §8](tachibana.md#8-リプレイ対応の設計判断) |
 
-**最終更新**: 2026-04-16
-**対象バージョン**: `sasa/virtual` ブランチ (Phase 1〜8 + Tachibana Phase 1〜3 + R3 アーキテクチャ刷新 + Fixture 直接起動 + Auto-play タイムアウト廃止 + R4-1 Dead Code 除去 + R4-2 フィールド非公開化 + R4-5 テストヘルパー共通化 + R4-3 ReplaySession State Machine 導入 + R4-4 ReplayMessage 責務分割 + P1 seek_to 統一 + P2 play_with_range 追加 + Play リセット時の speed 引き継ぎ + **仮想約定エンジン（VirtualExchangeEngine）** 完了)
-**関連ドキュメント**:
+**最終更新**: 2026-04-17
+**対象ブランチ**: `sasa/develop`（仮想約定エンジン統合・R4 リファクタリング完了）
+
+**実装計画ドキュメント**:
 - [docs/plan/replay_redesign.md](plan/replay_redesign.md) — R1〜R3 リファクタ計画と実装ログ
 - [docs/plan/replay_bar_step_loop.md](plan/replay_bar_step_loop.md) — StepClock / EventStore / dispatch_tick 設計
 - [docs/plan/replay_fixture_direct_boot.md](plan/replay_fixture_direct_boot.md) — Fixture 直接起動 (auto-play) 設計
 - [docs/plan/replay_auto_play_no_timeout.md](plan/replay_auto_play_no_timeout.md) — Auto-play タイムアウト廃止（イベント駆動化）
-- [docs/plan/archive/tachibana_replay.md](plan/archive/tachibana_replay.md) — 立花証券 D1 対応の実装経緯（完了、アーカイブ）
-- [docs/plan/archive/replay_unified_step.md](plan/archive/replay_unified_step.md) — 統一 Tick ハンドラ設計メモ（完了、アーカイブ）
-- [docs/tachibana.md §8](tachibana.md#8-リプレイ対応の設計判断) — 立花証券リプレイ設計の「なぜ」
+- [docs/plan/archive/tachibana_replay.md](plan/archive/tachibana_replay.md) — 立花証券 D1 対応の実装経緯（アーカイブ）
+- [docs/plan/archive/replay_unified_step.md](plan/archive/replay_unified_step.md) — 統一 Tick ハンドラ設計メモ（アーカイブ）
 
 本書は flowsurface のリプレイ機能を、実装・API 利用・運用に十分な粒度で説明するリファレンス仕様書である。実装履歴は本文では触れず、必要に応じて §15 の付録を参照する。
 
@@ -38,7 +38,12 @@
 12. [定数と設計不変条件](#12-定数と設計不変条件)
 13. [スコープ外・既知の制限](#13-スコープ外既知の制限)
 14. [実装ファイルマップ](#14-実装ファイルマップ)
+    - [14.1 主要ファイル](#141-主要ファイル)
+    - [14.2 テスト](#142-テスト)
 15. [付録: 実装履歴と設計判断](#15-付録-実装履歴と設計判断)
+    - [15.1 実装フェーズ](#151-実装フェーズ)
+    - [15.2 R3 刷新の設計判断](#152-r3-刷新の設計判断)
+    - [15.3 Fixture 直接起動の設計判断](#153-fixture-直接起動の設計判断)
 
 ---
 

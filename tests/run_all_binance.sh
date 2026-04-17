@@ -37,6 +37,7 @@ SCRIPTS=(
   s36_sidebar_order_pane.sh
   s37_order_panels_integrated.sh
   s39_buying_power_portfolio.sh
+  s43_get_state_endpoint.sh
 )
 
 if [ "$SKIP_ENDURANCE" != "--skip-endurance" ]; then
