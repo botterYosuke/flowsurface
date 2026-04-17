@@ -781,22 +781,22 @@ pub fn connect_depth_stream(
                                             Ok(data) => {
                                                 match data {
                                                     StreamData::Pong(_) => {}
-                                                    StreamData::Subscription(stream_name) => {
-                                                        if stream_name == "depth" {
-                                                            match fetch_depth_snapshot(&symbol_str).await {
-                                                                Ok(snapshot) => {
-                                                                    snapshot_time = snapshot.time;
-                                                                    orderbook.update_with_qty_norm(
-                                                                        DepthUpdate::Snapshot(snapshot),
-                                                                        ticker_info.min_ticksize,
-                                                                        Some(qty_norm),
-                                                                    );
-                                                                }
-                                                                Err(e) => {
-                                                                    log::error!("Failed to fetch depth snapshot for {symbol_str}: {}", e);
-                                                                    tokio::time::sleep(Duration::from_secs(1)).await;
-                                                                    continue;
-                                                                }
+                                                    StreamData::Subscription(stream_name)
+                                                        if stream_name == "depth" =>
+                                                    {
+                                                        match fetch_depth_snapshot(&symbol_str).await {
+                                                            Ok(snapshot) => {
+                                                                snapshot_time = snapshot.time;
+                                                                orderbook.update_with_qty_norm(
+                                                                    DepthUpdate::Snapshot(snapshot),
+                                                                    ticker_info.min_ticksize,
+                                                                    Some(qty_norm),
+                                                                );
+                                                            }
+                                                            Err(e) => {
+                                                                log::error!("Failed to fetch depth snapshot for {symbol_str}: {}", e);
+                                                                tokio::time::sleep(Duration::from_secs(1)).await;
+                                                                continue;
                                                             }
                                                         }
                                                     }
