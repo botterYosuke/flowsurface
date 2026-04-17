@@ -14,6 +14,26 @@
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+/// 立花証券 API は注文ゼロ時に配列フィールドを `[]` ではなく `""` で返すことがある。
+/// このデシリアライザは空文字列を空 Vec として扱い、通常の配列はそのままデシリアライズする。
+fn deserialize_tachibana_list<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::Array(_) => {
+            serde_json::from_value(value).map_err(serde::de::Error::custom)
+        }
+        serde_json::Value::String(s) if s.is_empty() => Ok(Vec::new()),
+        serde_json::Value::Null => Ok(Vec::new()),
+        other => Err(serde::de::Error::custom(format!(
+            "expected array or empty string, got {other}"
+        ))),
+    }
+}
+
 /// リクエスト通番カウンタ。全リクエストで共有し、インクリメントする。
 /// 初期値は起動時のUnix秒を使用し、セッション復元時に前回の値を常に超える。
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -22,13 +42,14 @@ static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// 初回呼び出し時にタイムスタンプベースで初期化される。
 /// `compare_exchange` で初期化を排他し、複数スレッドが同時に呼んでも安全。
 pub fn next_p_no() -> String {
-    let epoch_secs = std::time::SystemTime::now()
+    let epoch_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs();
-    // CAS: カウンタが 0（未初期化）の場合のみ epoch_secs で初期化。
+        .as_millis() as u64;
+    // CAS: カウンタが 0（未初期化）の場合のみ epoch_ms で初期化。
+    // ミリ秒精度により再起動時に前回セッションの最終 p_no を下回る確率を大幅に低減。
     // 複数スレッドが同時に呼んでも 1 つだけが成功し、残りは失敗して既存値を使う。
-    let _ = REQUEST_COUNTER.compare_exchange(0, epoch_secs, Ordering::Relaxed, Ordering::Relaxed);
+    let _ = REQUEST_COUNTER.compare_exchange(0, epoch_ms, Ordering::Relaxed, Ordering::Relaxed);
     let val = REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed);
     val.to_string()
 }
@@ -597,7 +618,7 @@ use std::sync::{Arc, RwLock};
 
 /// 全マスタダウンロードの各レコードをパースするための汎用型。
 /// sCLMID でレコード種別を判定し、CLMIssueMstKabu のみ抽出する。
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct MasterRecord {
     #[serde(rename = "sCLMID", default)]
     pub clm_id: String,
@@ -721,7 +742,6 @@ pub async fn fetch_all_master(
     let url = build_api_url_from(&session.url_master, &req)?;
 
     log::debug!("Tachibana master download URL: {url}");
-
     let resp = client.get(&url).send().await?;
     let mut stream = resp.bytes_stream();
 
@@ -823,13 +843,24 @@ pub async fn fetch_all_master(
 static ISSUE_MASTER_CACHE: RwLock<Option<Arc<Vec<MasterRecord>>>> = RwLock::new(None);
 
 /// ログイン成功時に呼び出し、銘柄マスタをキャッシュに格納する。
+/// ダウンロード完了後に `cache_path` が指定されていればディスクへも保存する。
 pub async fn init_issue_master(
     client: &reqwest::Client,
     session: &TachibanaSession,
+    cache_path: Option<&std::path::Path>,
 ) -> Result<(), TachibanaError> {
     let records = fetch_all_master(client, session).await?;
     if let Ok(mut guard) = ISSUE_MASTER_CACHE.write() {
-        *guard = Some(Arc::new(records));
+        *guard = Some(Arc::new(records.clone()));
+    }
+    if let Some(path) = cache_path
+        && let Ok(json) = serde_json::to_string(&records)
+    {
+        if let Err(e) = std::fs::write(path, json) {
+            log::warn!("Failed to write Tachibana master disk cache: {e}");
+        } else {
+            log::info!("Tachibana master cache saved to disk ({} records)", records.len());
+        }
     }
     Ok(())
 }
@@ -839,13 +870,42 @@ pub async fn get_cached_issue_master() -> Option<Arc<Vec<MasterRecord>>> {
     ISSUE_MASTER_CACHE.read().ok()?.clone()
 }
 
+/// `cache_path` からディスクキャッシュを読み込み、メモリキャッシュと metadata HashMap を返す。
+/// 起動時に呼び出すことで、ネットワークダウンロード前に即座に metadata を提供できる。
+pub fn load_master_from_disk(
+    cache_path: &std::path::Path,
+) -> Option<HashMap<Ticker, Option<TickerInfo>>> {
+    let json = std::fs::read_to_string(cache_path)
+        .map_err(|e| log::debug!("Tachibana master disk cache not found: {e}"))
+        .ok()?;
+    let records: Vec<MasterRecord> = serde_json::from_str(&json)
+        .map_err(|e| log::warn!("Tachibana master disk cache parse error: {e}"))
+        .ok()?;
+    if records.is_empty() {
+        return None;
+    }
+    log::info!("Tachibana master loaded from disk cache ({} records)", records.len());
+    if let Ok(mut guard) = ISSUE_MASTER_CACHE.write() {
+        *guard = Some(Arc::new(records.clone()));
+    }
+    let mut out = HashMap::new();
+    for record in records.iter() {
+        if let Some((ticker, info)) = master_record_to_ticker_info(record) {
+            let ticker_no_display = Ticker::new(&record.issue_code, Exchange::Tachibana);
+            out.entry(ticker_no_display).or_insert(Some(info));
+            out.insert(ticker, Some(info));
+        }
+    }
+    Some(out)
+}
+
 /// バックグラウンドで銘柄マスタをダウンロードしキャッシュに格納する。
 /// ログイン成功後に呼び出す。tokio::spawn でタスクを起動するため、
 /// 呼び出し元は完了を待つ必要がない。
 pub fn spawn_init_issue_master(session: TachibanaSession) {
     tokio::spawn(async move {
         let client = reqwest::Client::new();
-        if let Err(e) = init_issue_master(&client, &session).await {
+        if let Err(e) = init_issue_master(&client, &session, None).await {
             log::error!("Tachibana master download failed: {e}");
         }
     });
@@ -1388,7 +1448,7 @@ pub struct OrderListRequest {
 /// CLMOrderList 注文一覧レスポンス。
 #[derive(Debug, Deserialize)]
 pub struct OrderListResponse {
-    #[serde(rename = "aOrderList", default)]
+    #[serde(rename = "aOrderList", deserialize_with = "deserialize_tachibana_list", default)]
     pub orders: Vec<OrderRecord>,
 }
 
@@ -1441,7 +1501,7 @@ pub struct OrderDetailRequest {
 /// CLMOrderListDetail 約定明細レスポンス。
 #[derive(Debug, Deserialize)]
 pub struct OrderDetailResponse {
-    #[serde(rename = "aYakuzyouSikkouList", default)]
+    #[serde(rename = "aYakuzyouSikkouList", deserialize_with = "deserialize_tachibana_list", default)]
     pub executions: Vec<ExecutionRecord>,
 }
 

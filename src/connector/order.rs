@@ -72,7 +72,7 @@ pub async fn fetch_order_detail(
 }
 
 /// CLMZanKaiKanougaku + CLMZanShinkiKanoIjiritu — 余力情報を取得する。
-/// 現物余力と信用余力を並列取得して BuyingPowerPanel へ渡す。
+/// p_no の単調増加制約を守るため逐次取得する。
 pub async fn fetch_buying_power() -> Result<
     (
         exchange::adapter::tachibana::BuyingPowerResponse,
@@ -81,14 +81,13 @@ pub async fn fetch_buying_power() -> Result<
     String,
 > {
     let (session, client) = session_and_client().map_err(|e| e.to_string())?;
-    let (cash_result, margin_result) = tokio::join!(
-        exchange::adapter::tachibana::fetch_buying_power(&client, &session),
-        exchange::adapter::tachibana::fetch_margin_power(&client, &session),
-    );
-    Ok((
-        cash_result.map_err(|e| e.to_string())?,
-        margin_result.map_err(|e| e.to_string())?,
-    ))
+    let cash = exchange::adapter::tachibana::fetch_buying_power(&client, &session)
+        .await
+        .map_err(|e| e.to_string())?;
+    let margin = exchange::adapter::tachibana::fetch_margin_power(&client, &session)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok((cash, margin))
 }
 
 /// CLMGenbutuKabuList — 保有株数（売付可能株数）を取得する。
