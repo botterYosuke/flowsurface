@@ -7,6 +7,14 @@ set -e
 # リポジトリルートを動的に解決（tests/../ = repo root）
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# .env を自動ロード（存在する場合のみ）
+if [ -f "$REPO_ROOT/.env" ]; then
+  set -a
+  # shellcheck source=/dev/null
+  source "$REPO_ROOT/.env"
+  set +a
+fi
+
 DATA_DIR="$APPDATA/flowsurface"
 API="http://127.0.0.1:9876/api"
 API_BASE="http://127.0.0.1:9876"

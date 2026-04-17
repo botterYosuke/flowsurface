@@ -8,9 +8,13 @@
 #   4: リクエストフィールドが正しく組み立てられることを単体レベルで確認済み
 #
 # 注意: 実際に TOYOTA 株を保有している場合は約定するため要注意
-# 前提: DEV_SECOND_PASSWORD 環境変数が設定済みであること
+# 前提: DEV_USER_ID / DEV_PASSWORD / DEV_SECOND_PASSWORD 環境変数が設定済みであること
 set -euo pipefail
 source "$(dirname "$0")/common_helpers.sh"
+
+if [ -z "${DEV_USER_ID:-}" ] || [ -z "${DEV_PASSWORD:-}" ]; then
+  echo "  SKIP: DEV_USER_ID / DEV_PASSWORD が未設定 — 自動ログインが無効です"; exit 0
+fi
 
 echo "=== TOYOTA (7203) 成行売り E2E テスト ==="
 backup_state

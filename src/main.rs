@@ -233,6 +233,10 @@ enum Message {
         reply: replay_api::ReplySender,
         result: Result<exchange::adapter::tachibana::ModifyOrderResponse, String>,
     },
+    FetchHoldingsApiResult {
+        reply: replay_api::ReplySender,
+        result: Result<u64, String>,
+    },
     Replay(ReplayMessage),
     ReplayApi(replay_api::ApiMessage),
 }
@@ -473,6 +477,13 @@ impl Flowsurface {
                         "order_datetime": resp.order_datetime,
                     })
                     .to_string(),
+                    Err(e) => serde_json::json!({ "error": e }).to_string(),
+                };
+                reply.send(body);
+            }
+            Message::FetchHoldingsApiResult { reply, result } => {
+                let body = match result {
+                    Ok(qty) => serde_json::json!({ "holdings_qty": qty }).to_string(),
                     Err(e) => serde_json::json!({ "error": e }).to_string(),
                 };
                 reply.send(body);
@@ -1404,6 +1415,15 @@ impl Flowsurface {
                         return Task::perform(
                             connector::order::submit_cancel_order(*req),
                             move |result| Message::ModifyOrderApiResult {
+                                reply: reply_tx,
+                                result,
+                            },
+                        );
+                    }
+                    ApiCommand::FetchTachibanaHoldings { issue_code } => {
+                        return Task::perform(
+                            connector::order::fetch_holdings(issue_code),
+                            move |result| Message::FetchHoldingsApiResult {
                                 reply: reply_tx,
                                 result,
                             },
@@ -2687,7 +2707,7 @@ impl Flowsurface {
                         }
                     }
                 }
-                Err(last_err.unwrap())
+                Err(last_err.expect("MAX_RETRIES > 0 なので少なくとも1回は Err が格納される"))
             },
             |result: Result<_, exchange::adapter::tachibana::TachibanaError>| {
                 let venue = Venue::Tachibana;

@@ -73,9 +73,9 @@ src/replay_api.rs                   # HTTP API (POST /api/tachibana/order 等)
 | 1-3 | 現物売り（成行） | `s1c_market_sell.sh` | ✅ E2E スクリプト作成・Unit テスト済み | `sBaibaiKubun="1"` |
 | 1-4 | 現物売り（指値） | `s1d_limit_sell.sh` | ✅ E2E スクリプト作成・Unit テスト済み | |
 | 1-5 | 信用新規買い（制度6M、成行） | Unit テストのみ | ✅ `sGenkinShinyouKubun="2"` Unit テスト済み | E2E は Phase 2 |
-| 1-6 | 信用新規売り（制度6M、成行） | Unit テストのみ | ⬜ | E2E は Phase 2 |
+| 1-6 | 信用新規売り（制度6M、成行） | Unit テストのみ | ✅ `sGenkinShinyouKubun="2"` + `sBaibaiKubun="1"` Unit テスト済み | E2E は Phase 2 |
 | 1-7 | 信用返済（制度） | Unit テストのみ | ✅ `sGenkinShinyouKubun="4"` Unit テスト済み | E2E は Phase 2 |
-| 1-8 | 一般信用（新規・返済） | 未作成 | ⬜ | `sGenkinShinyouKubun="6"/"8"` |
+| 1-8 | 一般信用（新規・返済） | Unit テストのみ | ✅ `sGenkinShinyouKubun="6"/"8"` Unit テスト済み（2件）| E2E は Phase 2 |
 | 1-9 | NISA 口座での現物買い | Unit テストのみ | ✅ `sZyoutoekiKazeiC="5"` Unit テスト済み | E2E は Phase 2 |
 
 ### 2. 注文管理系
@@ -91,9 +91,9 @@ src/replay_api.rs                   # HTTP API (POST /api/tachibana/order 等)
 
 | # | シナリオ | E2E テスト | 状態 | 備考 |
 |---|---|---|---|---|
-| 3-1 | 買付余力取得（CLMZanKaiKanougaku） | `s39_buying_power_portfolio.sh` | 部分確認 | HTTP API 経由での完全確認必要 |
-| 3-2 | 信用新規建余力（CLMZanShinkiKanoIjiritu） | 未作成 | ⬜ | |
-| 3-3 | 保有現物株数取得（CLMGenbutuKabuList） | 未作成 | ⬜ | 売りの「全数量」ボタン用 |
+| 3-1 | 買付余力取得（CLMZanKaiKanougaku） | `s49_account_info.sh` Step 2 | ✅ E2E スクリプト作成済み | `GET /api/buying-power` で `cash_buying_power` を確認 |
+| 3-2 | 信用新規建余力（CLMZanShinkiKanoIjiritu） | `s49_account_info.sh` Step 3 | ✅ E2E スクリプト作成済み | `GET /api/buying-power` で `margin_new_order_power` を確認 |
+| 3-3 | 保有現物株数取得（CLMGenbutuKabuList） | `s49_account_info.sh` Step 4 | ✅ HTTP API 追加・E2E スクリプト作成済み | `GET /api/tachibana/holdings?issue_code=7203` |
 
 ### 4. エラー系
 
@@ -108,10 +108,10 @@ src/replay_api.rs                   # HTTP API (POST /api/tachibana/order 等)
 
 | # | シナリオ | 状態 | 備考 |
 |---|---|---|---|
-| 5-1 | 銘柄切り替え時に注文パネルがリセット | ⬜ | `order_entry.rs` の Ticker 切り替え処理 |
-| 5-2 | 現物⇔信用切り替え時の UI 変化 | ⬜ | `cash_margin` 変更時 |
-| 5-3 | 発注成功後に second_password がクリア | ⬜ | セキュリティ上重要 |
-| 5-4 | 注文エラー時にトーストでエラー表示 | ⬜ | エラーハンドリング UI |
+| 5-1 | 銘柄切り替え時に注文パネルがリセット | Unit テスト | ✅ `SyncIssue` で holdings リセット・FetchHoldings 発行を確認（4テスト） |
+| 5-2 | 現物⇔信用切り替え時の UI 変化 | Unit テスト | ✅ `CashMarginChanged` で `cash_margin` フィールド更新を確認（2テスト） |
+| 5-3 | 発注成功後に second_password がクリア | Unit テスト | ✅ `order_completed_ok_clears_second_password` 済み |
+| 5-4 | 注文エラー時にトーストでエラー表示 | Unit テスト | ✅ `order_completed_err_stores_error_in_last_result` で `last_result=Err` 格納確認 |
 
 ---
 
@@ -171,6 +171,30 @@ src/replay_api.rs                   # HTTP API (POST /api/tachibana/order 等)
 **Step 3: E2E テストスクリプト作成** ✅
 - `s44_order_list.sh` — 注文一覧・明細取得の疎通確認
 - `s45_order_correct_cancel.sh` — 指値買い→訂正→取消の round-trip
+
+### Phase 5: Unit テスト追加 + 3-3 HTTP API ✅ 完了（2026-04-17）
+
+**発注系 Unit テスト追加** ✅
+- `new_order_request_credit_new_sell_serializes_cash_margin_and_side`（1-6: 信用新規売り制度6M）
+- `new_order_request_general_credit_new_buy_serializes_cash_margin`（1-8a: 一般信用新規買い）
+- `new_order_request_general_credit_close_buy_serializes_cash_margin`（1-8b: 一般信用返済買い）
+
+**口座情報系 HTTP API 追加（3-3）** ✅
+- `GET /api/tachibana/holdings?issue_code=XXXX` → `FetchTachibanaHoldings` バリアント追加
+- `main.rs`: `FetchHoldingsApiResult` メッセージ + ハンドラー追加
+- レスポンス: `{"holdings_qty": <u64>}`
+- Unit テスト: `route_get_tachibana_holdings_with_issue_code` / `route_get_tachibana_holdings_missing_issue_code_bad_request`
+
+**口座情報系 E2E スクリプト作成** ✅
+- `s49_account_info.sh` — 3-1/3-2/3-3 の疎通確認（Step 2〜5）
+
+**UI 操作検証 Unit テスト追加（Phase 5）** ✅
+- 5-1: `sync_issue_resets_holdings_on_issue_change` 等 4テスト（SyncIssue での銘柄切り替えリセット確認）
+- 5-2: `cash_margin_changed_updates_field` 等 2テスト（CashMarginChanged フィールド更新確認）
+- 5-3: 既存 `order_completed_ok_clears_second_password` で確認済み
+- 5-4: `order_completed_err_stores_error_in_last_result`（エラー格納確認）
+
+**合計テスト数**: 329 PASS（flowsurface）+ 144 PASS（exchange）+ 26 PASS（data）= 499 PASS
 
 ### Phase 4: エラー系・UI 検証 ✅ 4-2/4-3/4-4 完了（2026-04-17）
 
@@ -307,6 +331,19 @@ src/replay_api.rs                   # HTTP API (POST /api/tachibana/order 等)
 - E2E スクリプト `s44`/`s45` はデモ環境 (`DEV_IS_DEMO=true`) が必要。市場時間外ではエラー応答になるがスクリプトは pass として記録する設計
 - `s45` を取引時間内に再実行する場合は `eig_day` 取得ステップを追加すること（`GET /api/tachibana/orders` → `eig_day` 抽出 → 訂正・取消に使用）
 
+### Phase 5 知見（2026-04-17）
+
+**3-3 HTTP API 設計ノート**
+- `GET /api/buying-power` が CLMZanKaiKanougaku と CLMZanShinkiKanoIjiritu を両方返すため、3-1/3-2 は同一エンドポイントで確認可能
+- `GET /api/tachibana/holdings?issue_code=XXXX` を新規追加。`issue_code` が未指定の場合は `BadRequest` を返す
+- レスポンス: `{"holdings_qty": <u64>}` — `u64` はゼロ（未保有）も正常値として扱う
+- `FetchTachibanaHoldings` は `ApiCommand` の末尾に追加し、`main.rs` の match は exhaustive なのでコンパイルエラーが漏れ検知として機能する
+
+**5-1〜5-4 テスト方針**
+- UI の視覚的変化（色・レイアウト）は GUI テストが不要な部分は unit テストで state の変化を確認
+- `last_result: Option<Result<OrderSuccess, String>>` フィールドが `Err` になることで view 側でエラーテキストが描画される設計。View 側は `match &self.last_result` で分岐し、`Some(Err(e))` のとき赤文字で表示
+- `Action` enum に `#[derive(Debug)]` を追加（テストの `{:?}` フォーマット用）
+
 ### Phase 1 Unit テスト設計方針（2026-04-17）
 - `NewOrderRequest` のフィールドシリアライズは struct レベルで直接テスト（`serde_json::to_string`）
 - `serialize_order_request()` のデフォルトフィールド付与は `clm_id="CLMKabuNewOrder"` で呼び出してテスト
@@ -321,6 +358,7 @@ src/replay_api.rs                   # HTTP API (POST /api/tachibana/order 等)
 - `GET /api/tachibana/order/{order_num}[?eig_day=YYYYMMDD]` — 注文明細 ✅（Phase 3 追加済み）
 - `POST /api/tachibana/order/correct` — 訂正注文 ✅（Phase 3 追加済み）
 - `POST /api/tachibana/order/cancel` — 取消注文 ✅（Phase 3 追加済み）
+- `GET /api/tachibana/holdings?issue_code=XXXX` — 保有現物株数 ✅（Phase 5 追加済み）
 
 ### デモ環境テストの必須環境変数
 E2E テストで実際に立花証券デモ環境に発注する場合は以下をすべて export してからスクリプトを実行すること：
