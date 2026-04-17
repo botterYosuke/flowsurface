@@ -316,8 +316,25 @@ pub enum CacheError {
 
 ---
 
+## 先行実装（参考）
+
+**Tachibana マスターデータキャッシュ**（2026-04-17 実装済み）が本計画と同じパターンを採用した:
+
+| 項目 | Tachibana master cache | kline cache（本計画） |
+|---|---|---|
+| パス | `data_path(Some("market_data/tachibana_master_cache.json"))` | `data_path(Some("market_data/kline_cache/..."))` |
+| フォーマット | JSON（`serde_json`） | CSV.gz（`csv` + `flate2`） |
+| ロードタイミング | セッション復元時（起動直後） | `load_klines` 呼び出し時 |
+| 無効化戦略 | なし（マスターは変化が少ない） | 現在月は保存しない |
+| 実装ファイル | `exchange/src/adapter/tachibana.rs`, `src/main.rs` | `src/replay/cache.rs`, `src/replay/loader.rs` |
+
+効果: 初回 79〜108 秒 → 2 回目以降 約 2 秒で解決。本 kline キャッシュでも同様の効果を見込む。
+
+---
+
 ## 進捗
 
 - ✅ 計画書作成
+- ✅ キャッシュパターン確立（Tachibana master cache で先行実装・検証済み）
 - [ ] Phase 1: 読み書き基盤実装
 - [ ] Phase 2: テスト

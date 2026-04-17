@@ -2216,6 +2216,134 @@ mod tests {
         );
     }
 
+    // --- initial_order_list_fetch tests (起動時自動フェッチ) ---
+
+    #[test]
+    fn initial_order_list_fetch_does_not_crash_with_no_order_list_panes() {
+        let dashboard = Dashboard::default();
+        let main_window = window::Id::unique();
+        let _task = dashboard.initial_order_list_fetch(main_window);
+        assert!(!dashboard.panes.is_empty());
+    }
+
+    #[test]
+    fn initial_order_list_fetch_finds_order_list_pane_and_does_not_crash() {
+        let mut dashboard = single_pane_dashboard();
+        let main_window = window::Id::unique();
+        let _task = dashboard.split_focused_and_init_order(
+            main_window,
+            data::layout::pane::ContentKind::OrderList,
+        );
+
+        let order_list_count = dashboard
+            .iter_all_panes(main_window)
+            .filter(|(_, _, s)| matches!(s.content, pane::Content::OrderList(_)))
+            .count();
+        assert_eq!(order_list_count, 1, "setup: exactly 1 OrderList pane must exist");
+
+        let pane_count_before = dashboard.panes.len();
+        let _task = dashboard.initial_order_list_fetch(main_window);
+        assert_eq!(
+            dashboard.panes.len(),
+            pane_count_before,
+            "initial_order_list_fetch must not mutate pane count"
+        );
+    }
+
+    #[test]
+    fn initial_order_list_fetch_does_not_process_buying_power_panes() {
+        let mut dashboard = single_pane_dashboard();
+        let main_window = window::Id::unique();
+        let _task = dashboard.split_focused_and_init_order(
+            main_window,
+            data::layout::pane::ContentKind::BuyingPower,
+        );
+
+        let order_list_count = dashboard
+            .iter_all_panes(main_window)
+            .filter(|(_, _, s)| matches!(s.content, pane::Content::OrderList(_)))
+            .count();
+        assert_eq!(order_list_count, 0, "BuyingPower pane must not be counted as OrderList");
+
+        let _task = dashboard.initial_order_list_fetch(main_window);
+        assert_eq!(dashboard.panes.len(), 2);
+    }
+
+    // --- initial_buying_power_fetch tests ---
+
+    #[test]
+    fn initial_buying_power_fetch_does_not_crash_with_no_buying_power_panes() {
+        let dashboard = Dashboard::default();
+        let main_window = window::Id::unique();
+        let _task = dashboard.initial_buying_power_fetch(main_window);
+        assert!(!dashboard.panes.is_empty());
+    }
+
+    #[test]
+    fn initial_buying_power_fetch_finds_buying_power_pane_and_does_not_crash() {
+        let mut dashboard = single_pane_dashboard();
+        let main_window = window::Id::unique();
+        let _task = dashboard.split_focused_and_init_order(
+            main_window,
+            data::layout::pane::ContentKind::BuyingPower,
+        );
+
+        let bp_count = dashboard
+            .iter_all_panes(main_window)
+            .filter(|(_, _, s)| matches!(s.content, pane::Content::BuyingPower(_)))
+            .count();
+        assert_eq!(bp_count, 1, "setup: exactly 1 BuyingPower pane must exist");
+
+        let pane_count_before = dashboard.panes.len();
+        let _task = dashboard.initial_buying_power_fetch(main_window);
+        assert_eq!(
+            dashboard.panes.len(),
+            pane_count_before,
+            "initial_buying_power_fetch must not mutate pane count"
+        );
+    }
+
+    // --- split_focused_and_init_order with ContentKind::OrderList ---
+
+    #[test]
+    fn split_focused_and_init_order_sets_order_list_content_on_new_pane() {
+        let mut dashboard = single_pane_dashboard();
+        let main_window = window::Id::unique();
+
+        let _task = dashboard.split_focused_and_init_order(
+            main_window,
+            data::layout::pane::ContentKind::OrderList,
+        );
+
+        assert_eq!(dashboard.panes.len(), 2);
+        let (_, focused_pane) = dashboard.focus.unwrap();
+        let state = dashboard.panes.get(focused_pane).unwrap();
+        assert!(
+            matches!(state.content, pane::Content::OrderList(_)),
+            "new pane content must be OrderList"
+        );
+    }
+
+    // --- eig_day_or_today tests ---
+
+    #[test]
+    fn eig_day_or_today_returns_stored_value_when_set() {
+        let mut dashboard = Dashboard::default();
+        dashboard.eig_day = Some("20240417".to_string());
+        assert_eq!(dashboard.eig_day_or_today(), "20240417");
+    }
+
+    #[test]
+    fn eig_day_or_today_returns_today_in_yyyymmdd_format_when_not_set() {
+        let dashboard = Dashboard::default();
+        let result = dashboard.eig_day_or_today();
+        assert_eq!(result.len(), 8, "fallback must be 8-char YYYYMMDD");
+        assert!(
+            result.chars().all(|c| c.is_ascii_digit()),
+            "fallback must be all digits, got: {result}"
+        );
+    }
+
     // compile-time: clear_chart_for_replay returns (), not Vec<...>
     fn _type_check_clear_chart_for_replay_returns_unit(
         d: &mut super::Dashboard,
