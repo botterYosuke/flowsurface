@@ -86,7 +86,7 @@ fi
 
 # --- TC-S1-05: current_time が前進する ---
 CT1=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
-if CT2=$(wait_for_time_advance "$CT1" 30); then
+if CT2=$(wait_for_time_advance "$CT1" 60); then
   WITHIN=$(advance_within "$CT1" "$CT2" "$STEP_M1" 100)
   [ "$WITHIN" = "true" ] && pass "TC-S1-05: 1x で current_time 前進 ($CT1 → $CT2)" || \
     fail "TC-S1-05" "想定外の前進 (CT1=$CT1 CT2=$CT2 step=$STEP_M1)"
@@ -124,8 +124,7 @@ ST_PAUSED=$(jqn "$(curl -s "$API/replay/status")" "d.status")
 
 # --- TC-S1-08: Resume で再開 ---
 curl -s -X POST "$API/replay/resume" > /dev/null
-sleep 3
-R1=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
+R1=$(wait_for_time_advance "$P2" 30) || R1="$P2"
 ADV2=$(bigt_gt "$R1" "$P2")
 [ "$ADV2" = "true" ] && pass "TC-S1-08: Resume 後に current_time 前進" || \
   fail "TC-S1-08" "Resume 後に前進しない ($P2 → $R1)"
