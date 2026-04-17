@@ -20,9 +20,9 @@ backup_state
 trap 'stop_app; restore_state' EXIT ERR
 
 # ── フィクスチャ: saved-state.json サンプルと同等の構成 ─────────────────────
-# range_start = "2025-04-15 04:49" が clock.seek のターゲット（固定）
-RANGE_START="2025-04-15 04:49"
-RANGE_END="2026-04-15 06:49"
+# 動的日付（UTC -5h 〜 -1h）: Binance REST API から取得可能な最近データを使用
+RANGE_START=$(utc_offset -5)
+RANGE_END=$(utc_offset -1)
 
 cat > "$DATA_DIR/saved-state.json" <<EOF
 {
