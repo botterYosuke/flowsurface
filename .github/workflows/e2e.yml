@@ -14,11 +14,10 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  e2e-hyperliquid:
-    name: "E2E S1–S2 (HyperliquidLinear:BTC)"
+  # ── ビルド（成果物を artifact で後続ジョブへ共有）──────────────────────────
+  build:
+    name: Build (debug)
     runs-on: windows-latest
-    timeout-minutes: 30
-
     steps:
       - uses: actions/checkout@v4
 
@@ -39,58 +38,147 @@ jobs:
           key: windows-cargo-debug-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: windows-cargo-debug-
 
-      - name: Build (debug)
+      - name: cargo build
         run: cargo build
+
+      - name: Upload exe artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: flowsurface-exe
+          path: target/debug/flowsurface.exe
+          retention-days: 1
+
+  # ── GUI モード（並列）────────────────────────────────────────────────────────
+  test-gui:
+    name: "GUI: ${{ matrix.name }}"
+    needs: build
+    runs-on: windows-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # DEV_IS_DEMO=true で起動（Tachibana 不要）
+          - name: S1 Basic lifecycle
+            script: s1_basic_lifecycle.sh
+            dev_is_demo: "true"
+          - name: S2 Persistence
+            script: s2_persistence.sh
+            dev_is_demo: "true"
+          - name: S9 Speed & Step
+            script: s9_speed_step.sh
+            dev_is_demo: "true"
+          - name: S27 CycleSpeed no side-effects
+            script: s27_cyclespeed_reset.sh
+            dev_is_demo: "true"
+          - name: S35 Virtual portfolio
+            script: s35_virtual_portfolio.sh
+            dev_is_demo: "true"
+          # Tachibana 実ログイン（DEV_USER_ID / DEV_PASSWORD 使用）
+          - name: S40 Virtual order fill cycle
+            script: s40_virtual_order_fill_cycle.sh
+            dev_is_demo: ""
+          - name: S41 Limit order round trip
+            script: s41_limit_order_round_trip.sh
+            dev_is_demo: ""
+          - name: S42 Naked short cycle
+            script: s42_naked_short_cycle.sh
+            dev_is_demo: ""
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Download exe artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: flowsurface-exe
+          path: target/debug/
 
       - name: Prepare data directory
         shell: bash
         run: mkdir -p "$APPDATA/flowsurface"
 
-      - name: "S1 Basic lifecycle (HyperliquidLinear:BTC)"
+      - name: Run ${{ matrix.name }}
         shell: bash
         env:
           FLOWSURFACE_EXE: ${{ github.workspace }}/target/debug/flowsurface.exe
           E2E_TICKER: HyperliquidLinear:BTC
-          DEV_IS_DEMO: "true"
-        run: bash tests/s1_basic_lifecycle.sh
+          DEV_IS_DEMO: ${{ matrix.dev_is_demo }}
+          DEV_USER_ID: ${{ secrets.DEV_USER_ID }}
+          DEV_PASSWORD: ${{ secrets.DEV_PASSWORD }}
+          DEV_SECOND_PASSWORD: ${{ secrets.DEV_SECOND_PASSWORD }}
+        run: bash tests/${{ matrix.script }}
 
-      - name: "S2 Persistence (HyperliquidLinear:BTC)"
-        shell: bash
-        env:
-          FLOWSURFACE_EXE: ${{ github.workspace }}/target/debug/flowsurface.exe
-          E2E_TICKER: HyperliquidLinear:BTC
-          DEV_IS_DEMO: "true"
-        run: bash tests/s2_persistence.sh
-
-      - name: "S1 Headless lifecycle (HyperliquidLinear:BTC)"
-        shell: bash
-        env:
-          FLOWSURFACE_EXE: ${{ github.workspace }}/target/debug/flowsurface.exe
-          E2E_TICKER: HyperliquidLinear:BTC
-          IS_HEADLESS: "true"
-        run: bash tests/s1_basic_lifecycle.sh
-
-      - name: "S3 Headless auto-play (HyperliquidLinear:BTC)"
-        shell: bash
-        env:
-          FLOWSURFACE_EXE: ${{ github.workspace }}/target/debug/flowsurface.exe
-          E2E_TICKER: HyperliquidLinear:BTC
-          IS_HEADLESS: "true"
-        run: bash tests/s3_autoplay.sh
-
-      - name: "S27 Headless CycleSpeed (HyperliquidLinear:BTC)"
-        shell: bash
-        env:
-          FLOWSURFACE_EXE: ${{ github.workspace }}/target/debug/flowsurface.exe
-          E2E_TICKER: HyperliquidLinear:BTC
-          IS_HEADLESS: "true"
-        run: bash tests/s27_cyclespeed_reset.sh
-
-      - name: Upload debug logs on failure
+      - name: Upload debug log on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: e2e-debug-logs
-          path: |
-            ${{ runner.temp }}/e2e_debug.log
-            ${{ runner.temp }}/e2e_headless_debug.log
+          name: log-gui-${{ matrix.script }}
+          path: ${{ runner.temp }}/e2e_debug.log
+
+  # ── Headless モード（並列）───────────────────────────────────────────────────
+  test-headless:
+    name: "Headless: ${{ matrix.name }}"
+    needs: build
+    runs-on: windows-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: S1 Basic lifecycle
+            script: s1_basic_lifecycle.sh
+          - name: S3 Auto-play
+            script: s3_autoplay.sh
+          - name: S9 Speed & Step
+            script: s9_speed_step.sh
+          - name: S27 CycleSpeed no side-effects
+            script: s27_cyclespeed_reset.sh
+          - name: S35 Virtual portfolio
+            script: s35_virtual_portfolio.sh
+          - name: S40 Virtual order fill cycle
+            script: s40_virtual_order_fill_cycle.sh
+          - name: S41 Limit order round trip
+            script: s41_limit_order_round_trip.sh
+          - name: S42 Naked short cycle
+            script: s42_naked_short_cycle.sh
+          - name: S43 GET replay/state
+            script: s43_get_state_endpoint.sh
+          - name: X4 Virtual order Live guard
+            script: x4_virtual_order_live_guard.sh
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Download exe artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: flowsurface-exe
+          path: target/debug/
+
+      - name: Prepare data directory
+        shell: bash
+        run: mkdir -p "$APPDATA/flowsurface"
+
+      - name: Run ${{ matrix.name }}
+        shell: bash
+        env:
+          FLOWSURFACE_EXE: ${{ github.workspace }}/target/debug/flowsurface.exe
+          E2E_TICKER: HyperliquidLinear:BTC
+          IS_HEADLESS: "true"
+        run: bash tests/${{ matrix.script }}
+
+      - name: Upload debug log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: log-headless-${{ matrix.script }}
+          path: ${{ runner.temp }}/e2e_headless_debug.log
