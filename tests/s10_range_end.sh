@@ -21,22 +21,10 @@ START=$(utc_offset -3)
 END=$(utc_offset -1)
 END_MS=$(node -e "console.log(new Date('${END}:00Z').getTime())")
 
-cat > "$DATA_DIR/saved-state.json" <<EOF
-{
-  "layout_manager":{"layouts":[{"name":"S10","dashboard":{"pane":{
-    "KlineChart":{
-      "layout":{"splits":[0.78],"autoscale":"FitToVisible"},"kind":"Candles",
-      "stream_type":[{"Kline":{"ticker":"BinanceLinear:BTCUSDT","timeframe":"M1"}}],
-      "settings":{"tick_multiply":null,"visual_config":null,"selected_basis":{"Time":"M1"}},
-      "indicators":["Volume"],"link_group":"A"
-    }
-  },"popout":[]}}],"active_layout":"S10"},
-  "timezone":"UTC","trade_fetch_enabled":false,"size_in_quote_ccy":"Base",
-  "replay":{"mode":"replay","range_start":"$START","range_end":"$END"}
-}
-EOF
+setup_single_pane "$E2E_TICKER" "M1" "$START" "$END"
 
 start_app
+headless_play
 if ! wait_playing 30; then
   fail "TC-S10-precond" "auto-play で Playing に到達せず"
   restore_state
@@ -78,22 +66,31 @@ EQ=$(bigt_eq "$CT_AT_END" "$CT_AFTER_SF")
   fail "TC-S10-02" "終端後 StepForward が前進 (before=$CT_AT_END after=$CT_AFTER_SF)"
 
 # --- TC-S10-03: 終端から StepBackward で戻れる ---
+if is_headless; then
+  pend "TC-S10-03" "StepBackward headless 未実装"
+else
 curl -s -X POST "$API/replay/step-backward" > /dev/null
 sleep 1
 CT_BACK=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
 IS_BACK=$(bigt_gt "$CT_AT_END" "$CT_BACK")
 [ "$IS_BACK" = "true" ] && pass "TC-S10-03: 終端から StepBackward 可能" || \
   fail "TC-S10-03" "後退しない (end=$CT_AT_END back=$CT_BACK)"
+fi
 
 # --- TC-S10-04: Resume で再び Playing になる ---
 # BASE_STEP_DELAY_MS=100ms / 10x = 10ms/bar。
 # 60 バー後退 (600ms) して Resume し、即座に status を確認。
+if is_headless; then
+  pend "TC-S10-04" "StepBackward headless 未実装"
+  curl -s -X POST "$API/replay/resume" > /dev/null
+else
 for _ in $(seq 1 59); do curl -s -X POST "$API/replay/step-backward" > /dev/null; done
 curl -s -X POST "$API/replay/resume" > /dev/null
 # 10ms/bar × 60 bars = 600ms の余裕。100ms 以内にチェック
 ST=$(jqn "$(curl -s "$API/replay/status")" "d.status")
 [ "$ST" = "Playing" ] && pass "TC-S10-04: StepBackward 後に Resume → Playing" || \
   fail "TC-S10-04" "status=$ST"
+fi
 
 # --- TC-S10-05: 2 分幅のレンジ（最小動作確認） ---
 stop_app
@@ -105,22 +102,10 @@ TINY_END=$(node -e "
   console.log(d.getUTCFullYear()+'-'+pad(d.getUTCMonth()+1)+'-'+pad(d.getUTCDate())+' '+pad(d.getUTCHours())+':'+pad(d.getUTCMinutes()));
 ")
 
-cat > "$DATA_DIR/saved-state.json" <<EOF
-{
-  "layout_manager":{"layouts":[{"name":"S10-Tiny","dashboard":{"pane":{
-    "KlineChart":{
-      "layout":{"splits":[0.78],"autoscale":"FitToVisible"},"kind":"Candles",
-      "stream_type":[{"Kline":{"ticker":"BinanceLinear:BTCUSDT","timeframe":"M1"}}],
-      "settings":{"tick_multiply":null,"visual_config":null,"selected_basis":{"Time":"M1"}},
-      "indicators":["Volume"],"link_group":"A"
-    }
-  },"popout":[]}}],"active_layout":"S10-Tiny"},
-  "timezone":"UTC","trade_fetch_enabled":false,"size_in_quote_ccy":"Base",
-  "replay":{"mode":"replay","range_start":"$TINY_START","range_end":"$TINY_END"}
-}
-EOF
+setup_single_pane "$E2E_TICKER" "M1" "$TINY_START" "$TINY_END"
 
 start_app
+headless_play
 # 2 分 range (2 bars) は BASE_STEP_DELAY_MS=100ms/1x では 200ms で完走する。
 # wait_playing (1s ポーリング) では捕捉できないため、Paused 終端も合格条件とする。
 TINY_END_MS=$(node -e "console.log(new Date('${TINY_END}:00Z').getTime())")

@@ -99,6 +99,28 @@ impl ReplayController {
         matches!(&self.state.session, ReplaySession::Active { clock, .. } if clock.now_ms() >= clock.full_range().end)
     }
 
+    /// アクティブセッションの最新 kline close 価格を返す。
+    pub fn last_close_price(&self) -> Option<f64> {
+        let (clock, store, active_streams) = match &self.state.session {
+            ReplaySession::Active {
+                clock,
+                store,
+                active_streams,
+            } => (clock, store, active_streams),
+            _ => return None,
+        };
+        let now_ms = clock.now_ms();
+        for stream in active_streams {
+            if matches!(stream, StreamKind::Kline { .. }) {
+                let klines = store.klines_in(stream, 0..now_ms + 1);
+                if let Some(last) = klines.last() {
+                    return Some(last.close.to_f64());
+                }
+            }
+        }
+        None
+    }
+
     /// 現在の仮想時刻（ms）を返す。セッションがアクティブでない場合は `None`。
     pub fn current_time_ms(&self) -> Option<u64> {
         match &self.state.session {
@@ -230,7 +252,7 @@ impl ReplayController {
         let mut trades = Vec::new();
 
         let mut sorted_streams: Vec<_> = active_streams.iter().collect();
-        sorted_streams.sort_by_key(|s| format!("{s:?}"));
+        sorted_streams.sort_by_cached_key(|s| format!("{s:?}"));
 
         for stream in sorted_streams {
             if let StreamKind::Kline {

@@ -29,22 +29,10 @@ START_MS=$(node -e "console.log(new Date('${START}:00Z').getTime())")
 
 echo "  range: $START → $END (start_ms=$START_MS)"
 
-cat > "$DATA_DIR/saved-state.json" <<EOF
-{
-  "layout_manager":{"layouts":[{"name":"S27","dashboard":{"pane":{
-    "KlineChart":{
-      "layout":{"splits":[0.78],"autoscale":"FitToVisible"},"kind":"Candles",
-      "stream_type":[{"Kline":{"ticker":"BinanceLinear:BTCUSDT","timeframe":"M1"}}],
-      "settings":{"tick_multiply":null,"visual_config":null,"selected_basis":{"Time":"M1"}},
-      "indicators":["Volume"],"link_group":"A"
-    }
-  },"popout":[]}}],"active_layout":"S27"},
-  "timezone":"UTC","trade_fetch_enabled":false,"size_in_quote_ccy":"Base",
-  "replay":{"mode":"replay","range_start":"$START","range_end":"$END"}
-}
-EOF
+setup_single_pane "$E2E_TICKER" "M1" "$START" "$END"
 
 start_app
+headless_play
 
 # Playing に到達するまで待機（最大 60 秒）
 if ! wait_status "Playing" 60; then

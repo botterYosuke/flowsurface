@@ -19,22 +19,10 @@ backup_state
 START=$(utc_offset -3)
 END=$(utc_offset -1)
 
-cat > "$DATA_DIR/saved-state.json" <<EOF
-{
-  "layout_manager":{"layouts":[{"name":"S9","dashboard":{"pane":{
-    "KlineChart":{
-      "layout":{"splits":[0.78],"autoscale":"FitToVisible"},"kind":"Candles",
-      "stream_type":[{"Kline":{"ticker":"BinanceLinear:BTCUSDT","timeframe":"M1"}}],
-      "settings":{"tick_multiply":null,"visual_config":null,"selected_basis":{"Time":"M1"}},
-      "indicators":["Volume"],"link_group":"A"
-    }
-  },"popout":[]}}],"active_layout":"S9"},
-  "timezone":"UTC","trade_fetch_enabled":false,"size_in_quote_ccy":"Base",
-  "replay":{"mode":"replay","range_start":"$START","range_end":"$END"}
-}
-EOF
+setup_single_pane "$E2E_TICKER" "M1" "$START" "$END"
 
 start_app
+headless_play
 if ! wait_playing 30; then
   fail "TC-S9-precond" "auto-play で Playing に到達せず"
   restore_state
@@ -91,6 +79,9 @@ IS_AT_END=$(node -e "console.log(BigInt('$CT_AFTER') >= BigInt('$END_TIME_MS') -
   || fail "TC-S9-03b" "ct=$CT_AFTER not near end=$END_TIME_MS"
 
 # --- TC-S9-04: StepBackward を連続 5 回 → 単調減少 ---
+if is_headless; then
+  pend "TC-S9-04" "StepBackward headless 未実装"
+else
 curl -s -X POST "$API/replay/pause" > /dev/null
 for i in $(seq 1 5); do
   curl -s -X POST "$API/replay/step-forward" > /dev/null
@@ -113,6 +104,7 @@ for i in $(seq 1 4); do
 done
 [ "$MONOTONE" = "true" ] && pass "TC-S9-04: StepBackward 連続 5 回 単調減少" || \
   fail "TC-S9-04" "単調減少でない times=${TIMES[*]}"
+fi
 
 restore_state
 print_summary

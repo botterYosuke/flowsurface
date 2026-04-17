@@ -9,6 +9,7 @@ mod modal;
 mod notify;
 mod screen;
 use screen::login::{self, LoginScreen};
+mod headless;
 mod replay;
 mod replay_api;
 use replay::{ReplayMessage, ReplaySystemEvent, ReplayUserMessage, controller::ReplayController};
@@ -132,6 +133,14 @@ fn extract_pane_ticker_timeframe(
 fn main() {
     #[cfg(debug_assertions)]
     dotenvy::dotenv().ok();
+
+    let args: Vec<String> = std::env::args().collect();
+    if args.contains(&"--headless".to_string()) {
+        logger::setup(true).expect("Failed to initialize logger");
+        let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+        rt.block_on(headless::run(&args));
+        return;
+    }
 
     logger::setup(cfg!(debug_assertions)).expect("Failed to initialize logger");
 
@@ -297,7 +306,7 @@ impl Flowsurface {
                     None
                 }
             },
-            is_headless: std::env::var("CI").is_ok(),
+            is_headless: std::env::var("CI").is_ok() || std::env::args().any(|a| a == "--headless"),
         };
 
         if let Some(err) = audio_init_err {
@@ -1298,14 +1307,10 @@ impl Flowsurface {
                                 let main_window_id = self.main_window.id;
                                 if let Some(id) =
                                     self.layout_manager.active_layout_id().map(|l| l.unique)
+                                    && let Some(dash) =
+                                        self.layout_manager.get_mut(id).map(|l| &mut l.dashboard)
                                 {
-                                    if let Some(dash) = self
-                                        .layout_manager
-                                        .get_mut(id)
-                                        .map(|l| &mut l.dashboard)
-                                    {
-                                        let _ = self.replay.tick(now, dash, main_window_id);
-                                    }
+                                    let _ = self.replay.tick(now, dash, main_window_id);
                                 }
                             }
                             reply_tx.send(reply_replay_status(self));
@@ -1319,16 +1324,26 @@ impl Flowsurface {
                         }
                         ReplayCommand::Play { start, end } => {
                             let main_window_id = self.main_window.id;
-                            let active_id = self
-                                .layout_manager
-                                .active_layout_id()
-                                .expect("No active layout")
-                                .unique;
-                            let dashboard = self
+                            let Some(active_id) =
+                                self.layout_manager.active_layout_id().map(|l| l.unique)
+                            else {
+                                reply_tx.send_status(
+                                    500,
+                                    r#"{"error":"no active layout"}"#.to_string(),
+                                );
+                                return Task::none();
+                            };
+                            let Some(dashboard) = self
                                 .layout_manager
                                 .get_mut(active_id)
                                 .map(|l| &mut l.dashboard)
-                                .expect("No active dashboard");
+                            else {
+                                reply_tx.send_status(
+                                    500,
+                                    r#"{"error":"no active dashboard"}"#.to_string(),
+                                );
+                                return Task::none();
+                            };
                             let (task, toast) =
                                 self.replay
                                     .play_with_range(start, end, dashboard, main_window_id);
@@ -1472,9 +1487,14 @@ impl Flowsurface {
                                         PositionSide::Short
                                     };
                                     let vo_type = if order_type == "limit" {
-                                        VirtualOrderType::Limit {
-                                            price: limit_price.unwrap_or(0.0),
-                                        }
+                                        let Some(price) = limit_price.filter(|p| *p > 0.0) else {
+                                            reply_tx.send_status(
+                                                400,
+                                                r#"{"error":"limit order requires limit_price > 0"}"#.to_string(),
+                                            );
+                                            return Task::none();
+                                        };
+                                        VirtualOrderType::Limit { price }
                                     } else {
                                         VirtualOrderType::Market
                                     };
@@ -1506,7 +1526,9 @@ impl Flowsurface {
                             }
                             VirtualExchangeCommand::GetPortfolio => {
                                 if let Some(engine) = &self.virtual_engine {
-                                    let snap = engine.portfolio_snapshot(0.0);
+                                    let current_price =
+                                        self.replay.last_close_price().unwrap_or(0.0);
+                                    let snap = engine.portfolio_snapshot(current_price);
                                     reply_tx.send(serde_json::to_string(&snap).unwrap_or_else(
                                         |_| r#"{"error":"serialization failed"}"#.to_string(),
                                     ));

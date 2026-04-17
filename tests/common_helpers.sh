@@ -26,6 +26,12 @@ EXE="${FLOWSURFACE_EXE:-$REPO_ROOT/target/release/flowsurface.exe}"
 # E2E_TICKER: テストで使うデフォルトティッカー（CI では HyperliquidLinear:BTC など geo-restriction なしのものを指定）
 E2E_TICKER="${E2E_TICKER:-BinanceLinear:BTCUSDT}"
 
+# IS_HEADLESS=true のとき --headless モードで起動する（GUI なし・常に Replay モード）
+IS_HEADLESS="${IS_HEADLESS:-false}"
+
+# headless モードか判定
+is_headless() { [ "$IS_HEADLESS" = "true" ]; }
+
 # テスト実行前にデータディレクトリを確保（CI 環境では $APPDATA/flowsurface が存在しない場合がある）
 mkdir -p "$DATA_DIR"
 
@@ -38,9 +44,16 @@ fail() { echo "  FAIL: $1 — $2"; FAIL=$((FAIL + 1)); }
 pend() { echo "  PEND: $1 — $2 (API 拡張待ち)"; PEND=$((PEND + 1)); }
 
 start_app() {
+  if is_headless; then
+    _start_headless_app
+  else
+    _start_gui_app
+  fi
+}
+
+_start_gui_app() {
   echo "  Starting app..."
   > "$APPDATA/flowsurface/flowsurface-current.log" 2>/dev/null || true
-  # ログ出力先: CI では $RUNNER_TEMP、ローカルでは /tmp を使用
   local _log_dir="${RUNNER_TEMP:-/tmp}"
   mkdir -p "$_log_dir" 2>/dev/null || true
   "$EXE" 2>"$_log_dir/e2e_debug.log" &
@@ -53,6 +66,29 @@ start_app() {
     sleep 1
   done
   echo "  ERROR: API not ready after 30s"
+  return 1
+}
+
+_start_headless_app() {
+  local _ticker="${E2E_TICKER:-HyperliquidLinear:BTC}"
+  local _timeframe="${_HEADLESS_TIMEFRAME:-${E2E_TIMEFRAME:-M1}}"
+  local _log_dir="${RUNNER_TEMP:-/tmp}"
+  mkdir -p "$_log_dir" 2>/dev/null || true
+  echo "  Starting headless app (ticker=$_ticker timeframe=$_timeframe)..."
+  DEV_IS_DEMO=true "$EXE" \
+    --headless \
+    --ticker "$_ticker" \
+    --timeframe "$_timeframe" \
+    2>"$_log_dir/e2e_headless_debug.log" &
+  APP_PID=$!
+  for i in $(seq 1 30); do
+    if curl -s "$API/replay/status" > /dev/null 2>&1; then
+      echo "  Headless API ready (${i}s)"
+      return 0
+    fi
+    sleep 1
+  done
+  echo "  ERROR: Headless API not ready after 30s"
   return 1
 }
 
@@ -286,10 +322,19 @@ speed_to_10x() {
   curl -s -X POST "$API/replay/speed" > /dev/null
 }
 
-# 単一ペイン saved-state.json を書き込む
+# headless モード用の状態変数
+_HEADLESS_START=""
+_HEADLESS_END=""
+_HEADLESS_TIMEFRAME=""
+
+# 単一ペイン saved-state.json を書き込む（headless では変数だけ保存してスキップ）
 # 引数: ticker timeframe start_utc end_utc
 setup_single_pane() {
   local ticker=$1 timeframe=$2 start=$3 end=$4
+  _HEADLESS_START="$start"
+  _HEADLESS_END="$end"
+  _HEADLESS_TIMEFRAME="$timeframe"
+  if is_headless; then return; fi
   local name="Test-${timeframe}"
   cat > "$DATA_DIR/saved-state.json" <<HEREDOC
 {
@@ -306,6 +351,33 @@ setup_single_pane() {
 }
 HEREDOC
 }
+
+# headless では replay/play を発行（GUI は saved-state auto-play のため no-op）
+headless_play() {
+  local start="${1:-$_HEADLESS_START}" end="${2:-$_HEADLESS_END}"
+  if is_headless; then
+    curl -s -X POST "$API/replay/play" \
+      -H "Content-Type: application/json" \
+      -d "{\"start\":\"$start\",\"end\":\"$end\"}" > /dev/null
+  fi
+}
+
+# GUI では replay/toggle を発行して Replay モードへ移行（headless は常に Replay のため no-op）
+ensure_replay_mode() {
+  if ! is_headless; then
+    curl -s -X POST "$API/replay/toggle" > /dev/null
+  fi
+}
+
+# headless では pend して return 0（テスト本体をスキップ）、GUI では return 1（テスト本体を実行）
+pend_if_headless() {
+  local label="$1" reason="${2:-headless mode}"
+  if is_headless; then pend "$label" "$reason"; return 0; fi
+  return 1
+}
+
+# E2E_TICKER のシンボル部分（例: "HyperliquidLinear:BTC" → "BTC"）
+order_symbol() { echo "${E2E_TICKER:-BinanceLinear:BTCUSDT}" | cut -d: -f2; }
 
 # ステップサイズ定数
 STEP_M1=60000

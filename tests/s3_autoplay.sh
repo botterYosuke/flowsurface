@@ -22,22 +22,10 @@ END=$(utc_offset -1)
 START_MS=$(node -e "console.log(new Date('${START}:00Z').getTime())")
 END_MS=$(node -e "console.log(new Date('${END}:00Z').getTime())")
 
-cat > "$DATA_DIR/saved-state.json" <<EOF
-{
-  "layout_manager":{"layouts":[{"name":"S3-AutoPlay","dashboard":{"pane":{
-    "KlineChart":{
-      "layout":{"splits":[0.78],"autoscale":"FitToVisible"},"kind":"Candles",
-      "stream_type":[{"Kline":{"ticker":"BinanceLinear:BTCUSDT","timeframe":"M1"}}],
-      "settings":{"tick_multiply":null,"visual_config":null,"selected_basis":{"Time":"M1"}},
-      "indicators":["Volume"],"link_group":"A"
-    }
-  },"popout":[]}}],"active_layout":"S3-AutoPlay"},
-  "timezone":"UTC","trade_fetch_enabled":false,"size_in_quote_ccy":"Base",
-  "replay":{"mode":"replay","range_start":"$START","range_end":"$END"}
-}
-EOF
+setup_single_pane "$E2E_TICKER" "M1" "$START" "$END"
 
 start_app
+headless_play
 
 # --- TC-S3-01: 手動 toggle / play なしで Playing になる（最大 30s） ---
 if wait_playing 30; then
@@ -69,6 +57,7 @@ DIFF=$(bigt_sub "$POST_SF" "$PRE")
 [ "$DIFF" = "60000" ] && pass "TC-S3-04: StepForward +60000ms" || \
   fail "TC-S3-04" "diff=$DIFF (expected 60000)"
 
+if ! is_headless; then
 # --- TC-S3-05: range_start が空文字のとき auto-play しない ---
 stop_app
 cat > "$DATA_DIR/saved-state.json" <<EOF
@@ -106,6 +95,7 @@ ERR_COUNT=$(node -e "
 " "$NOTIF")
 [ "$ERR_COUNT" = "0" ] && pass "TC-S3-05c: error/warning toast なし" || \
   fail "TC-S3-05c" "error/warning toast が $ERR_COUNT 件発火: $NOTIF"
+fi
 
 restore_state
 print_summary

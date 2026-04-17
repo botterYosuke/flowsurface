@@ -160,6 +160,11 @@ pub fn subscription() -> impl futures::Stream<Item = ApiMessage> {
     })
 }
 
+/// headless モード向け: 外部から sender を渡して HTTP サーバーを起動する。
+pub async fn start_server(sender: futures::channel::mpsc::Sender<ApiMessage>) {
+    run_server(sender).await;
+}
+
 /// ポート番号を環境変数または デフォルト 9876 から取得
 fn api_port() -> u16 {
     std::env::var("FLOWSURFACE_API_PORT")
@@ -783,6 +788,7 @@ async fn write_response(
         400 => "Bad Request",
         404 => "Not Found",
         500 => "Internal Server Error",
+        501 => "Not Implemented",
         _ => "Unknown",
     };
 

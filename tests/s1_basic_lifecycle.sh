@@ -1,7 +1,7 @@
 #!/bin/bash
 # s1_basic_lifecycle.sh — スイート S1: 基本ライフサイクル
 #
-# 検証シナリオ:
+# 検証シナリオ（GUI モード）:
 #   TC-S1-01: 起動時 mode=Live
 #   TC-S1-02: toggle → mode=Replay
 #   TC-S1-03〜04: play → Loading/Playing 到達（最大 120s）
@@ -13,21 +13,29 @@
 #   TC-S1-14: StepBackward -60000ms
 #   TC-S1-15a〜f: Live 復帰で状態リセット・range 値は保持
 #
+# headless モード（IS_HEADLESS=true）での差分:
+#   TC-S1-01: 起動時 mode=Replay（headless は常に Replay）
+#   TC-S1-02: toggle は no-op、mode=Replay のまま
+#   TC-S1-15: Live モードなし → スキップ（PEND）
+#   TC-S1-H09: GET /api/pane/list → HTTP 501（headless 追加検証）
+#
 # 仕様根拠:
 #   docs/replay_header.md §4〜§8 — Replay ライフサイクル・clock 状態機械
 #
-# フィクスチャ: E2E_TICKER(デフォルト BinanceLinear:BTCUSDT) M1, Live モード起動 → 手動 toggle/play
-# E2E_TICKER 環境変数でティッカーを切り替え可能（例: HyperliquidLinear:BTC）
+# フィクスチャ: E2E_TICKER(デフォルト BinanceLinear:BTCUSDT) M1
+# IS_HEADLESS=true で headless 起動（saved-state.json 不要）
 source "$(dirname "$0")/common_helpers.sh"
 
 TICKER="${E2E_TICKER:-BinanceLinear:BTCUSDT}"
-echo "=== S1: 基本ライフサイクル (ticker=$TICKER) ==="
+echo "=== S1: 基本ライフサイクル (ticker=$TICKER headless=$IS_HEADLESS) ==="
 backup_state
 
 START=$(utc_offset -3)
 END=$(utc_offset -1)
 
-cat > "$DATA_DIR/saved-state.json" <<EOF
+# GUI モードのみ: saved-state.json を設定してから起動
+if ! is_headless; then
+  cat > "$DATA_DIR/saved-state.json" <<EOF
 {
   "layout_manager": {
     "layouts": [{"name":"S1-Basic","dashboard":{"pane":{
@@ -43,38 +51,49 @@ cat > "$DATA_DIR/saved-state.json" <<EOF
   "timezone":"UTC","trade_fetch_enabled":false,"size_in_quote_ccy":"Base"
 }
 EOF
+fi
 
 start_app
 
-# Live ストリームが Ready になるまで待つ（メタデータ取得に数秒かかる）
-# pane/list の streams_ready が true になるまでポーリング（最大 30s）
-for i in $(seq 1 30); do
-  PLIST=$(curl -s "$API/pane/list" 2>/dev/null || echo '{}')
-  READY=$(node -e "try{const d=JSON.parse(process.argv[1]);const p=(d.panes||[])[0];process.stdout.write(p&&p.streams_ready===true?'true':'false');}catch(e){process.stdout.write('false');}" "$PLIST")
-  if [ "$READY" = "true" ]; then
-    TICKER=$(node -e "try{const d=JSON.parse(process.argv[1]);const p=(d.panes||[])[0];process.stdout.write(p&&p.ticker?p.ticker:'');}catch(e){}" "$PLIST")
-    echo "  streams ready (${i}s, ticker=$TICKER)"
-    break
-  fi
-  sleep 1
-done
+# GUI モードのみ: Live ストリームが Ready になるまで待つ
+if ! is_headless; then
+  for i in $(seq 1 30); do
+    PLIST=$(curl -s "$API/pane/list" 2>/dev/null || echo '{}')
+    READY=$(node -e "try{const d=JSON.parse(process.argv[1]);const p=(d.panes||[])[0];process.stdout.write(p&&p.streams_ready===true?'true':'false');}catch(e){process.stdout.write('false');}" "$PLIST")
+    if [ "$READY" = "true" ]; then
+      TICKER=$(node -e "try{const d=JSON.parse(process.argv[1]);const p=(d.panes||[])[0];process.stdout.write(p&&p.ticker?p.ticker:'');}catch(e){}" "$PLIST")
+      echo "  streams ready (${i}s, ticker=$TICKER)"
+      break
+    fi
+    sleep 1
+  done
+fi
 
-# --- TC-S1-01: Live モードで起動 ---
+# --- TC-S1-01: 起動時モード ---
 STATUS=$(curl -s "$API/replay/status")
 MODE=$(jqn "$STATUS" "d.mode")
-[ "$MODE" = "Live" ] && pass "TC-S1-01: 起動時 mode=Live" || fail "TC-S1-01" "mode=$MODE"
+if is_headless; then
+  [ "$MODE" = "Replay" ] && pass "TC-S1-01: headless 起動時 mode=Replay" || fail "TC-S1-01" "mode=$MODE"
+else
+  [ "$MODE" = "Live" ] && pass "TC-S1-01: 起動時 mode=Live" || fail "TC-S1-01" "mode=$MODE"
+fi
 
-# --- TC-S1-02: Replay に切替 ---
+# --- TC-S1-02: Replay モードへ ---
 TOGGLE=$(curl -s -X POST "$API/replay/toggle")
 MODE2=$(jqn "$TOGGLE" "d.mode")
-[ "$MODE2" = "Replay" ] && pass "TC-S1-02: toggle → mode=Replay" || fail "TC-S1-02" "mode=$MODE2"
+if is_headless; then
+  # headless では Toggle は no-op（常に Replay）
+  [ "$MODE2" = "Replay" ] && pass "TC-S1-02: headless toggle → mode=Replay (no-op)" || fail "TC-S1-02" "mode=$MODE2"
+else
+  [ "$MODE2" = "Replay" ] && pass "TC-S1-02: toggle → mode=Replay" || fail "TC-S1-02" "mode=$MODE2"
+fi
 
 # --- TC-S1-03: Play 開始 ---
 PLAY_RES=$(curl -s -X POST "$API/replay/play" \
   -H "Content-Type: application/json" \
   -d "{\"start\":\"$START\",\"end\":\"$END\"}")
 PLAY_ST=$(jqn "$PLAY_RES" "d.status")
-[[ "$PLAY_ST" = "Loading" || "$PLAY_ST" = "Playing" ]] && \
+[[ "$PLAY_ST" = "Loading" || "$PLAY_ST" = "loading" || "$PLAY_ST" = "Playing" ]] && \
   pass "TC-S1-03: play → Loading or Playing" || fail "TC-S1-03" "status=$PLAY_ST"
 
 # --- TC-S1-04: Playing 到達（最大 120s） ---
@@ -150,28 +169,46 @@ ON_BAR=$(is_bar_boundary "$POST_SF" "$STEP_M1")
   fail "TC-S1-13b" "POST_SF=$POST_SF"
 
 # --- TC-S1-14: StepBackward は 1 バーきっかり後退 ---
-BEF=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
-curl -s -X POST "$API/replay/step-backward" > /dev/null
-sleep 1
-AFT=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
-DIFF_B=$(bigt_sub "$BEF" "$AFT")
-[ "$DIFF_B" = "60000" ] && pass "TC-S1-14: StepBackward -60000ms" || \
-  fail "TC-S1-14" "diff=$DIFF_B (expected 60000, before=$BEF after=$AFT)"
+if is_headless; then
+  pend "TC-S1-14" "StepBackward は headless 未実装"
+else
+  BEF=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
+  curl -s -X POST "$API/replay/step-backward" > /dev/null
+  sleep 1
+  AFT=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
+  DIFF_B=$(bigt_sub "$BEF" "$AFT")
+  [ "$DIFF_B" = "60000" ] && pass "TC-S1-14: StepBackward -60000ms" || \
+    fail "TC-S1-14" "diff=$DIFF_B (expected 60000, before=$BEF after=$AFT)"
+fi
 
-# --- TC-S1-15: Live 復帰時の状態完全リセット ---
-LIVE_TOGGLE=$(curl -s -X POST "$API/replay/toggle")
-LIVE_MODE=$(jqn "$LIVE_TOGGLE" "d.mode")
-LIVE_ST=$(jqn "$LIVE_TOGGLE" "d.status")
-LIVE_CT=$(jqn "$LIVE_TOGGLE" "d.current_time")
-LIVE_SP=$(jqn "$LIVE_TOGGLE" "d.speed")
-LIVE_RS=$(jqn "$LIVE_TOGGLE" "d.range_start")
-LIVE_RE=$(jqn "$LIVE_TOGGLE" "d.range_end")
-[ "$LIVE_MODE" = "Live" ] && pass "TC-S1-15a: mode=Live" || fail "TC-S1-15a" "mode=$LIVE_MODE"
-[ "$LIVE_ST" = "null" ] && pass "TC-S1-15b: status=null" || fail "TC-S1-15b" "status=$LIVE_ST"
-[ "$LIVE_CT" = "null" ] && pass "TC-S1-15c: current_time=null" || fail "TC-S1-15c" "ct=$LIVE_CT"
-[ "$LIVE_SP" = "null" ] && pass "TC-S1-15d: speed=null" || fail "TC-S1-15d" "speed=$LIVE_SP"
-[ -n "$LIVE_RS" ] && pass "TC-S1-15e: range_start は最後の Replay 値を保持 ($LIVE_RS)" || fail "TC-S1-15e" "rs が空 (保持されていない)"
-[ -n "$LIVE_RE" ] && pass "TC-S1-15f: range_end は最後の Replay 値を保持 ($LIVE_RE)" || fail "TC-S1-15f" "re が空 (保持されていない)"
+# --- TC-S1-15: Live 復帰（GUI モードのみ） ---
+if is_headless; then
+  for sub in a b c d e f; do
+    pend "TC-S1-15${sub}" "headless は Live モードなし"
+  done
+else
+  LIVE_TOGGLE=$(curl -s -X POST "$API/replay/toggle")
+  LIVE_MODE=$(jqn "$LIVE_TOGGLE" "d.mode")
+  LIVE_ST=$(jqn "$LIVE_TOGGLE" "d.status")
+  LIVE_CT=$(jqn "$LIVE_TOGGLE" "d.current_time")
+  LIVE_SP=$(jqn "$LIVE_TOGGLE" "d.speed")
+  LIVE_RS=$(jqn "$LIVE_TOGGLE" "d.range_start")
+  LIVE_RE=$(jqn "$LIVE_TOGGLE" "d.range_end")
+  [ "$LIVE_MODE" = "Live" ] && pass "TC-S1-15a: mode=Live" || fail "TC-S1-15a" "mode=$LIVE_MODE"
+  [ "$LIVE_ST" = "null" ] && pass "TC-S1-15b: status=null" || fail "TC-S1-15b" "status=$LIVE_ST"
+  [ "$LIVE_CT" = "null" ] && pass "TC-S1-15c: current_time=null" || fail "TC-S1-15c" "ct=$LIVE_CT"
+  [ "$LIVE_SP" = "null" ] && pass "TC-S1-15d: speed=null" || fail "TC-S1-15d" "speed=$LIVE_SP"
+  [ -n "$LIVE_RS" ] && pass "TC-S1-15e: range_start は最後の Replay 値を保持 ($LIVE_RS)" || fail "TC-S1-15e" "rs が空"
+  [ -n "$LIVE_RE" ] && pass "TC-S1-15f: range_end は最後の Replay 値を保持 ($LIVE_RE)" || fail "TC-S1-15f" "re が空"
+fi
+
+# --- TC-S1-H09: Pane 系 API は 501（headless モードのみ） ---
+if is_headless; then
+  CODE_PANE=$(curl -s -o /dev/null -w "%{http_code}" "$API_BASE/api/pane/list")
+  [ "$CODE_PANE" = "501" ] \
+    && pass "TC-S1-H09: GET /api/pane/list → HTTP 501 (headless)" \
+    || fail "TC-S1-H09" "HTTP=$CODE_PANE (expected 501)"
+fi
 
 restore_state
 print_summary

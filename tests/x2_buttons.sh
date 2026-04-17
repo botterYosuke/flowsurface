@@ -8,22 +8,10 @@ backup_state
 START=$(utc_offset -3)
 END=$(utc_offset -1)
 
-cat > "$DATA_DIR/saved-state.json" <<EOF
-{
-  "layout_manager":{"layouts":[{"name":"X2","dashboard":{"pane":{
-    "KlineChart":{
-      "layout":{"splits":[0.78],"autoscale":"FitToVisible"},"kind":"Candles",
-      "stream_type":[{"Kline":{"ticker":"BinanceLinear:BTCUSDT","timeframe":"M1"}}],
-      "settings":{"tick_multiply":null,"visual_config":null,"selected_basis":{"Time":"M1"}},
-      "indicators":["Volume"],"link_group":"A"
-    }
-  },"popout":[]}}],"active_layout":"X2"},
-  "timezone":"UTC","trade_fetch_enabled":false,"size_in_quote_ccy":"Base",
-  "replay":{"mode":"replay","range_start":"$START","range_end":"$END"}
-}
-EOF
+setup_single_pane "$E2E_TICKER" "M1" "$START" "$END"
 
 start_app
+headless_play
 if ! wait_playing 60; then
   fail "X2-precond" "Playing 到達せず"
   restore_state
@@ -45,6 +33,9 @@ DIFF=$(bigt_sub "$POST" "$PRE")
   fail "TC-X2-01" "diff=$DIFF (expected 300000)"
 
 # --- TC-X2-02: StepBackward x5 で完全可逆 ---
+if is_headless; then
+  pend "TC-X2-02" "StepBackward headless 未実装"
+else
 for i in $(seq 1 5); do
   curl -s -X POST "$API/replay/step-backward" > /dev/null
   sleep 0.2
@@ -52,8 +43,12 @@ done
 BACK=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
 [ "$BACK" = "$PRE" ] && pass "TC-X2-02: 可逆 (back=$BACK)" || \
   fail "TC-X2-02" "back=$BACK pre=$PRE"
+fi
 
 # --- TC-X2-03: start 端での StepBackward は no-op ---
+if is_headless; then
+  pend "TC-X2-03" "StepBackward headless 未実装"
+else
 ST_T=$(jqn "$(curl -s "$API/replay/status")" "d.start_time")
 for i in $(seq 1 200); do
   CT=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
@@ -69,6 +64,7 @@ BEYOND=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
 EQ2=$(bigt_eq "$AT_START" "$BEYOND")
 [ "$EQ2" = "true" ] && pass "TC-X2-03: start 端 StepBackward は no-op" || \
   fail "TC-X2-03" "AT_START=$AT_START BEYOND=$BEYOND"
+fi
 
 # --- TC-X2-04: Pause 冪等性 ---
 curl -s -X POST "$API/replay/pause" > /dev/null
@@ -133,6 +129,9 @@ EQ_CT=$(bigt_eq "$POST_CT" "$PRE_CT")
   || fail "TC-X2-07" "current_time が変化した (pre=$PRE_CT → post=$POST_CT)"
 
 # --- TC-X2-08: Live 中はボタンが意味を持たない ---
+if is_headless; then
+  pend "TC-X2-08" "headless は Live モードなし"
+else
 curl -s -X POST "$API/replay/toggle" > /dev/null  # → Live
 LIVE_BEFORE=$(curl -s "$API/replay/status")
 curl -s -X POST "$API/replay/step-forward" > /dev/null
@@ -146,6 +145,7 @@ A_CT=$(jqn "$LIVE_AFTER" "d.current_time")
 [ "$A_MODE" = "Live" ] && [ "$B_MODE" = "Live" ] && [ "$B_CT" = "null" ] && [ "$A_CT" = "null" ] && \
   pass "TC-X2-08: Live 中ボタン操作は no-op" || \
   fail "TC-X2-08" "mode=$B_MODE→$A_MODE ct=$B_CT→$A_CT"
+fi
 
 restore_state
 print_summary
