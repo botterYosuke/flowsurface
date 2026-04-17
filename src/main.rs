@@ -1291,6 +1291,23 @@ impl Flowsurface {
                 match command {
                     ApiCommand::Replay(cmd) => match cmd {
                         ReplayCommand::GetStatus => {
+                            // headless CI 対応: iced::time::every が発火しない環境でも
+                            // API ポーリング毎に clock を前進させる。
+                            if self.replay.is_playing() {
+                                let now = std::time::Instant::now();
+                                let main_window_id = self.main_window.id;
+                                if let Some(id) =
+                                    self.layout_manager.active_layout_id().map(|l| l.unique)
+                                {
+                                    if let Some(dash) = self
+                                        .layout_manager
+                                        .get_mut(id)
+                                        .map(|l| &mut l.dashboard)
+                                    {
+                                        let _ = self.replay.tick(now, dash, main_window_id);
+                                    }
+                                }
+                            }
                             reply_tx.send(reply_replay_status(self));
                         }
                         ReplayCommand::Toggle => {
