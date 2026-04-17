@@ -2,23 +2,19 @@
 # s27_cyclespeed_reset.sh — S27: CycleSpeed は速度のみ変更する（停止・シーク副作用なし）
 #
 # 検証シナリオ（仕様 R4-3-2「CycleSpeed 副作用除去」）:
-#
-#   旧仕様: CycleSpeed は pause + seek(range.start) を伴っていた。
-#   新仕様: CycleSpeed は speed ラベルのサイクルのみ。status・current_time に影響しない。
-#
-#   TC-A: Playing 中に CycleSpeed (1x→2x)
-#         → status=Playing のまま、speed=2x、current_time は start_time より前進したまま
-#   TC-B: Playing 中に CycleSpeed (2x→5x)
-#         → status=Playing のまま、speed=5x
-#   TC-C: Playing 中に CycleSpeed (5x→10x)
-#         → status=Playing のまま、speed=10x
-#   TC-D: Playing 中に CycleSpeed (10x→1x ラップ)
-#         → status=Playing のまま、speed=1x
-#   TC-E: Pause 後に CycleSpeed (1x→2x)
-#         → status=Paused のまま（Paused は CycleSpeed で再生開始しない）、speed=2x
+#   TC-A: Playing 中に CycleSpeed (1x→2x) → status=Playing のまま・speed=2x・current_time 前進維持
+#   TC-B: Playing 中に CycleSpeed (2x→5x) → status=Playing のまま・speed=5x
+#   TC-C: Playing 中に CycleSpeed (5x→10x) → status=Playing のまま・speed=10x
+#   TC-D: Playing 中に CycleSpeed (10x→1x ラップ) → status=Playing のまま・speed=1x
+#   TC-E: Pause 後に CycleSpeed (1x→2x) → status=Paused のまま・speed=2x
 #   TC-F: Paused 状態から Resume → Playing 到達
 #
-# フィクスチャ: BinanceLinear:BTCUSDT M1, UTC[-3h, -1h] (auto-play)
+# 仕様根拠:
+#   docs/replay_header.md §8.1 — R4-3-2「CycleSpeed 副作用除去」
+#   旧仕様: CycleSpeed は pause + seek(range.start) を伴っていた
+#   新仕様: CycleSpeed は speed ラベルのサイクルのみ。status・current_time に影響しない
+#
+# フィクスチャ: BinanceLinear:BTCUSDT M1, auto-play (UTC[-3h, -1h])
 set -euo pipefail
 source "$(dirname "$0")/common_helpers.sh"
 

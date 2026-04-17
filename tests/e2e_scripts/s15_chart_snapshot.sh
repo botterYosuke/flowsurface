@@ -1,6 +1,18 @@
 #!/usr/bin/env bash
 # s15_chart_snapshot.sh — スイート S15: chart-snapshot API テスト
-# GET /api/pane/chart-snapshot?pane_id=<uuid> の動作確認
+#
+# 検証シナリオ:
+#   TC-S15-01: oldest_ts ≤ start_time かつ差分 ≤ 301 bars（PRE_START_HISTORY_BARS=300 確認）
+#   TC-S15-02: StepForward 後 bar_count 増加または同数
+#   TC-S15-03: StepBackward 後も snapshot 取得可能（クラッシュなし）
+#   TC-S15-04: 存在しない pane_id → {"error":"..."} + アプリ生存
+#   TC-S15-05: Live モード中の snapshot 取得後もアプリ応答あり
+#
+# 仕様根拠:
+#   docs/replay_header.md §9.2 — GET /api/pane/chart-snapshot レスポンスフォーマット
+#
+# フィクスチャ: BinanceLinear:BTCUSDT M1, auto-play (UTC[-3h, -1h])
+#   注: chart-snapshot API 未実装環境では全 TC が PENDING
 set -euo pipefail
 source "$(dirname "$0")/common_helpers.sh"
 

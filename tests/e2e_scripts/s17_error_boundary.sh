@@ -1,6 +1,17 @@
 #!/usr/bin/env bash
 # s17_error_boundary.sh — スイート S17: クラッシュ・エラー境界テスト
-# アプリがクラッシュせず、エラーが適切に処理されることを確認する
+#
+# 検証シナリオ:
+#   TC-S17-01〜03: 不正 pane_id（pane/split, pane/close, pane/set-ticker）→ HTTP 200 + アプリ生存
+#   TC-S17-04: 空 range (start == end) でもアプリ生存
+#   TC-S17-05: 未来の range でもアプリ生存
+#   TC-S17-06: StepForward 50 連打（Paused 状態）→ crash なし・status=Paused
+#   TC-S17-07: split 上限到達後もクラッシュなし
+#
+# 仕様根拠:
+#   docs/replay_header.md §10 — エラー境界・クラッシュ防止
+#
+# フィクスチャ: BinanceLinear:BTCUSDT M1, auto-play + 各 TC で再起動
 set -euo pipefail
 source "$(dirname "$0")/common_helpers.sh"
 

@@ -1,12 +1,5 @@
 #!/usr/bin/env bash
 # s30_mixed_sample_loading.sh — S30: Tachibana D1 + ETHUSDT M1 混在起動時の Loading 解消
-# ビルド要件: cargo build（debug ビルド）— inject-* エンドポイントは debug_assertions でのみ有効
-#
-# 修正された不具合 (2 件):
-#   (1) Play 時に D1 ストリームの load_range が M1 の step_size で計算されていたため
-#       D1 klines が range 外になり空で返っていた → compute_load_range を各 TF で計算するよう修正
-#   (2) KlinesLoadCompleted で空 klines が返ったとき on_klines_loaded を呼ばず
-#       ストリームがロード済みになれなかった → status が "Loading" に固定された
 #
 # 検証シナリオ:
 #   TC-A: Tachibana D1 + ETHUSDT M1 の 2 ペイン構成で Play → Playing に遷移すること
@@ -14,11 +7,17 @@
 #   TC-B: Playing 後 current_time が前進すること（再生が正常動作している）
 #   TC-C: 両ペインの streams_ready=true になること
 #
-# 注意: inject-master / inject-daily-history エンドポイントは現在未実装のため、
-#       実際の Tachibana セッション（keyring）を使用する。
-#       セッションが存在しない環境では TC-A は SKIP される。
+# 仕様根拠:
+#   修正された不具合 (2 件):
+#   (1) D1 ストリームの load_range が M1 の step_size で計算されていた
+#       → compute_load_range を各 TF で計算するよう修正
+#   (2) KlinesLoadCompleted で空 klines が返ったとき on_klines_loaded を呼ばずにいた
+#       → status が "Loading" に固定されていた
 #
-# 前提条件: DEV_USER_ID / DEV_PASSWORD 環境変数が設定済みであること
+# フィクスチャ: TachibanaSpot:7203 D1 + BinanceLinear:ETHUSDT M1（2ペイン）
+#   ビルド: cargo build（debug）
+#   前提条件: DEV_USER_ID / DEV_PASSWORD 環境変数設定済み（未設定時は TC-A を SKIP）
+#   注: inject-* エンドポイントは debug_assertions でのみ有効
 set -euo pipefail
 source "$(dirname "$0")/common_helpers.sh"
 

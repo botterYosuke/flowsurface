@@ -1,5 +1,16 @@
 #!/bin/bash
 # s2_persistence.sh — スイート S2: 永続化往復テスト
+#
+# 検証シナリオ:
+#   TC-S2-01: replay フィールドなし → mode=Live・range_start 空（後方互換）
+#   TC-S2-02a〜e: Replay モード保存 → 再起動で mode/range_start/range_end 復元
+#   TC-S2-03: Play 後保存 → 再起動で range 維持
+#   TC-S2-04: Live 保存 → 再起動で mode=Live
+#
+# 仕様根拠:
+#   docs/replay_header.md §3 — saved-state.json 永続化スキーマ
+#
+# フィクスチャ: BinanceLinear:BTCUSDT M1, saved-state.json を書き換えて複数回起動
 source "$(dirname "$0")/common_helpers.sh"
 
 echo "=== S2: 永続化往復テスト ==="

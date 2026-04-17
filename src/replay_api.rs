@@ -26,9 +26,9 @@ pub enum VirtualExchangeCommand {
     /// 仮想注文を登録する（POST /api/replay/order）
     PlaceOrder {
         ticker: String,
-        side: String,   // "buy" | "sell"
+        side: String, // "buy" | "sell"
         qty: f64,
-        order_type: String,  // "market" | "limit"
+        order_type: String, // "market" | "limit"
         limit_price: Option<f64>,
     },
     /// ポートフォリオスナップショットを取得する（GET /api/replay/portfolio）
@@ -393,15 +393,15 @@ fn route(method: &str, path: &str, body: &str) -> Result<ApiCommand, RouteError>
 
         // ── 仮想約定エンジン（Phase 2 互換）──────────────────────────────
         ("POST", "/api/replay/order") => parse_virtual_order_command(body),
-        ("GET", "/api/replay/portfolio") => {
-            Ok(ApiCommand::VirtualExchange(VirtualExchangeCommand::GetPortfolio))
-        }
-        ("GET", "/api/replay/state") => {
-            Ok(ApiCommand::VirtualExchange(VirtualExchangeCommand::GetState))
-        }
-        ("GET", "/api/replay/orders") => {
-            Ok(ApiCommand::VirtualExchange(VirtualExchangeCommand::GetOrders))
-        }
+        ("GET", "/api/replay/portfolio") => Ok(ApiCommand::VirtualExchange(
+            VirtualExchangeCommand::GetPortfolio,
+        )),
+        ("GET", "/api/replay/state") => Ok(ApiCommand::VirtualExchange(
+            VirtualExchangeCommand::GetState,
+        )),
+        ("GET", "/api/replay/orders") => Ok(ApiCommand::VirtualExchange(
+            VirtualExchangeCommand::GetOrders,
+        )),
 
         // ── debug ビルドで有効（keyring クリア） ─────────────────────────
         #[cfg(debug_assertions)]
@@ -456,13 +456,15 @@ fn parse_virtual_order_command(body: &str) -> Result<ApiCommand, RouteError> {
         ("market".to_string(), None)
     };
 
-    Ok(ApiCommand::VirtualExchange(VirtualExchangeCommand::PlaceOrder {
-        ticker,
-        side,
-        qty,
-        order_type,
-        limit_price,
-    }))
+    Ok(ApiCommand::VirtualExchange(
+        VirtualExchangeCommand::PlaceOrder {
+            ticker,
+            side,
+            qty,
+            order_type,
+            limit_price,
+        },
+    ))
 }
 
 /// URL パスのクエリ文字列から指定キーの値を取り出す。

@@ -5,7 +5,9 @@
 pub mod order_book;
 pub mod portfolio;
 
-pub use order_book::{FillEvent, VirtualOrder, VirtualOrderBook, VirtualOrderStatus, VirtualOrderType};
+pub use order_book::{
+    FillEvent, VirtualOrder, VirtualOrderBook, VirtualOrderStatus, VirtualOrderType,
+};
 pub use portfolio::{PortfolioSnapshot, PositionSide};
 
 use exchange::Trade;

@@ -1,6 +1,17 @@
 #!/usr/bin/env bash
 # s16_replay_resilience.sh — スイート S16: UI操作中の Replay 耐性テスト
-# Replay 再生中に各種 UI 操作を行っても壊れないことを確認する
+#
+# 検証シナリオ:
+#   TC-S16-01: speed API 20 連打 → Resume 後 status=Playing
+#   TC-S16-02: UTC 0:00 をまたぐ range で StepForward/StepBackward → クラッシュなし
+#   TC-S16-03: Live ↔ Replay toggle 10 連打 → アプリ応答維持
+#   TC-S16-04: Playing 中の toggle → アプリ生存
+#   TC-S16-05a〜b: Paused 中の toggle（Live → Replay）→ アプリ生存
+#
+# 仕様根拠:
+#   docs/replay_header.md §8 — 速度ボタン連打耐性, §4 — Live/Replay toggle 安定性
+#
+# フィクスチャ: BinanceLinear:BTCUSDT M1, auto-play (UTC[-3h, -1h]) × 各 TC で再起動
 set -euo pipefail
 source "$(dirname "$0")/common_helpers.sh"
 

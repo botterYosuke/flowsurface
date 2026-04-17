@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 # s13_step_backward_quality.sh — スイート S13: StepBackward 品質保証
-# チラつき防止・コンテキストバー表示・live data 非混入を確認
+#
+# 検証シナリオ:
+#   TC-S13-01: StepBackward 後 2s 以内に Loading 解消（チラつき防止）
+#   TC-S13-02-1〜10: 10 回 StepBackward、各ステップ後 streams_ready=true
+#   TC-S13-03: resume 後 delta が 60000ms 倍数（live data 非混入）
+#   TC-S13-04-1〜5: StepForward ↔ StepBackward 交互 × 5 → status=Paused 維持
+#
+# 仕様根拠:
+#   docs/replay_header.md §6.3 — StepBackward 品質保証（チラつき防止・live data 非混入）
+#
+# フィクスチャ: BinanceLinear:BTCUSDT M1, auto-play (UTC[-3h, -1h])
 set -euo pipefail
 source "$(dirname "$0")/common_helpers.sh"
 

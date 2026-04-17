@@ -550,9 +550,10 @@ impl Dashboard {
                             }
                             pane::Effect::FetchBuyingPower => {
                                 let pane_id = state.unique_id();
-                                Task::perform(order_connector::fetch_buying_power(), move |result| {
-                                    Message::BuyingPowerResult { pane_id, result }
-                                })
+                                Task::perform(
+                                    order_connector::fetch_buying_power(),
+                                    move |result| Message::BuyingPowerResult { pane_id, result },
+                                )
                             }
                             pane::Effect::FetchHoldings { issue_code } => {
                                 let pane_id = state.unique_id();
@@ -565,14 +566,12 @@ impl Dashboard {
                                 issue_code,
                                 issue_name,
                                 tick_size,
-                            } => {
-                                self.sync_issue_to_order_entry(
-                                    main_window.id,
-                                    issue_code,
-                                    issue_name,
-                                    tick_size,
-                                )
-                            }
+                            } => self.sync_issue_to_order_entry(
+                                main_window.id,
+                                issue_code,
+                                issue_name,
+                                tick_size,
+                            ),
                             pane::Effect::SubmitVirtualOrder(vo) => {
                                 // main.rs の VirtualExchangeEngine に委譲する
                                 return (Task::none(), Some(Event::SubmitVirtualOrder(vo)));
@@ -1973,7 +1972,11 @@ mod tests {
         );
 
         assert!(result.is_none());
-        assert_eq!(dashboard.panes.len(), pane_count_before, "pane count must not change");
+        assert_eq!(
+            dashboard.panes.len(),
+            pane_count_before,
+            "pane count must not change"
+        );
     }
 
     #[test]
@@ -2079,7 +2082,10 @@ mod tests {
         );
         assert!(result1.is_some(), "1 回目は Some を返すこと");
         assert_eq!(dashboard.panes.len(), 2, "1 回目後 pane count = 2");
-        assert!(dashboard.focus.is_some(), "1 回目後 focus が設定されていること");
+        assert!(
+            dashboard.focus.is_some(),
+            "1 回目後 focus が設定されていること"
+        );
 
         // 2 回目: focus あり → そのまま split
         let result2 = dashboard.split_focused_and_init(
@@ -2100,10 +2106,8 @@ mod tests {
         assert_eq!(dashboard.panes.len(), 1);
         assert!(dashboard.focus.is_none());
 
-        let _task = dashboard.split_focused_and_init_order(
-            main_window,
-            data::layout::pane::ContentKind::OrderEntry,
-        );
+        let _task = dashboard
+            .split_focused_and_init_order(main_window, data::layout::pane::ContentKind::OrderEntry);
 
         assert_eq!(dashboard.panes.len(), 2, "pane count must increase by 1");
         assert!(dashboard.focus.is_some(), "focus must be set after split");
@@ -2117,10 +2121,8 @@ mod tests {
         assert!(dashboard.focus.is_none());
         let pane_count_before = dashboard.panes.len();
 
-        let _task = dashboard.split_focused_and_init_order(
-            main_window,
-            data::layout::pane::ContentKind::OrderEntry,
-        );
+        let _task = dashboard
+            .split_focused_and_init_order(main_window, data::layout::pane::ContentKind::OrderEntry);
 
         assert_eq!(
             dashboard.panes.len(),
@@ -2134,10 +2136,8 @@ mod tests {
         let mut dashboard = single_pane_dashboard();
         let main_window = window::Id::unique();
 
-        let _task = dashboard.split_focused_and_init_order(
-            main_window,
-            data::layout::pane::ContentKind::OrderEntry,
-        );
+        let _task = dashboard
+            .split_focused_and_init_order(main_window, data::layout::pane::ContentKind::OrderEntry);
 
         assert_eq!(dashboard.panes.len(), 2);
         let (_, focused_pane) = dashboard.focus.unwrap();
@@ -2160,7 +2160,10 @@ mod tests {
         );
 
         let (_, focused_pane) = dashboard.focus.unwrap();
-        assert_ne!(focused_pane, original_pane, "focus must move to the new pane");
+        assert_ne!(
+            focused_pane, original_pane,
+            "focus must move to the new pane"
+        );
     }
 
     // compile-time: clear_chart_for_replay returns (), not Vec<...>
@@ -2177,7 +2180,7 @@ mod tests {
     fn mini_tickers_list_switch_emits_switch_tickers_in_group_event() {
         use crate::modal::pane::{
             Modal,
-            mini_tickers_list::{MiniPanel, Message as MiniMsg, RowSelection},
+            mini_tickers_list::{Message as MiniMsg, MiniPanel, RowSelection},
         };
         use crate::window::Window;
 

@@ -2,18 +2,18 @@
 # s25_screenshot_and_auth.sh — S25: screenshot API と auth/tachibana/status 検証
 #
 # 検証シナリオ:
-#   A: POST /api/app/screenshot → HTTP 200、{"ok":true}
-#   B: screenshot ファイルが C:/tmp/screenshot.png に存在する
-#   C: Replay 再生中でも screenshot が動作する（{"ok":true}）
-#   D: GET /api/app/screenshot（誤メソッド）→ HTTP 404
-#   E: GET /api/auth/tachibana/status（Binance-only 構成）→ session="none"
-#   F: session フィールドが存在する（レスポンススキーマ確認）
+#   TC-A: POST /api/app/screenshot → HTTP 200、{"ok":true}
+#   TC-B: screenshot ファイルが C:/tmp/screenshot.png に存在する
+#   TC-C: Replay 再生中でも screenshot が動作する（{"ok":true}）
+#   TC-D: GET /api/app/screenshot（誤メソッド）→ HTTP 404
+#   TC-E: GET /api/auth/tachibana/status（Binance-only 構成）→ session="none"
+#   TC-F: session フィールドが存在する（レスポンススキーマ確認）
 #
-# 補足:
-#   screenshot API は /api/app/screenshot に POST し、デスクトップ全体を
-#   C:/tmp/screenshot.png に保存する。Replay 状態に依存しない。
-#   auth/tachibana/status は Tachibana セッションの有無を返す。
-#   Binance-only 環境では常に session="none" になる。
+# 仕様根拠:
+#   POST /api/app/screenshot — デスクトップ全体を C:/tmp/screenshot.png に保存
+#   GET /api/auth/tachibana/status — Tachibana セッション有無を返す（Binance-only 時は "none"）
+#
+# フィクスチャ: BinanceLinear:BTCUSDT M1, Live モード起動（認証不要環境）
 set -euo pipefail
 source "$(dirname "$0")/common_helpers.sh"
 

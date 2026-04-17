@@ -280,11 +280,12 @@ impl ReplayController {
                     const PAGE_SIZE: u64 = 1000;
                     let preview = dashboard.peek_kline_streams(main_window_id);
                     for (_, stream) in preview.iter() {
-                        let Some((_, tf)) = stream.as_kline_stream() else { continue };
+                        let Some((_, tf)) = stream.as_kline_stream() else {
+                            continue;
+                        };
                         let step_ms = tf.to_milliseconds().max(1);
                         let range = super::compute_load_range(start_ms, end_ms, step_ms);
-                        let estimated_klines =
-                            range.end.saturating_sub(range.start) / step_ms;
+                        let estimated_klines = range.end.saturating_sub(range.start) / step_ms;
                         let estimated_pages = estimated_klines.div_ceil(PAGE_SIZE);
                         if estimated_pages > MAX_LOAD_PAGES {
                             return (
@@ -316,7 +317,11 @@ impl ReplayController {
                 let active_streams: HashSet<StreamKind> = kline_targets
                     .iter()
                     .filter_map(|(_, s)| {
-                        if matches!(s, StreamKind::Kline { .. }) { Some(*s) } else { None }
+                        if matches!(s, StreamKind::Kline { .. }) {
+                            Some(*s)
+                        } else {
+                            None
+                        }
                     })
                     .collect();
                 let pending_count = active_streams.len();
@@ -341,9 +346,7 @@ impl ReplayController {
                                 Ok(r) => ReplayMessage::Load(ReplayLoadEvent::KlinesLoadCompleted(
                                     r.stream, r.range, r.klines,
                                 )),
-                                Err(e) => {
-                                    ReplayMessage::Load(ReplayLoadEvent::DataLoadFailed(e))
-                                }
+                                Err(e) => ReplayMessage::Load(ReplayLoadEvent::DataLoadFailed(e)),
                             },
                         ))
                     })
@@ -465,7 +468,12 @@ impl ReplayController {
 
                 // 全アクティブ stream の前の kline 時刻の最大値
                 let (prev_time, start_ms) = match &self.state.session {
-                    ReplaySession::Active { clock, store, active_streams, .. } => {
+                    ReplaySession::Active {
+                        clock,
+                        store,
+                        active_streams,
+                        ..
+                    } => {
                         let prev = active_streams
                             .iter()
                             .filter_map(|stream| {
@@ -507,33 +515,48 @@ impl ReplayController {
                 // Idle なら DataLoadFailed 後の遅延 KlinesLoadCompleted → サイレントドロップ。
 
                 // Step 1: ミュータブルボローで内部を更新し、遷移すべきかを bool で返す
-                let should_activate =
-                    if let ReplaySession::Loading { pending_count, store, clock, .. } =
-                        &mut self.state.session
-                    {
-                        store.ingest_loaded(
-                            stream,
-                            range,
-                            LoadedData { klines: klines.clone(), trades: vec![] },
-                        );
-                        *pending_count = pending_count.saturating_sub(1);
-                        if *pending_count == 0 {
-                            clock.resume_from_waiting(Instant::now());
-                            true
-                        } else {
-                            false
-                        }
+                let should_activate = if let ReplaySession::Loading {
+                    pending_count,
+                    store,
+                    clock,
+                    ..
+                } = &mut self.state.session
+                {
+                    store.ingest_loaded(
+                        stream,
+                        range,
+                        LoadedData {
+                            klines: klines.clone(),
+                            trades: vec![],
+                        },
+                    );
+                    *pending_count = pending_count.saturating_sub(1);
+                    if *pending_count == 0 {
+                        clock.resume_from_waiting(Instant::now());
+                        true
                     } else {
-                        // Idle: DataLoadFailed 後の遅延 KlinesLoadCompleted → 無視
                         false
-                    };
+                    }
+                } else {
+                    // Idle: DataLoadFailed 後の遅延 KlinesLoadCompleted → 無視
+                    false
+                };
 
                 // Step 2: ボローが解放されてから mem::replace で Loading → Active に遷移
                 if should_activate {
                     let old = std::mem::replace(&mut self.state.session, ReplaySession::Idle);
-                    if let ReplaySession::Loading { clock, store, active_streams, .. } = old {
-                        self.state.session =
-                            ReplaySession::Active { clock, store, active_streams };
+                    if let ReplaySession::Loading {
+                        clock,
+                        store,
+                        active_streams,
+                        ..
+                    } = old
+                    {
+                        self.state.session = ReplaySession::Active {
+                            clock,
+                            store,
+                            active_streams,
+                        };
                     }
                 }
 
@@ -573,8 +596,16 @@ impl ReplayController {
             ReplaySystemEvent::SyncReplayBuffers => {
                 // mid-replay でペイン構成が変わった場合に step_size を再計算する
                 match &mut self.state.session {
-                    ReplaySession::Loading { clock, active_streams, .. }
-                    | ReplaySession::Active { clock, active_streams, .. } => {
+                    ReplaySession::Loading {
+                        clock,
+                        active_streams,
+                        ..
+                    }
+                    | ReplaySession::Active {
+                        clock,
+                        active_streams,
+                        ..
+                    } => {
                         let step_size_ms = min_timeframe_ms(active_streams);
                         clock.set_step_size(step_size_ms);
                     }
@@ -583,13 +614,19 @@ impl ReplayController {
                 (Task::none(), None)
             }
 
-            ReplaySystemEvent::ReloadKlineStream { old_stream, new_stream } => {
+            ReplaySystemEvent::ReloadKlineStream {
+                old_stream,
+                new_stream,
+            } => {
                 // Active のみ対応（Idle/Loading 時は no-op）
 
                 // Step 1: ミュータブルボローで更新値を計算
                 let (start_ms, end_ms, stream_step_ms) = {
-                    let ReplaySession::Active { clock, active_streams, .. } =
-                        &mut self.state.session
+                    let ReplaySession::Active {
+                        clock,
+                        active_streams,
+                        ..
+                    } = &mut self.state.session
                     else {
                         return (Task::none(), None);
                     };
@@ -620,7 +657,12 @@ impl ReplayController {
 
                 // Step 2: Active → Loading に遷移（ボロー解放後）
                 let old = std::mem::replace(&mut self.state.session, ReplaySession::Idle);
-                if let ReplaySession::Active { clock, store, active_streams } = old {
+                if let ReplaySession::Active {
+                    clock,
+                    store,
+                    active_streams,
+                } = old
+                {
                     self.state.session = ReplaySession::Loading {
                         clock,
                         pending_count: 1,
@@ -631,15 +673,16 @@ impl ReplayController {
 
                 // 新 stream の klines を再ロード
                 let range = super::compute_load_range(start_ms, end_ms, stream_step_ms);
-                let task = Task::perform(
-                    loader::load_klines(new_stream, range),
-                    |result| match result {
-                        Ok(r) => ReplayMessage::Load(ReplayLoadEvent::KlinesLoadCompleted(
-                            r.stream, r.range, r.klines,
-                        )),
-                        Err(e) => ReplayMessage::Load(ReplayLoadEvent::DataLoadFailed(e)),
-                    },
-                );
+                let task =
+                    Task::perform(
+                        loader::load_klines(new_stream, range),
+                        |result| match result {
+                            Ok(r) => ReplayMessage::Load(ReplayLoadEvent::KlinesLoadCompleted(
+                                r.stream, r.range, r.klines,
+                            )),
+                            Err(e) => ReplayMessage::Load(ReplayLoadEvent::DataLoadFailed(e)),
+                        },
+                    );
                 (task, None)
             }
         }
@@ -656,12 +699,23 @@ impl ReplayController {
         main_window_id: iced::window::Id,
     ) -> TickOutcome {
         let (clock, store, active_streams) = match &mut self.state.session {
-            ReplaySession::Loading { clock, store, active_streams, .. }
-            | ReplaySession::Active { clock, store, active_streams, .. } => {
-                (clock, store, active_streams)
+            ReplaySession::Loading {
+                clock,
+                store,
+                active_streams,
+                ..
             }
+            | ReplaySession::Active {
+                clock,
+                store,
+                active_streams,
+                ..
+            } => (clock, store, active_streams),
             ReplaySession::Idle => {
-                return TickOutcome { trade_events: vec![], reached_end: false };
+                return TickOutcome {
+                    trade_events: vec![],
+                    reached_end: false,
+                };
             }
         };
 
@@ -685,7 +739,10 @@ impl ReplayController {
             })
             .collect();
 
-        TickOutcome { trade_events, reached_end: dispatch.reached_end }
+        TickOutcome {
+            trade_events,
+            reached_end: dispatch.reached_end,
+        }
     }
 
     /// Pause → Seek → ChartReset → KlineInject を一括実行する。
@@ -749,8 +806,16 @@ impl ReplayController {
         main_window_id: iced::window::Id,
     ) {
         let (store, active_streams) = match &self.state.session {
-            ReplaySession::Loading { store, active_streams, .. }
-            | ReplaySession::Active { store, active_streams, .. } => (store, active_streams),
+            ReplaySession::Loading {
+                store,
+                active_streams,
+                ..
+            }
+            | ReplaySession::Active {
+                store,
+                active_streams,
+                ..
+            } => (store, active_streams),
             ReplaySession::Idle => return,
         };
         for stream in active_streams.iter() {
@@ -759,6 +824,40 @@ impl ReplayController {
                 dashboard.ingest_replay_klines(stream, klines, main_window_id);
             }
         }
+    }
+
+    /// StepForward 後に仮想エンジンへ渡す合成トレードを生成する。
+    ///
+    /// 現在の clock 位置に対応する kline の close 価格で 1 ティック分の Trade を合成する。
+    /// Trades EventStore が常に空のため（`ingest_loaded` が `trades: vec![]`）、
+    /// step-forward 時に成行注文を約定させるための代替手段として使用する。
+    pub fn synthetic_trades_at_current_time(&self) -> Vec<(StreamKind, Vec<Trade>)> {
+        let (clock, store, active_streams) = match &self.state.session {
+            ReplaySession::Active {
+                clock,
+                store,
+                active_streams,
+                ..
+            } => (clock, store, active_streams),
+            _ => return vec![],
+        };
+        let current_time = clock.now_ms();
+        active_streams
+            .iter()
+            .filter(|s| matches!(s, StreamKind::Kline { .. }))
+            .filter_map(|stream| {
+                // current_time 以下の最新 kline を取得
+                let klines = store.klines_in(stream, 0..current_time + 1);
+                let kline = klines.iter().rev().find(|k| k.time <= current_time)?;
+                let trade = Trade {
+                    time: current_time,
+                    is_sell: false,
+                    price: kline.close,
+                    qty: exchange::unit::qty::Qty::from_f32(1.0),
+                };
+                Some((*stream, vec![trade]))
+            })
+            .collect()
     }
 }
 
@@ -1152,8 +1251,11 @@ mod tests {
 
         ctrl_separate.set_range_start("2025-01-01 00:00".to_string());
         ctrl_separate.set_range_end("2025-01-02 00:00".to_string());
-        let _ = ctrl_separate
-            .handle_message(ReplayMessage::User(ReplayUserMessage::Play), &mut dash2, win);
+        let _ = ctrl_separate.handle_message(
+            ReplayMessage::User(ReplayUserMessage::Play),
+            &mut dash2,
+            win,
+        );
 
         assert_eq!(
             ctrl_combined.state.range_input.start,
@@ -1216,7 +1318,11 @@ mod tests {
         let mut dashboard = Dashboard::default();
         let win = window::Id::unique();
 
-        let _ = ctrl.handle_message(ReplayMessage::User(ReplayUserMessage::Play), &mut dashboard, win);
+        let _ = ctrl.handle_message(
+            ReplayMessage::User(ReplayUserMessage::Play),
+            &mut dashboard,
+            win,
+        );
 
         assert!(
             matches!(ctrl.state.session, ReplaySession::Active { .. }),

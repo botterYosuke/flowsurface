@@ -1,6 +1,17 @@
 #!/usr/bin/env bash
 # s11_bar_step_discrete.sh — スイート S11: バーステップ離散化
-# current_time の変化量が timeframe の倍数になることを確認する
+#
+# 検証シナリオ:
+#   TC-S11-01: M1 10x 再生中 delta が 60000ms の倍数
+#   TC-S11-02-1〜3: M1 StepForward × 3、各 delta = 60000ms
+#   TC-S11-03: M5 StepForward delta = 300000ms
+#   TC-S11-04: H1 StepForward delta = 3600000ms
+#   TC-S11-05: M1+M5 混在 StepForward → min TF (M1=60000ms) が優先
+#
+# 仕様根拠:
+#   docs/replay_header.md §6.2 — バーステップ離散化（step_size = min timeframe）
+#
+# フィクスチャ: BinanceLinear:BTCUSDT M1 / M5 / H1 / M1+ETHUSDT M5 混在（4パターン）
 set -euo pipefail
 source "$(dirname "$0")/common_helpers.sh"
 

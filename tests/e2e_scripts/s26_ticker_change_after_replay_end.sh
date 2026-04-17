@@ -6,10 +6,12 @@
 #   TC-B: 銘柄変更後のステータスは Paused のまま
 #   TC-C: Resume → Playing に遷移できる（リセット後の再生が正常）
 #
-# 再現する不具合（修正前）:
-#   Task::chain() により ReloadKlineStream（clock.seek(start)）が kline_fetch_task 完了待ち
-#   になり、Tachibana セッションなしでは無限にブロックされ current_time がリセットされない。
-#   → current_time が end_time のまま固定される。
+# 仕様根拠:
+#   docs/replay_header.md §6.6 — 銘柄変更による初期状態リセット
+#   修正前の不具合: Task::chain() により ReloadKlineStream が kline_fetch_task 完了待ちになり
+#   Tachibana セッションなしで無限ブロック → current_time が end_time のまま固定
+#
+# フィクスチャ: BinanceLinear:BTCUSDT M1, auto-play (UTC[-3h, -1h]) → 10x 完走 → 銘柄変更
 set -euo pipefail
 source "$(dirname "$0")/common_helpers.sh"
 

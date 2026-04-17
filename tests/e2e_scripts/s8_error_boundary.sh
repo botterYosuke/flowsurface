@@ -1,5 +1,21 @@
 #!/bin/bash
 # s8_error_boundary.sh — スイート S8: エラー・境界値ケース
+#
+# 検証シナリオ:
+#   TC-S8-01: 存在しないパス → HTTP 404
+#   TC-S8-02: 不正 JSON → HTTP 400
+#   TC-S8-03: 必須フィールド (end) 欠損 → HTTP 400
+#   TC-S8-04: GET on POST エンドポイント → HTTP 404
+#   TC-S8-05a〜c: start > end → HTTP 200・Playing 遷移なし・エラートースト発火
+#   TC-S8-06a〜c: 未来日時 → HTTP 200・Playing/Paused 到達（Loading ハングなし）
+#   TC-S8-07: 不正フォーマット（複数パターン）→ HTTP 400
+#   TC-S8-08: pane/split に不正 UUID → HTTP 400
+#   TC-S8-09: pane/split に不正 axis → HTTP 400
+#
+# 仕様根拠:
+#   docs/replay_header.md §10 — エラーハンドリング・入力バリデーション
+#
+# フィクスチャ: BinanceLinear:BTCUSDT M1, Live モード起動（HTTP API エラー系テスト）
 source "$(dirname "$0")/common_helpers.sh"
 
 echo "=== S8: エラー・境界値ケース ==="

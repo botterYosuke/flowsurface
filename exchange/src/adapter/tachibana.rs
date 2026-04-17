@@ -1425,10 +1425,7 @@ impl OrderRecord {
     /// この注文が取消可能かどうかを状態テキストで判定する。
     /// "受付中" / "注文中" / "一部約定" → true
     pub fn is_cancelable(&self) -> bool {
-        matches!(
-            self.status_text.as_str(),
-            "受付中" | "注文中" | "一部約定"
-        )
+        matches!(self.status_text.as_str(), "受付中" | "注文中" | "一部約定")
     }
 }
 
@@ -3782,10 +3779,7 @@ mod tests {
                 executed_price: "0".to_string(),
                 eig_day: "20260416".to_string(),
             };
-            assert!(
-                rec.is_cancelable(),
-                "status={status} は取消可能なはず"
-            );
+            assert!(rec.is_cancelable(), "status={status} は取消可能なはず");
         }
     }
 
@@ -3805,10 +3799,7 @@ mod tests {
                 executed_price: "2500".to_string(),
                 eig_day: "20260416".to_string(),
             };
-            assert!(
-                !rec.is_cancelable(),
-                "status={status} は取消不可なはず"
-            );
+            assert!(!rec.is_cancelable(), "status={status} は取消不可なはず");
         }
     }
 
@@ -3830,6 +3821,9 @@ mod tests {
             "sJsonOfmt が付与されるべき: {json}"
         );
         assert!(json.contains("p_no"), "p_no が付与されるべき: {json}");
-        assert!(json.contains("p_sd_date"), "p_sd_date が付与されるべき: {json}");
+        assert!(
+            json.contains("p_sd_date"),
+            "p_sd_date が付与されるべき: {json}"
+        );
     }
 }

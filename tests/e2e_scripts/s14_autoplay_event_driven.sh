@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
 # s14_autoplay_event_driven.sh — スイート S14: Auto-play タイムアウト廃止
-# ビルド要件: cargo build（debug）
-# 前提条件: DEV_USER_ID / DEV_PASSWORD 環境変数が設定済みであること
 #
-# 設計:
-#   - TC-01/02: DEV AUTO-LOGIN でログイン → keyring にセッション保存 → 再起動後にセッション復元
-#     → pending_auto_play=true のまま → マスター取得完了後 Playing 到達
-#   - TC-03: keyring セッションなし → pending_auto_play クリア → Playing にならない
-#   - TC-04: PEND（マスター遅延シミュレーションは real API では再現不可）
+# 検証シナリオ:
+#   TC-01/02: DEV AUTO-LOGIN → keyring セッション保存 → 再起動後セッション復元
+#             → pending_auto_play=true のまま → マスター取得完了後 Playing 到達
+#   TC-03: keyring セッションなし → pending_auto_play クリア → Playing にならない
+#   TC-04: PEND（マスター遅延シミュレーションは real API では再現不可）
+#
+# 仕様根拠:
+#   docs/replay_header.md §5.1 — auto-play event-driven（タイムアウト廃止・マスター完了待ち）
+#
+# フィクスチャ: TachibanaSpot:7203 D1, Tachibana セッション必須（DEV AUTO-LOGIN）
+#   ビルド: cargo build（debug）
+#   前提条件: DEV_USER_ID / DEV_PASSWORD 環境変数設定済み
 set -euo pipefail
 source "$(dirname "$0")/common_helpers.sh"
 

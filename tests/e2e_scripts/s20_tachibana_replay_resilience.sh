@@ -1,8 +1,17 @@
 #!/usr/bin/env bash
 # s20_tachibana_replay_resilience.sh — スイート S20: UI操作中の Replay 耐性テスト（TachibanaSpot）
-# TachibanaSpot:7203 D1 での Replay 再生中に各種 UI 操作を行っても壊れないことを確認する
-# ビルド要件: cargo build（デバッグビルド）
-# 前提条件: DEV_USER_ID / DEV_PASSWORD 環境変数が設定済みであること
+#
+# 検証シナリオ:
+#   TC-S20-01: speed 20 連打 + Resume → status=Playing（D1, 100ms/bar クラッシュなし）
+#   TC-S20-02a〜b: D1 StepForward delta=86400000ms・StepBackward 後 status=Paused
+#   TC-S20-03: Live ↔ Replay toggle 10 連打 → アプリ応答維持（D1 版）
+#
+# 仕様根拠:
+#   docs/replay_header.md §8 — 速度ボタン連打耐性, §4 — Live/Replay toggle 安定性（TachibanaSpot D1 版）
+#
+# フィクスチャ: TachibanaSpot:7203 D1, Tachibana セッション必須（DEV AUTO-LOGIN）
+#   ビルド: cargo build（debug）
+#   前提条件: DEV_USER_ID / DEV_PASSWORD 環境変数設定済み
 set -euo pipefail
 source "$(dirname "$0")/common_helpers.sh"
 

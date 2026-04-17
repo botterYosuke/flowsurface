@@ -1,8 +1,20 @@
 #!/usr/bin/env bash
 # s19_tachibana_chart_snapshot.sh — スイート S19: chart-snapshot API テスト（TachibanaSpot）
-# TachibanaSpot:7203 D1 を使った chart-snapshot API の動作確認
-# ビルド要件: cargo build（デバッグビルド）
-# 前提条件: DEV_USER_ID / DEV_PASSWORD 環境変数が設定済みであること
+#
+# 検証シナリオ:
+#   TC-S19-01: Play 後 bar_count が 1〜301（PRE_START_HISTORY_BARS=300 確認）
+#   TC-S19-02: StepForward 後 bar_count 増加または同数（D1 step = 86400000ms）
+#   TC-S19-03: StepBackward 後も snapshot 取得可能（クラッシュなし）
+#   TC-S19-04: 存在しない pane_id → {"error":"..."} + アプリ生存
+#   TC-S19-05: Live モード中の snapshot 取得後もアプリ応答あり
+#
+# 仕様根拠:
+#   docs/replay_header.md §9.2 — GET /api/pane/chart-snapshot（TachibanaSpot D1 版）
+#
+# フィクスチャ: TachibanaSpot:7203 D1, UTC[-96h, -24h]（4 日レンジ）
+#   ビルド: cargo build（debug）
+#   前提条件: DEV_USER_ID / DEV_PASSWORD 環境変数設定済み
+#   注: chart-snapshot API 未実装環境では全 TC が PENDING
 set -euo pipefail
 source "$(dirname "$0")/common_helpers.sh"
 

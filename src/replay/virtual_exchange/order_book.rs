@@ -136,18 +136,46 @@ impl VirtualOrderBook {
                     fill_price: fp,
                     fill_time_ms: now_ms,
                 });
-                // ポートフォリオに open ポジションを記録
-                self.portfolio.record_open(Position {
-                    order_id: order.order_id.clone(),
-                    ticker: order.ticker.clone(),
-                    side: order.side.clone(),
-                    qty: order.qty,
-                    entry_price: fp,
-                    entry_time_ms: now_ms,
-                    exit_price: None,
-                    exit_time_ms: None,
-                    realized_pnl: None,
-                });
+
+                // Short 注文: 既存 Long があればクローズ（ネットアウト）、なければ新規 Short
+                // Long 注文: 常に新規ポジションを open
+                match order.side {
+                    PositionSide::Short => {
+                        // 先に order_id を取得（その後 portfolio を可変借用するため）
+                        let existing_long_id = self
+                            .portfolio
+                            .oldest_open_long_order_id(ticker)
+                            .map(str::to_string);
+                        if let Some(long_id) = existing_long_id {
+                            self.portfolio.record_close(&long_id, fp, now_ms);
+                        } else {
+                            self.portfolio.record_open(Position {
+                                order_id: order.order_id.clone(),
+                                ticker: order.ticker.clone(),
+                                side: PositionSide::Short,
+                                qty: order.qty,
+                                entry_price: fp,
+                                entry_time_ms: now_ms,
+                                exit_price: None,
+                                exit_time_ms: None,
+                                realized_pnl: None,
+                            });
+                        }
+                    }
+                    PositionSide::Long => {
+                        self.portfolio.record_open(Position {
+                            order_id: order.order_id.clone(),
+                            ticker: order.ticker.clone(),
+                            side: PositionSide::Long,
+                            qty: order.qty,
+                            entry_price: fp,
+                            entry_time_ms: now_ms,
+                            exit_price: None,
+                            exit_time_ms: None,
+                            realized_pnl: None,
+                        });
+                    }
+                }
             }
         }
 
@@ -210,6 +238,18 @@ mod tests {
         }
     }
 
+    fn market_sell(ticker: &str, qty: f64, now_ms: u64) -> VirtualOrder {
+        VirtualOrder {
+            order_id: uuid::Uuid::new_v4().to_string(),
+            ticker: ticker.to_string(),
+            side: PositionSide::Short,
+            qty,
+            order_type: VirtualOrderType::Market,
+            placed_time_ms: now_ms,
+            status: VirtualOrderStatus::Pending,
+        }
+    }
+
     fn limit_buy(ticker: &str, qty: f64, limit_price: f64, now_ms: u64) -> VirtualOrder {
         VirtualOrder {
             order_id: uuid::Uuid::new_v4().to_string(),
@@ -234,6 +274,8 @@ mod tests {
         }
     }
 
+    // ── 既存テスト ───────────────────────────────────────────────────────────
+
     #[test]
     fn market_order_fills_on_next_tick() {
         let mut book = VirtualOrderBook::new(1_000_000.0);
@@ -244,16 +286,18 @@ mod tests {
 
         assert_eq!(fills.len(), 1, "1件約定するはず");
         assert!((fills[0].fill_price - 92_000.0).abs() < 1.0);
-        assert_eq!(book.pending_orders().len(), 0, "約定後は pending から消えるはず");
+        assert_eq!(
+            book.pending_orders().len(),
+            0,
+            "約定後は pending から消えるはず"
+        );
     }
 
     #[test]
     fn limit_buy_fills_when_trade_below_price() {
         let mut book = VirtualOrderBook::new(1_000_000.0);
-        // 指値 91_000 で買い注文
         book.place(limit_buy("BTCUSDT", 0.1, 91_000.0, 1_000));
 
-        // 90_500 のトレードが来た → 91_000 <= 90_500? No → 逆: 90_500 <= 91_000? Yes → 約定
         let trades = vec![make_trade(90_500.0)];
         let fills = book.on_tick("BTCUSDT", &trades, 2_000);
 
@@ -263,10 +307,8 @@ mod tests {
     #[test]
     fn limit_sell_fills_when_trade_above_price() {
         let mut book = VirtualOrderBook::new(1_000_000.0);
-        // 指値 93_000 で売り注文
         book.place(limit_sell("BTCUSDT", 0.1, 93_000.0, 1_000));
 
-        // 93_500 のトレードが来た → 93_500 >= 93_000 → 約定
         let trades = vec![make_trade(93_500.0)];
         let fills = book.on_tick("BTCUSDT", &trades, 2_000);
 
@@ -276,7 +318,6 @@ mod tests {
     #[test]
     fn limit_not_filled_when_price_not_met() {
         let mut book = VirtualOrderBook::new(1_000_000.0);
-        // 指値 91_000 で買い → 91_500 のトレードは条件未達
         book.place(limit_buy("BTCUSDT", 0.1, 91_000.0, 1_000));
 
         let trades = vec![make_trade(91_500.0)];
@@ -291,7 +332,7 @@ mod tests {
         let mut book = VirtualOrderBook::new(1_000_000.0);
         book.place(market_buy("BTCUSDT", 1.0, 1_000));
 
-        // 買い約定
+        // 買い約定 → cash = 1_000_000 - 90_000 = 910_000
         let fills = book.on_tick("BTCUSDT", &[make_trade(90_000.0)], 2_000);
         assert_eq!(fills.len(), 1);
 
@@ -299,9 +340,10 @@ mod tests {
         let snap = book.portfolio_snapshot(92_000.0);
         assert!((snap.unrealized_pnl - 2_000.0).abs() < 1.0);
 
-        // 売り注文（ロングを手動でクローズするためにショート注文を入れる代わりに
-        // portfolio.record_close を直接呼ぶ）
-        book.portfolio.record_close(&fills[0].order_id, 92_000.0, 3_000);
+        // record_close を直接呼んでクローズ（on_tick 経由は A-2 の別テストで検証）
+        // cash += 92_000 → 1_002_000
+        book.portfolio
+            .record_close(&fills[0].order_id, 92_000.0, 3_000);
         assert!((book.portfolio.realized_pnl() - 2_000.0).abs() < 1.0);
     }
 
@@ -313,10 +355,21 @@ mod tests {
 
         book.reset();
 
-        assert_eq!(book.pending_orders().len(), 0, "reset 後は pending が空のはず");
+        assert_eq!(
+            book.pending_orders().len(),
+            0,
+            "reset 後は pending が空のはず"
+        );
         let snap = book.portfolio_snapshot(90_000.0);
-        assert_eq!(snap.open_positions.len(), 0, "reset 後は open ポジションが空のはず");
-        assert!((snap.cash - 1_000_000.0).abs() < 1.0, "reset 後は cash が初期値に戻るはず");
+        assert_eq!(
+            snap.open_positions.len(),
+            0,
+            "reset 後は open ポジションが空のはず"
+        );
+        assert!(
+            (snap.cash - 1_000_000.0).abs() < 1.0,
+            "reset 後は cash が初期値に戻るはず"
+        );
     }
 
     #[test]
@@ -324,11 +377,135 @@ mod tests {
         let mut book = VirtualOrderBook::new(1_000_000.0);
         book.place(market_buy("BTCUSDT", 0.1, 1_000));
 
-        // ETHUSDT のトレードが来ても BTCUSDT 注文は約定しない
         let trades = vec![make_trade(90_000.0)];
         let fills = book.on_tick("ETHUSDT", &trades, 2_000);
 
         assert_eq!(fills.len(), 0, "ticker 不一致では約定しないはず");
         assert_eq!(book.pending_orders().len(), 1, "pending に残るはず");
+    }
+
+    // ── A-2: on_tick() 経由のクローズロジック ────────────────────────────────
+
+    #[test]
+    fn sell_fill_closes_existing_long() {
+        let mut book = VirtualOrderBook::new(1_000_000.0);
+
+        // 買い約定
+        book.place(market_buy("BTCUSDT", 1.0, 1_000));
+        book.on_tick("BTCUSDT", &[make_trade(90_000.0)], 2_000);
+
+        // 売り注文 → 既存 Long をクローズ
+        book.place(market_sell("BTCUSDT", 1.0, 2_000));
+        book.on_tick("BTCUSDT", &[make_trade(92_000.0)], 3_000);
+
+        let snap = book.portfolio_snapshot(92_000.0);
+        assert_eq!(
+            snap.open_positions.len(),
+            0,
+            "Long がクローズされて open_positions = 0 のはず"
+        );
+        assert_eq!(
+            snap.closed_positions.len(),
+            1,
+            "closed_positions = 1 のはず"
+        );
+    }
+
+    #[test]
+    fn sell_fill_without_long_opens_short() {
+        let mut book = VirtualOrderBook::new(1_000_000.0);
+
+        // Long なしで売り注文 → 新規 Short
+        book.place(market_sell("BTCUSDT", 1.0, 1_000));
+        book.on_tick("BTCUSDT", &[make_trade(90_000.0)], 2_000);
+
+        let snap = book.portfolio_snapshot(90_000.0);
+        assert_eq!(
+            snap.open_positions.len(),
+            1,
+            "新規 Short ポジションが open されるはず"
+        );
+        assert_eq!(snap.open_positions[0].side, "Short");
+        assert_eq!(snap.closed_positions.len(), 0);
+    }
+
+    #[test]
+    fn round_trip_realized_pnl_positive() {
+        // buy @90_000 → sell @92_000 → realized_pnl = +2_000
+        let mut book = VirtualOrderBook::new(1_000_000.0);
+
+        book.place(market_buy("BTCUSDT", 1.0, 1_000));
+        book.on_tick("BTCUSDT", &[make_trade(90_000.0)], 2_000);
+
+        book.place(market_sell("BTCUSDT", 1.0, 2_000));
+        book.on_tick("BTCUSDT", &[make_trade(92_000.0)], 3_000);
+
+        let snap = book.portfolio_snapshot(92_000.0);
+        assert!(
+            (snap.realized_pnl - 2_000.0).abs() < 1.0,
+            "realized_pnl = +2000 のはず、実際: {}",
+            snap.realized_pnl
+        );
+    }
+
+    #[test]
+    fn round_trip_realized_pnl_negative() {
+        // buy @90_000 → sell @88_000 → realized_pnl = -2_000
+        let mut book = VirtualOrderBook::new(1_000_000.0);
+
+        book.place(market_buy("BTCUSDT", 1.0, 1_000));
+        book.on_tick("BTCUSDT", &[make_trade(90_000.0)], 2_000);
+
+        book.place(market_sell("BTCUSDT", 1.0, 2_000));
+        book.on_tick("BTCUSDT", &[make_trade(88_000.0)], 3_000);
+
+        let snap = book.portfolio_snapshot(88_000.0);
+        assert!(
+            (snap.realized_pnl - (-2_000.0)).abs() < 1.0,
+            "realized_pnl = -2000 のはず、実際: {}",
+            snap.realized_pnl
+        );
+    }
+
+    #[test]
+    fn cash_round_trip_profit() {
+        // buy @90_000 qty 1.0 → sell @92_000 → cash = 1_002_000
+        let mut book = VirtualOrderBook::new(1_000_000.0);
+
+        book.place(market_buy("BTCUSDT", 1.0, 1_000));
+        book.on_tick("BTCUSDT", &[make_trade(90_000.0)], 2_000);
+        // cash = 910_000
+
+        book.place(market_sell("BTCUSDT", 1.0, 2_000));
+        book.on_tick("BTCUSDT", &[make_trade(92_000.0)], 3_000);
+        // cash += 92_000 = 1_002_000
+
+        let snap = book.portfolio_snapshot(92_000.0);
+        assert!(
+            (snap.cash - 1_002_000.0).abs() < 1.0,
+            "cash = 1_002_000 のはず（利益 +2000 込み）、実際: {}",
+            snap.cash
+        );
+    }
+
+    #[test]
+    fn cash_round_trip_loss() {
+        // buy @90_000 qty 1.0 → sell @88_000 → cash = 998_000
+        let mut book = VirtualOrderBook::new(1_000_000.0);
+
+        book.place(market_buy("BTCUSDT", 1.0, 1_000));
+        book.on_tick("BTCUSDT", &[make_trade(90_000.0)], 2_000);
+        // cash = 910_000
+
+        book.place(market_sell("BTCUSDT", 1.0, 2_000));
+        book.on_tick("BTCUSDT", &[make_trade(88_000.0)], 3_000);
+        // cash += 88_000 = 998_000
+
+        let snap = book.portfolio_snapshot(88_000.0);
+        assert!(
+            (snap.cash - 998_000.0).abs() < 1.0,
+            "cash = 998_000 のはず（損失 -2000 込み）、実際: {}",
+            snap.cash
+        );
     }
 }

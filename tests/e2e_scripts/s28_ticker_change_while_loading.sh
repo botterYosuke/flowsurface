@@ -2,22 +2,17 @@
 # s28_ticker_change_while_loading.sh — S28: Loading（Waiting）状態中の銘柄変更
 #
 # 検証シナリオ（仕様 §6.6「銘柄変更による初期状態リセット」Waiting 状態部分）:
-#
-#   §6.6 は「clock の状態（Playing / Paused / Waiting）によらず常にリセットが実行される」と規定する。
-#   s23 は Playing / Paused 中をカバー済み。本テストは Waiting（API 表示: Loading）中を対象とする。
-#
-#   Waiting 状態の発生方法:
-#     1. Playing 到達後に pane/split + 新ペインへ ETHUSDT 設定
-#     2. 新ストリームのロードが始まり dispatch_tick が未ロードを検出 → clock.set_waiting()
-#     3. API status = "Loading"
-#
 #   TC-setup: Playing → split + ETHUSDT 設定 → Loading 状態を確認
-#   TC-A:     Loading 中（または直後）に元ペインの ticker を SOLUSDT に変更 → クラッシュなし
-#   TC-B:     変更後 最大 30s 待機 → status=Paused（自動再生されない）
-#   TC-C:     Paused 状態で current_time≈start_time（リセット発生の確認）
-#   TC-D:     Resume → Playing 到達（回復可能であること）
+#   TC-A: Loading 中（または直後）に元ペインの ticker を SOLUSDT に変更 → クラッシュなし
+#   TC-B: 変更後 最大 30s 待機 → status=Paused（自動再生されない）
+#   TC-C: Paused 状態で current_time≈start_time（リセット発生の確認）
+#   TC-D: Resume → Playing 到達（回復可能であること）
 #
-# フィクスチャ: BinanceLinear:BTCUSDT M1, UTC[-6h, -1h] (5h レンジで Loading を長め確保)
+# 仕様根拠:
+#   docs/replay_header.md §6.6 — 銘柄変更による初期状態リセット（Waiting 状態中も適用）
+#   s23 は Playing/Paused 中をカバー済み。本テストは Waiting（API: "Loading"）中を対象とする。
+#
+# フィクスチャ: BinanceLinear:BTCUSDT M1, UTC[-6h, -1h]（5h レンジで Loading を長め確保）
 set -euo pipefail
 source "$(dirname "$0")/common_helpers.sh"
 

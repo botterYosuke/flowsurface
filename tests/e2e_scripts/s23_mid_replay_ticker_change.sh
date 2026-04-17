@@ -2,13 +2,18 @@
 # s23_mid_replay_ticker_change.sh — S23: mid-replay 銘柄・timeframe 変更時の自動再生防止
 #
 # 検証シナリオ:
-#   A: Play → 銘柄変更 → status = Paused
-#   B: Play → timeframe 変更 → status = Paused
-#   C: Play → 銘柄変更 → データロード待機 → status = Paused（自動再生されない）
-#   D: Play → 銘柄変更 → Resume → status = Playing
-#   E: Pause → 銘柄変更 → status = Paused のまま
-#   F: Play のみ（通常フロー）→ Loading → Playing（回帰）
-#   G: Play → 銘柄変更 → 別銘柄に再変更 → Resume → status = Playing
+#   TC-A: Play → 銘柄変更 → status = Paused
+#   TC-B: Play → timeframe 変更 → status = Paused
+#   TC-C: Play → 銘柄変更 → データロード待機 → status = Paused（自動再生されない）
+#   TC-D: Play → 銘柄変更 → Resume → status = Playing
+#   TC-E: Pause → 銘柄変更 → status = Paused のまま
+#   TC-F: Play のみ（通常フロー）→ Loading → Playing（回帰）
+#   TC-G: Play → 銘柄変更 → 別銘柄に再変更 → Resume → status = Playing
+#
+# 仕様根拠:
+#   docs/replay_header.md §6.6 — 銘柄変更による初期状態リセット（Playing/Paused 時）
+#
+# フィクスチャ: BinanceLinear:BTCUSDT M1, auto-play (UTC[-3h, -1h])
 set -euo pipefail
 source "$(dirname "$0")/common_helpers.sh"
 

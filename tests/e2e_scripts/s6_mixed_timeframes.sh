@@ -1,5 +1,17 @@
 #!/bin/bash
 # s6_mixed_timeframes.sh — スイート S6: 異なる時間軸混在
+#
+# 検証シナリオ:
+#   TC-S6-01: BTCUSDT M1+M5+H1 混在（3ペイン）で 60s 以内 Playing
+#   TC-S6-02: step_size = min tf = M1 = 60000ms
+#   TC-S6-03: M5/H1 疎 step でもクラッシュなし・status=Paused
+#   TC-S6-04: M5 単独構成 → step_size = M5 = 300000ms
+#
+# 仕様根拠:
+#   docs/replay_header.md §7.3 — min_step_size = min(timeframes)
+#
+# フィクスチャ: BinanceLinear:BTCUSDT M1+M5+H1（3ペイン）+ M5 単独の 2パターン
+#   Live モード起動 → 手動 toggle/play
 source "$(dirname "$0")/common_helpers.sh"
 
 echo "=== S6: 異なる時間軸混在 ==="

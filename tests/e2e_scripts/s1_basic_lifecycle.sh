@@ -1,5 +1,22 @@
 #!/bin/bash
 # s1_basic_lifecycle.sh — スイート S1: 基本ライフサイクル
+#
+# 検証シナリオ:
+#   TC-S1-01: 起動時 mode=Live
+#   TC-S1-02: toggle → mode=Replay
+#   TC-S1-03〜04: play → Loading/Playing 到達（最大 120s）
+#   TC-S1-05〜05c: 1x 速度で current_time 前進・バー境界スナップ・range 内
+#   TC-S1-06〜07: Pause 中 current_time 固定・status=Paused
+#   TC-S1-08: Resume 後 current_time 前進
+#   TC-S1-09〜12: Speed サイクル（1x→2x→5x→10x→1x）
+#   TC-S1-13〜13b: StepForward +60000ms・バー境界維持
+#   TC-S1-14: StepBackward -60000ms
+#   TC-S1-15a〜f: Live 復帰で状態リセット・range 値は保持
+#
+# 仕様根拠:
+#   docs/replay_header.md §4〜§8 — Replay ライフサイクル・clock 状態機械
+#
+# フィクスチャ: BinanceLinear:BTCUSDT M1, Live モード起動 → 手動 toggle/play
 source "$(dirname "$0")/common_helpers.sh"
 
 echo "=== S1: 基本ライフサイクル ==="

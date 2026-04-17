@@ -1,8 +1,16 @@
 #!/usr/bin/env bash
 # s21_tachibana_error_boundary.sh — スイート S21: クラッシュ・エラー境界テスト（TachibanaSpot）
-# TachibanaSpot:7203 D1 でアプリがクラッシュせず、エラーが適切に処理されることを確認する
-# ビルド要件: cargo build（デバッグビルド）
-# 前提条件: DEV_USER_ID / DEV_PASSWORD 環境変数が設定済みであること
+#
+# 検証シナリオ:
+#   TC-S21-01〜03: 不正 pane_id（pane/split, pane/close, pane/set-ticker）→ HTTP 200 + アプリ生存
+#   TC-S21-04: 空 range (start == end) でもアプリ生存（D1 版）
+#
+# 仕様根拠:
+#   docs/replay_header.md §10 — エラー境界・クラッシュ防止（TachibanaSpot D1 版）
+#
+# フィクスチャ: TachibanaSpot:7203 D1, Tachibana セッション必須（DEV AUTO-LOGIN）
+#   ビルド: cargo build（debug）
+#   前提条件: DEV_USER_ID / DEV_PASSWORD 環境変数設定済み
 set -euo pipefail
 source "$(dirname "$0")/common_helpers.sh"
 

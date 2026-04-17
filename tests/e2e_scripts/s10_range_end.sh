@@ -1,5 +1,17 @@
 #!/bin/bash
 # s10_range_end.sh — スイート S10: 範囲端・終端到達
+#
+# 検証シナリオ:
+#   TC-S10-01: 10x 速度で終端到達 → 自動 Paused（最大 300s 待機）
+#   TC-S10-02: 終端到達後 StepForward は no-op
+#   TC-S10-03: 終端から StepBackward で戻れる
+#   TC-S10-04: 終端付近から Resume → Playing
+#   TC-S10-05: 2 分幅の最小 range で Playing/終端 Paused 到達
+#
+# 仕様根拠:
+#   docs/replay_header.md §6.4 — range end 到達時の自動 Pause・終端クランプ
+#
+# フィクスチャ: BinanceLinear:BTCUSDT M1, auto-play (UTC[-3h, -1h]) + 2 分 range パターン
 source "$(dirname "$0")/common_helpers.sh"
 
 echo "=== S10: 範囲端・終端到達 ==="

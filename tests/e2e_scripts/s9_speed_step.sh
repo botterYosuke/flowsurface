@@ -1,5 +1,16 @@
 #!/bin/bash
 # s9_speed_step.sh — スイート S9: 再生速度・Step 精度
+#
+# 検証シナリオ:
+#   TC-S9-01a〜b: Speed サイクル順序（1x→2x→5x→10x→1x）
+#   TC-S9-02: 5x 速度で 5 秒に 1〜500 bar 前進
+#   TC-S9-03a〜b: Playing 中 StepForward → Paused・End 近傍到達
+#   TC-S9-04: StepBackward 連続 5 回 → 単調減少
+#
+# 仕様根拠:
+#   docs/replay_header.md §8 — 速度制御・CycleSpeed, §6 — StepForward/StepBackward
+#
+# フィクスチャ: BinanceLinear:BTCUSDT M1, auto-play (UTC[-3h, -1h])
 source "$(dirname "$0")/common_helpers.sh"
 
 echo "=== S9: 再生速度・Step 精度 ==="

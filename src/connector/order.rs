@@ -73,8 +73,7 @@ pub async fn fetch_order_detail(
 
 /// CLMZanKaiKanougaku + CLMZanShinkiKanoIjiritu — 余力情報を取得する。
 /// 現物余力と信用余力を並列取得して BuyingPowerPanel へ渡す。
-pub async fn fetch_buying_power(
-) -> Result<
+pub async fn fetch_buying_power() -> Result<
     (
         exchange::adapter::tachibana::BuyingPowerResponse,
         exchange::adapter::tachibana::MarginPowerResponse,

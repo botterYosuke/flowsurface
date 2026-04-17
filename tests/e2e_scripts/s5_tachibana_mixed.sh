@@ -1,11 +1,17 @@
 #!/usr/bin/env bash
 # s5_tachibana_mixed.sh — スイート S5: 立花証券 + Binance 混在 Replay
-# ビルド要件: cargo build --release --features e2e-mock
 #
-# 修正点（v2）:
-#   - inject-master は {"records":[{Tachibana フィールド名}]} 形式
-#   - inject-daily-history でモックデータを注入してから manual play
-#   - TC-S5-07: M1+D1 混在では step_size=M1=60000ms（D1 は最小 TF でない）
+# 検証シナリオ:
+#   TC-S5-*: inject-master + inject-daily-history でモックデータ注入 → Playing 到達
+#   TC-S5-07: M1+D1 混在 step_size = M1 = 60000ms（D1 は最小 TF でない）
+#
+# 仕様根拠:
+#   docs/replay_header.md §7 — マルチストリーム同期
+#   e2e-mock feature — inject エンドポイント（inject-master / inject-daily-history）
+#
+# フィクスチャ: TachibanaSpot:7203 D1 + BinanceLinear:BTCUSDT M1（2ペイン）
+#   ビルド: cargo build --release --features e2e-mock
+#   注: inject-master は {"records":[{Tachibana フィールド名}]} 形式
 set -euo pipefail
 source "$(dirname "$0")/common_helpers.sh"
 

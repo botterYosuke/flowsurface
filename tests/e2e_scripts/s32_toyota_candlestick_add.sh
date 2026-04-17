@@ -1,24 +1,17 @@
 #!/usr/bin/env bash
 # s32_toyota_candlestick_add.sh — S32: TOYOTA candlestick チャート追加テスト
 #
-# シナリオ:
-#   saved-state.json サンプル（BinanceLinear:BTCUSDT M1、Replay 2025-04-15 04:49 〜 2026-04-15 06:49）
-#   で起動後、TOYOTA（TachibanaSpot:7203）D1 candlestick チャートを追加し、
-#   以下の期待動作を検証する:
+# 検証シナリオ:
+#   TC-S32-01〜04: BTCUSDT M1 で起動後、TOYOTA D1 を pane split + set-ticker + set-timeframe で追加
+#   TC-S32-05〜07: 銘柄変更後 current_time = start_time（clock.seek(range.start) 発火）・status=Paused
+#   TC-S32-08〜10: [Tachibana セッションあり] streams_ready=true・Resume → Playing（セッションなし時は PEND）
 #
-#     1. TOYOTA の 1d チャートが追加される（pane split + set-ticker + set-timeframe）
-#     2. REPLAY が start 時間に戻って再開される
-#        - current_time == start_time（clock.seek(range.start) が発火）
-#        - status = Paused
-#        - [Tachibana セッションあり時] Resume → Playing に遷移
+# 仕様根拠:
+#   docs/replay_header.md §6.6 — 銘柄変更による初期状態リセット（seek(range.start) 発火）
 #
-# ビルド要件:
-#   通常ビルド  : cargo build --release
-#   e2e-mock ビルド: cargo build --release --features e2e-mock  （inject-session エンドポイント有効）
-#
-# Tachibana セッションなし時の動作:
-#   - TC-S32-05/06/07 は実行（セッション不要の検証）
-#   - TC-S32-08〜10 は PEND（streams_ready / Playing チェック）
+# フィクスチャ: BinanceLinear:BTCUSDT M1, Replay 2025-04-15 04:49 〜 2026-04-15 06:49（固定日付）
+#   ビルド: cargo build --release（通常）または cargo build --release --features e2e-mock（inject-session 有効）
+#   スキップ条件: Tachibana セッションなし時は TC-S32-08〜10 が PEND
 set -euo pipefail
 source "$(dirname "$0")/common_helpers.sh"
 

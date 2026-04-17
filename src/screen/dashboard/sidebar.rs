@@ -118,7 +118,8 @@ impl Sidebar {
         let is_table_open = self.tickers_table.is_shown;
         let is_order_open = self.is_menu_active(sidebar::Menu::Order);
 
-        let nav_buttons = self.nav_buttons(is_table_open, is_order_open, audio_volume, tooltip_position);
+        let nav_buttons =
+            self.nav_buttons(is_table_open, is_order_open, audio_volume, tooltip_position);
 
         let tickers_table = if is_table_open {
             column![responsive(move |size| self

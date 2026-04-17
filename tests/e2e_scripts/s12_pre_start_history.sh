@@ -1,7 +1,16 @@
 #!/usr/bin/env bash
 # s12_pre_start_history.sh — スイート S12: Start 以前の履歴バー表示
-# PRE_START_HISTORY_BARS=300 の仕様確認（間接観測）
-# - StepBackward を繰り返しても current_time が start_time を下回らないことを確認
+#
+# 検証シナリオ:
+#   TC-S12-01: StepBackward 後 current_time >= start_time（下限クランプ）
+#   TC-S12-02-1〜5: StepBackward 連打 5 回でも start_time クランプ維持
+#   TC-S12-03: resume 後 current_time 正常前進（10x でポーリング）
+#   TC-S12-04: PEND — chart-snapshot API 実装後に bar_count 直接検証
+#
+# 仕様根拠:
+#   docs/replay_header.md §6.3 — PRE_START_HISTORY_BARS=300・start_time 下限クランプ
+#
+# フィクスチャ: BinanceLinear:BTCUSDT M1, auto-play (UTC[-3h, -1h])
 set -euo pipefail
 source "$(dirname "$0")/common_helpers.sh"
 

@@ -123,10 +123,7 @@ pub enum Message {
 /// このパネルが発行するアクション（pane.rs が Effect に変換する）
 pub enum Action {
     FetchOrders,
-    FetchOrderDetail {
-        order_num: String,
-        eig_day: String,
-    },
+    FetchOrderDetail { order_num: String, eig_day: String },
     SubmitCorrect(Box<CorrectOrderRequest>),
     SubmitCancel(Box<CancelOrderRequest>),
 }
@@ -183,10 +180,7 @@ impl OrderListPanel {
                         .unwrap_or_default();
                     self.expanded_order = Some(order_num.clone());
                     if !self.executions.contains_key(&order_num) {
-                        return Some(Action::FetchOrderDetail {
-                            order_num,
-                            eig_day,
-                        });
+                        return Some(Action::FetchOrderDetail { order_num, eig_day });
                     }
                 }
             }
@@ -281,17 +275,15 @@ impl OrderListPanel {
             } => {
                 self.executions.insert(order_num, executions);
             }
-            Message::ModifyCompleted(result) => {
-                match result {
-                    Ok(_) => {
-                        self.last_error = None;
-                        return Some(Action::FetchOrders);
-                    }
-                    Err(e) => {
-                        self.last_error = Some(e);
-                    }
+            Message::ModifyCompleted(result) => match result {
+                Ok(_) => {
+                    self.last_error = None;
+                    return Some(Action::FetchOrders);
                 }
-            }
+                Err(e) => {
+                    self.last_error = Some(e);
+                }
+            },
         }
         None
     }
@@ -400,7 +392,10 @@ impl OrderListPanel {
                     .size(11)
                     .into()
                 });
-                column(rows).spacing(2).padding(iced::padding::left(16)).into()
+                column(rows)
+                    .spacing(2)
+                    .padding(iced::padding::left(16))
+                    .into()
             }
         }
     }
@@ -572,9 +567,7 @@ mod tests {
         panel.orders = vec![make_order("001", "注文中")];
         panel.update(Message::RowClicked("001".to_string()));
         // second click collapses (executions are cached now — seed them to avoid extra fetch)
-        panel
-            .executions
-            .insert("001".to_string(), vec![]);
+        panel.executions.insert("001".to_string(), vec![]);
         panel.update(Message::RowClicked("001".to_string()));
         // collapse
         let _action = panel.update(Message::RowClicked("001".to_string()));
