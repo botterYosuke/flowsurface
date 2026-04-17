@@ -19,7 +19,7 @@ EXE="${FLOWSURFACE_EXE_DEBUG:-$REPO_ROOT/target/debug/flowsurface.exe}"
 
 # 環境変数チェック
 if [ -z "${DEV_USER_ID:-}" ] || [ -z "${DEV_PASSWORD:-}" ]; then
-  echo "ERROR: DEV_USER_ID/DEV_PASSWORD not set" && exit 1
+  echo "  SKIP: DEV_USER_ID / DEV_PASSWORD が未設定 — Tachibana live テストをスキップします"; exit 0
 fi
 
 echo "=== S21: クラッシュ・エラー境界テスト（TachibanaSpot:7203 D1）==="
