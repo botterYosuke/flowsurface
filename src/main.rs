@@ -43,6 +43,28 @@ use iced::{
 };
 use std::{borrow::Cow, collections::HashMap, vec};
 
+/// GET /api/replay/state レスポンス用の Kline エントリ。
+#[derive(serde::Serialize)]
+struct KlineStateItem {
+    stream: String,
+    time: u64,
+    open: f64,
+    high: f64,
+    low: f64,
+    close: f64,
+    volume: f64,
+}
+
+/// GET /api/replay/state レスポンス用の Trade エントリ。
+#[derive(serde::Serialize)]
+struct TradeStateItem {
+    stream: String,
+    time: u64,
+    price: f64,
+    qty: f64,
+    is_sell: bool,
+}
+
 /// ResolvedStream から (ticker 表示文字列, timeframe 表示文字列) を抽出する。
 /// Ready → 実行中ストリーム、Waiting → 永続化された構成から復元する。
 fn extract_pane_ticker_timeframe(
@@ -1285,13 +1307,40 @@ impl Flowsurface {
                                 }
                             }
                             VirtualExchangeCommand::GetState => {
-                                if self.virtual_engine.is_some() {
-                                    // Phase 1 骨格のみ
-                                    let now_ms = self.replay.current_time_ms().unwrap_or(0);
+                                if let Some(data) = self.replay.get_api_state(50) {
+                                    let klines: Vec<KlineStateItem> = data
+                                        .klines
+                                        .into_iter()
+                                        .flat_map(|(stream, ks)| {
+                                            ks.into_iter().map(move |k| KlineStateItem {
+                                                stream: stream.clone(),
+                                                time: k.time,
+                                                open: k.open.to_f64(),
+                                                high: k.high.to_f64(),
+                                                low: k.low.to_f64(),
+                                                close: k.close.to_f64(),
+                                                volume: k.volume.total().to_f32_lossy() as f64,
+                                            })
+                                        })
+                                        .collect();
+                                    let trades: Vec<TradeStateItem> = data
+                                        .trades
+                                        .into_iter()
+                                        .flat_map(|(stream, ts)| {
+                                            ts.into_iter().map(move |t| TradeStateItem {
+                                                stream: stream.clone(),
+                                                time: t.time,
+                                                price: t.price.to_f64(),
+                                                qty: t.qty.to_f32_lossy() as f64,
+                                                is_sell: t.is_sell,
+                                            })
+                                        })
+                                        .collect();
                                     reply_tx.send(
                                         serde_json::json!({
-                                            "current_time_ms": now_ms,
-                                            "not_implemented": true
+                                            "current_time_ms": data.current_time_ms,
+                                            "klines": klines,
+                                            "trades": trades,
                                         })
                                         .to_string(),
                                     );

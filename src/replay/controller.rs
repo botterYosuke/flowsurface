@@ -1,9 +1,22 @@
 use std::time::Instant;
 
 use data::UserTimezone;
-use exchange::Trade;
 use exchange::adapter::StreamKind;
+use exchange::{Kline, Trade};
 use iced::Task;
+
+/// GetState API レスポンスウィンドウ: trades の取得範囲（現在時刻から遡る ms 数）。
+const TRADE_WINDOW_MS: u64 = 300_000; // 5 分
+
+/// GET /api/replay/state レスポンス用データ。
+/// `ReplaySession::Active` のときのみ生成される。
+pub struct ApiStateData {
+    pub current_time_ms: u64,
+    /// `(stream_label, klines)` のリスト。例: `"BinanceLinear:BTCUSDT:1m"`
+    pub klines: Vec<(String, Vec<Kline>)>,
+    /// `(stream_label, trades)` のリスト。例: `"BinanceLinear:BTCUSDT:Trades"`
+    pub trades: Vec<(String, Vec<Trade>)>,
+}
 
 use crate::screen::dashboard::Dashboard;
 use crate::widget::toast::Toast;
@@ -197,6 +210,66 @@ impl ReplayController {
             ReplaySession::Idle => return vec![],
         };
         active_streams.iter().map(|s| format!("{s:?}")).collect()
+    }
+
+    /// GET /api/replay/state 用: アクティブセッションの現在時刻と直近 N 件のデータを返す。
+    /// `ReplaySession::Active` 以外のときは `None` を返す。
+    pub fn get_api_state(&self, limit: usize) -> Option<ApiStateData> {
+        let (clock, store, active_streams) = match &self.state.session {
+            ReplaySession::Active {
+                clock,
+                store,
+                active_streams,
+            } => (clock, store, active_streams),
+            _ => return None,
+        };
+
+        let now_ms = clock.now_ms();
+        let mut klines = Vec::new();
+        let mut trades = Vec::new();
+
+        for stream in active_streams {
+            if let StreamKind::Kline {
+                ticker_info,
+                timeframe,
+            } = stream
+            {
+                let all_klines = store.klines_in(stream, 0..now_ms + 1);
+                let slice = if all_klines.len() > limit {
+                    &all_klines[all_klines.len() - limit..]
+                } else {
+                    all_klines
+                };
+                let exchange_str = format!("{:?}", ticker_info.ticker.exchange).replace(' ', "");
+                let ticker_str = ticker_info.ticker.to_string();
+
+                if !slice.is_empty() {
+                    let label = format!("{exchange_str}:{ticker_str}:{timeframe}");
+                    klines.push((label, slice.to_vec()));
+                }
+
+                let trade_stream = StreamKind::Trades {
+                    ticker_info: *ticker_info,
+                };
+                let trade_start = now_ms.saturating_sub(TRADE_WINDOW_MS);
+                let all_trades = store.trades_in(&trade_stream, trade_start..now_ms + 1);
+                let trade_slice = if all_trades.len() > limit {
+                    &all_trades[all_trades.len() - limit..]
+                } else {
+                    all_trades
+                };
+                if !trade_slice.is_empty() {
+                    let label = format!("{exchange_str}:{ticker_str}:Trades");
+                    trades.push((label, trade_slice.to_vec()));
+                }
+            }
+        }
+
+        Some(ApiStateData {
+            current_time_ms: now_ms,
+            klines,
+            trades,
+        })
     }
 }
 
@@ -1448,5 +1521,164 @@ mod tests {
             &mut dashboard,
             win,
         );
+    }
+
+    // ── get_api_state ──────────────────────────────────────────────────────
+
+    #[test]
+    fn get_api_state_returns_none_when_idle() {
+        let ctrl = ReplayController::default();
+        assert!(ctrl.get_api_state(50).is_none());
+    }
+
+    #[test]
+    fn get_api_state_returns_none_when_loading() {
+        use std::collections::HashSet;
+
+        let mut ctrl = ReplayController::default();
+        let mut clock = StepClock::new(0, 100_000, 60_000);
+        clock.set_waiting();
+        ctrl.state.session = ReplaySession::Loading {
+            clock,
+            pending_count: 1,
+            store: EventStore::new(),
+            active_streams: HashSet::new(),
+        };
+        assert!(ctrl.get_api_state(50).is_none());
+    }
+
+    #[test]
+    fn get_api_state_returns_current_time_when_active_empty_store() {
+        use std::collections::HashSet;
+
+        let mut ctrl = ReplayController::default();
+        let clock = StepClock::new(180_000, 3_600_000, 60_000);
+        ctrl.state.session = ReplaySession::Active {
+            clock,
+            store: EventStore::new(),
+            active_streams: HashSet::new(),
+        };
+        let data = ctrl
+            .get_api_state(50)
+            .expect("should return Some when Active");
+        assert_eq!(data.current_time_ms, 180_000);
+        assert!(data.klines.is_empty());
+        assert!(data.trades.is_empty());
+    }
+
+    #[test]
+    fn get_api_state_returns_klines_and_trades_from_active_store() {
+        use crate::replay::store::{EventStore, LoadedData};
+        use crate::replay::testutil::{dummy_kline, dummy_trade, kline_stream, trade_stream};
+        use std::collections::HashSet;
+
+        let kline_s = kline_stream();
+        let trade_s = trade_stream();
+
+        let mut store = EventStore::new();
+        store.ingest_loaded(
+            kline_s,
+            0..200_000,
+            LoadedData {
+                klines: vec![dummy_kline(60_000), dummy_kline(120_000)],
+                trades: vec![],
+            },
+        );
+        store.ingest_loaded(
+            trade_s,
+            0..200_000,
+            LoadedData {
+                klines: vec![],
+                trades: vec![dummy_trade(100_000), dummy_trade(150_000)],
+            },
+        );
+
+        let clock = StepClock::new(180_000, 3_600_000, 60_000);
+        let mut active_streams = HashSet::new();
+        active_streams.insert(kline_s);
+
+        let mut ctrl = ReplayController::default();
+        ctrl.state.session = ReplaySession::Active {
+            clock,
+            store,
+            active_streams,
+        };
+
+        let data = ctrl.get_api_state(50).expect("should return Some");
+        assert_eq!(data.current_time_ms, 180_000);
+        assert_eq!(data.klines.len(), 1, "one kline stream");
+        assert_eq!(data.klines[0].1.len(), 2, "2 klines in store");
+        assert_eq!(data.trades.len(), 1, "one trade stream");
+        assert_eq!(data.trades[0].1.len(), 2, "2 trades in store");
+    }
+
+    #[test]
+    fn get_api_state_limits_klines_to_n_most_recent() {
+        use crate::replay::store::{EventStore, LoadedData};
+        use crate::replay::testutil::{dummy_kline, kline_stream};
+        use std::collections::HashSet;
+
+        let kline_s = kline_stream();
+        let klines: Vec<_> = (1u64..=60).map(|i| dummy_kline(i * 60_000)).collect();
+
+        let mut store = EventStore::new();
+        store.ingest_loaded(
+            kline_s,
+            0..4_000_000,
+            LoadedData {
+                klines,
+                trades: vec![],
+            },
+        );
+
+        let clock = StepClock::new(3_600_000, 7_200_000, 60_000);
+        let mut active_streams = HashSet::new();
+        active_streams.insert(kline_s);
+
+        let mut ctrl = ReplayController::default();
+        ctrl.state.session = ReplaySession::Active {
+            clock,
+            store,
+            active_streams,
+        };
+
+        let data = ctrl.get_api_state(3).expect("should return Some");
+        let returned = &data.klines[0].1;
+        assert_eq!(returned.len(), 3, "limit=3 must cap klines");
+        assert_eq!(returned[0].time, 58 * 60_000, "first of last 3");
+        assert_eq!(returned[2].time, 60 * 60_000, "last of last 3");
+    }
+
+    #[test]
+    fn get_api_state_stream_label_format() {
+        use crate::replay::store::{EventStore, LoadedData};
+        use crate::replay::testutil::{dummy_kline, kline_stream};
+        use std::collections::HashSet;
+
+        let kline_s = kline_stream();
+        let mut store = EventStore::new();
+        store.ingest_loaded(
+            kline_s,
+            0..200_000,
+            LoadedData {
+                klines: vec![dummy_kline(60_000)],
+                trades: vec![],
+            },
+        );
+
+        let clock = StepClock::new(180_000, 3_600_000, 60_000);
+        let mut active_streams = HashSet::new();
+        active_streams.insert(kline_s);
+
+        let mut ctrl = ReplayController::default();
+        ctrl.state.session = ReplaySession::Active {
+            clock,
+            store,
+            active_streams,
+        };
+
+        let data = ctrl.get_api_state(50).expect("should return Some");
+        // kline stream label should be "BinanceLinear:BTCUSDT:1m"
+        assert_eq!(data.klines[0].0, "BinanceLinear:BTCUSDT:1m");
     }
 }

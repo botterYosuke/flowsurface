@@ -182,28 +182,57 @@ CODE_K=$(api_post_code /api/replay/order '{"ticker":"BTCUSDT"}')
   || fail "TC-K" "HTTP=$CODE_K (expected 400)"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TC-L: GET /api/replay/state → HTTP 200, current_time_ms フィールドあり
+# TC-L: GET /api/replay/state → HTTP 200, スキーマ検証（Phase 1 実装）
 # ─────────────────────────────────────────────────────────────────────────────
 echo ""
-echo "── TC-L: GET /api/replay/state"
+echo "── TC-L: GET /api/replay/state (Phase 1 実データ)"
 
-STATE_RESP=$(curl -s "$API_BASE/api/replay/state")
+STATE_RESP=$(api_get /api/replay/state)
 CODE_L=$(curl -s -o /dev/null -w "%{http_code}" "$API_BASE/api/replay/state")
-echo "  HTTP=$CODE_L response: $STATE_RESP"
+echo "  HTTP=$CODE_L"
 
 [ "$CODE_L" = "200" ] \
   && pass "TC-L1: GET /api/replay/state → HTTP 200" \
   || fail "TC-L1" "HTTP=$CODE_L (expected 200)"
 
-HAS_CT_MS=$(node -e "
+node -e "
   try {
     const d = JSON.parse(process.argv[1]);
-    console.log('current_time_ms' in d ? 'true' : 'false');
+    const ok = typeof d.current_time_ms === 'number' && d.current_time_ms > 0
+      && Array.isArray(d.klines)
+      && Array.isArray(d.trades);
+    console.log(ok ? 'true' : 'false');
   } catch(e) { console.log('false'); }
+" "$STATE_RESP" | grep -q "true" \
+  && pass "TC-L2: current_time_ms(>0) / klines[] / trades[] フィールドあり" \
+  || fail "TC-L2" "スキーマ不正 (response=$STATE_RESP)"
+
+# klines に items がある場合は OHLCV スキーマを確認
+KLINE_COUNT=$(node -e "
+  try { console.log(JSON.parse(process.argv[1]).klines.length); }
+  catch(e) { console.log(0); }
 " "$STATE_RESP")
-[ "$HAS_CT_MS" = "true" ] \
-  && pass "TC-L2: state レスポンスに current_time_ms フィールドあり" \
-  || fail "TC-L2" "current_time_ms なし (response=$STATE_RESP)"
+echo "  klines count=$KLINE_COUNT"
+if [ "$KLINE_COUNT" -gt "0" ]; then
+  node -e "
+    try {
+      const d = JSON.parse(process.argv[1]);
+      const k = d.klines[0];
+      const ok = typeof k.stream === 'string' && k.stream.length > 0
+        && typeof k.time === 'number'
+        && typeof k.open === 'number' && k.open > 0
+        && typeof k.high === 'number'
+        && typeof k.low  === 'number'
+        && typeof k.close === 'number'
+        && typeof k.volume === 'number';
+      console.log(ok ? 'true' : 'false');
+    } catch(e) { console.log('false'); }
+  " "$STATE_RESP" | grep -q "true" \
+    && pass "TC-L3: klines[0] に stream/time/open/high/low/close/volume あり" \
+    || fail "TC-L3" "klines[0] スキーマ不正 (response=$STATE_RESP)"
+else
+  pass "TC-L3: klines=0 件（Playing 直後のため許容）"
+fi
 
 stop_app
 print_summary

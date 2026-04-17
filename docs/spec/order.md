@@ -1,14 +1,69 @@
-# 注文機能仕様書
+# 注文機能 仕様書
 
 > **関連ドキュメント**:
 > | 知りたいこと | 参照先 |
 > |---|---|
 > | HTTP API エンドポイント全覧 | [replay.md §11](replay.md#11-http-制御-api) |
-> | 仮想約定エンジンの HTTP リクエスト/レスポンス形式 | [replay.md §11.2–11.3](replay.md#112-エンドポイント一覧) |
 > | リプレイ状態モデル・StepClock・EventStore | [replay.md](replay.md) |
-> | 立花証券 API プロトコル・EVENT I/F | [tachibana.md](tachibana.md) |
+> | 立花証券 API プロトコル・認証・EVENT I/F | [tachibana.md](tachibana.md) |
 
-## 概要
+**最終更新**: 2026-04-17
+**対象ブランチ**: `sasa/develop`
+
+---
+
+## 目次
+
+1. [概要](#1-概要)
+2. [UI 仕様](#2-ui-仕様)
+   - [2.1 サイドバー注文ボタン](#21-サイドバー注文ボタン)
+   - [2.2 注文入力パネル レイアウト](#22-注文入力パネル-レイアウト)
+   - [2.3 注文照会パネル レイアウト](#23-注文照会パネル-レイアウト)
+   - [2.4 余力情報パネル レイアウト](#24-余力情報パネル-レイアウト)
+3. [状態設計](#3-状態設計)
+   - [3.1 注文入力パネル](#31-注文入力パネル)
+   - [3.2 注文照会パネル](#32-注文照会パネル)
+   - [3.3 余力情報パネル](#33-余力情報パネル)
+4. [立花証券 API 仕様](#4-立花証券-api-仕様)
+   - [4.1 CLMKabuNewOrder（新規注文）](#41-clmkabuneworder新規注文)
+   - [4.2 CLMKabuCorrectOrder（訂正注文）](#42-clmkabucorrectorder訂正注文)
+   - [4.3 CLMKabuCancelOrder（取消注文）](#43-clmkabucancelorder取消注文)
+   - [4.4 CLMOrderList（注文一覧）](#44-clmorderlist注文一覧)
+   - [4.5 CLMOrderListDetail（約定明細）](#45-clmorderlistdetail約定明細)
+   - [4.6 CLMZanKaiKanougaku（現物買付余力）](#46-clmzankaikanoугаку現物買付余力)
+   - [4.7 CLMZanShinkiKanoIjiritu（信用新規可能委託保証金率）](#47-clmzanshinkikanoijiritu信用新規可能委託保証金率)
+   - [4.8 CLMGenbutuKabuList（現物保有株数）](#48-clmgenbutukabulist現物保有株数)
+5. [アーキテクチャ](#5-アーキテクチャ)
+   - [5.1 リクエスト送信の仕組み](#51-リクエスト送信の仕組み)
+   - [5.2 レスポンスのエラー判定](#52-レスポンスのエラー判定)
+   - [5.3 営業日の管理](#53-営業日の管理)
+   - [5.4 銘柄連動](#54-銘柄連動)
+   - [5.5 注文結果のデータフロー](#55-注文結果のデータフロー)
+6. [型定義](#6-型定義)
+   - [6.1 注文発注 API 型（exchange クレート）](#61-注文発注-api-型exchange-クレート)
+   - [6.2 注文照会 API 型](#62-注文照会-api-型)
+   - [6.3 余力・保有株数 API 型](#63-余力保有株数-api-型)
+   - [6.4 ContentKind / Pane 拡張（data クレート）](#64-contentkind--pane-拡張data-クレート)
+   - [6.5 Effect / Content / pane.rs](#65-effect--content--paners)
+   - [6.6 connector（order.rs）](#66-connectororderrs)
+7. [仮想約定エンジン](#7-仮想約定エンジン)
+   - [7.1 モジュール構成](#71-モジュール構成)
+   - [7.2 型定義](#72-型定義)
+   - [7.3 約定ルール](#73-約定ルール)
+   - [7.4 REPLAY 安全ガード](#74-replay-安全ガード)
+   - [7.5 StepForward 時の合成トレード注入](#75-stepforward-時の合成トレード注入)
+   - [7.6 HTTP API](#76-http-api)
+8. [スタイル](#8-スタイル)
+9. [セキュリティ要件](#9-セキュリティ要件)
+10. [実装状況](#10-実装状況)
+    - [10.1 完了済み](#101-完了済み)
+    - [10.2 未実装・残課題](#102-未実装残課題)
+11. [ファイル変更サマリー](#11-ファイル変更サマリー)
+12. [付録: 実装上の注意事項](#12-付録-実装上の注意事項)
+
+---
+
+## 1. 概要
 
 flowsurface に立花証券 e 支店 API を使った注文機能を追加した。
 **注文発注がメイン**。照会・余力確認はそれを支える補助機能。
@@ -25,24 +80,22 @@ flowsurface に立花証券 e 支店 API を使った注文機能を追加した
 
 ---
 
-## サイドバー注文ボタン
+## 2. UI 仕様
 
-### 概要
+### 2.1 サイドバー注文ボタン
 
-注文パネルを開くためのエントリーポイント。サイドバーに専用の「注文」ボタン（鉛筆アイコン）を追加した。
-
-### ボタン配置
+#### ボタン配置
 
 ```
 虫眼鏡 (Search)  ← ティッカーテーブル展開
-注文   (Order)   ← 注文パネル選択リスト展開  ★新規
+注文   (Order)   ← 注文パネル選択リスト展開  ★
 レイアウト
 音量
 ───（スペーサー）───
 設定
 ```
 
-### 動作
+#### 動作
 
 1. 注文ボタンをクリックするとインラインパネルが展開する:
 
@@ -56,7 +109,7 @@ flowsurface に立花証券 e 支店 API を使った注文機能を追加した
 
 3. **注文パネルとティッカーテーブルは相互排他**: 一方を開くと他方が閉じる。
 
-### 実装ファイル
+#### 実装ファイル
 
 | ファイル | 変更内容 |
 |---|---|
@@ -65,7 +118,7 @@ flowsurface に立花証券 e 支店 API を使った注文機能を追加した
 | `src/screen/dashboard.rs` | `split_focused_and_init_order()` 追加、`auto_focus_single_pane()` 切り出し |
 | `src/main.rs` | `Action::OpenOrderPane` ハンドラ・`Menu::Order` アーム追加 |
 
-### `split_focused_and_init_order`
+#### `split_focused_and_init_order`
 
 `TickerInfo` 不要（`SyncIssueToOrderEntry` で自動連動）のため、`set_content_and_streams` を使わず `Content::placeholder()` で直接初期化する。
 
@@ -82,15 +135,277 @@ pub fn split_focused_and_init_order(
 - フォーカスなし・複数ペイン → `Toast::warn("No focused pane found")`
 - `panes.split()` 失敗 → `Toast::warn("Could not split pane")`
 
-### `auto_focus_single_pane`（プライベートヘルパー）
-
-`split_focused_and_init` / `split_focused_and_init_order` / `switch_tickers_in_group` で共通化された「フォーカスなし単一ペイン時の自動フォーカス」ロジック。
+> **設計**: `split_focused_and_init_order` は `Option<Task>` でなく `Task` を返す。フォーカスなし複数ペイン時も Toast 警告を含む `Task` を返すため、呼び出し側で `None` 分岐が不要。`split_focused_and_init`（`Option<Task>` 返し）との設計差異に注意。
 
 ---
 
-## API 仕様サマリー
+### 2.2 注文入力パネル レイアウト
 
-### CLMKabuNewOrder（新規注文）
+```
+┌─────────────────────────────────┐
+│  [買い]  [売り]                  │  売買区分タブ
+├─────────────────────────────────┤
+│  銘柄: [7203 トヨタ自動車]       │  銘柄表示（チャートペインと連動）
+│─────────────────────────────────│
+│  口座: [特定 ▼]                  │  口座区分
+│  数量: [____100____] [全数量]    │  注文株数 / 売り時のみ「全数量」ボタン
+│         (保有: 200株)            │  売り時のみ保有株数を表示
+│  価格: [成行 ▼] [▼][________][▲]│  成行/指値 + 呼値単位ステップボタン
+│  期日: [当日 ▼]                  │  注文期日
+│─────────────────────────────────│
+│  受渡金額: ¥XXX,XXX (概算)       │  確認情報
+│  手数料:   ¥YYY                  │
+│─────────────────────────────────│
+│  発注パスワード: [__________]    │  第二パスワード
+│─────────────────────────────────│
+│       [  注文確認  ]             │  確認ボタン
+└─────────────────────────────────┘
+```
+
+> **BBO（最良気配）**: 立花証券の株価気配は既存の crypto 向け depth ストリームとは
+> 別系統のため、初期実装では **BBO 表示を省く**。銘柄名・コードのみ表示する。
+
+#### 注文確認モーダル
+
+```
+┌─────────────────────────────────┐
+│  注文確認                        │
+│─────────────────────────────────│
+│  銘柄:    7203 トヨタ自動車      │
+│  売買:    買い                   │
+│  数量:    100株                  │
+│  価格:    成行                   │
+│  口座:    特定                   │
+│─────────────────────────────────│
+│  [キャンセル]   [注文を発注する]  │
+└─────────────────────────────────┘
+```
+
+#### 仮想モード UI の変更点
+
+`view()` は `is_replay` を受け取り、`is_virtual_mode = self.is_virtual || is_replay` で評価する。
+
+| 変更点 | 通常モード | 仮想モード |
+|---|---|---|
+| パスワード欄 | 表示 | 非表示 |
+| バナー | なし | `"⏪ 仮想注文モード"` (is_virtual) / `"⏪ REPLAYモード中 — 注文は無効です"` (is_replay のみ) |
+| 確認ボタンラベル | `"注文確認"` | `"仮想注文確認"` |
+| パスワードバリデーション | 必須 | スキップ |
+
+---
+
+### 2.3 注文照会パネル レイアウト
+
+```
+表示項目:
+  - 銘柄コード / 売買 / 注文株数・約定株数 / 注文単価・約定単価 / 状態 / 注文日時
+
+注文状態の色分け:
+  - "全部約定" → 通常
+  - "一部約定" → 強調（黄）
+  - "取消完了" → グレー
+  - エラー系   → 赤
+  - "受付中"/"注文中" → 薄色
+
+行の操作:
+  - クリック → 約定明細を展開
+  - [訂正] ボタン → 訂正モーダルを開く
+  - [取消] ボタン → 取消モーダルを開く
+    ※ is_cancelable() == true の行のみ表示
+
+                  [更新]  ← 手動リフレッシュボタン
+```
+
+---
+
+### 2.4 余力情報パネル レイアウト
+
+```
+現物口座:
+  現物株買付可能額:    ¥X,XXX,XXX
+  NISA成長投資残高:    ¥X,XXX,XXX
+
+信用口座:
+  信用新規建可能額:    ¥X,XXX,XXX
+  委託保証金率:        XX.XX%
+  追証: [警告なし / ⚠ 追証確定（赤）]
+
+                      [更新]  ← 手動リフレッシュボタン
+```
+
+---
+
+## 3. 状態設計
+
+### 3.1 注文入力パネル
+
+**ファイル**: `src/screen/dashboard/panel/order_entry.rs`
+
+`Panel` trait（`canvas::Program` ベース）は実装しない。
+`view() -> Element<Message>` と `update(msg: Message) -> Option<Action>` を直接定義する。
+
+```rust
+pub struct OrderEntryPanel {
+    issue_code: String,
+    issue_name: String,
+    side: Side,                         // Buy / Sell
+    account_type: AccountType,          // 特定 / 一般 / NISA / N成長
+    qty: String,
+    price_type: PriceType,              // Market / Limit
+    limit_price: String,
+    tick_size: Option<f64>,             // 呼値単位（銘柄連動で更新）
+    cash_margin: CashMarginType,        // 現物 / 信用新規 / 信用返済
+    expire_day: ExpireDay,              // Today / Specified(date)
+    holdings: Option<u64>,             // 保有株数（売り時のみ表示 / 全数量ボタン用）
+    second_password: String,
+    confirm_modal: bool,
+    loading: bool,
+    last_result: Option<OrderResult>,
+    /// REPLAY モードで仮想注文モードになったとき true
+    /// true の場合: パスワード入力欄を非表示、確認ボタンラベル変更、パスワードバリデーションをスキップ
+    pub is_virtual: bool,
+}
+
+pub enum Side { Buy, Sell }
+pub enum PriceType { Market, Limit }
+pub enum AccountType { Tokutei, Ippan, Nisa, NisaGrowth }
+pub enum CashMarginType { Cash, MarginNew6M, MarginClose6M, MarginNewGeneral, MarginCloseGeneral }
+pub enum ExpireDay { Today, Specified(String) }
+
+// Warning も受注番号が返る「成功の一種」なので Success に統合
+pub struct OrderSuccess {
+    pub order_num: String,
+    pub warning: Option<String>,        // Some = 警告あり（それでも受付済み）
+}
+pub type OrderResult = Result<OrderSuccess, String>;
+
+pub enum Message {
+    SideChanged(Side),
+    AccountTypeChanged(AccountType),
+    QtyChanged(String),
+    FillFromHoldings,                   // 「全数量」ボタン: holdings を qty にセット
+    PriceTypeChanged(PriceType),
+    LimitPriceChanged(String),
+    PriceIncrementTick,                 // 「▲」ボタン: limit_price を呼値単位で+1
+    PriceDecrementTick,                 // 「▼」ボタン: limit_price を呼値単位で-1
+    CashMarginChanged(CashMarginType),
+    ExpireDayChanged(ExpireDay),
+    SecondPasswordChanged(String),
+    HoldingsUpdated(Option<u64>),
+    ConfirmClicked,
+    ConfirmCancelled,
+    Submitted,
+    OrderCompleted(OrderResult),
+    SyncIssue { issue_code: String, issue_name: String, tick_size: Option<f64> },
+}
+
+pub enum Action {
+    Submit(Box<NewOrderRequest>),       // NewOrderRequest が 240 bytes のため Box 化
+    FetchHoldings { issue_code: String },
+}
+```
+
+**`view()` シグネチャ**:
+
+```rust
+// is_replay を受け取り、仮想モード UI の表示を制御する
+pub fn view(&self, theme: &Theme, is_replay: bool) -> Element<Message>
+```
+
+---
+
+### 3.2 注文照会パネル
+
+**ファイル**: `src/screen/dashboard/panel/order_list.rs`
+
+`Panel` trait（`canvas::Program`）は実装しない。
+
+```rust
+pub struct OrderListPanel {
+    orders: Vec<OrderRecord>,
+    prev_orders: Vec<OrderRecord>,          // 約定通知の diff 用
+    expanded_order: Option<String>,         // 展開中の注文番号
+    executions: HashMap<String, Vec<ExecutionRecord>>,
+    correct_modal: Option<CorrectModal>,    // 訂正モーダル状態
+    cancel_modal: Option<CancelModal>,      // 取消モーダル状態
+    loading: bool,
+    last_error: Option<String>,
+}
+
+pub enum Message {
+    RefreshClicked,
+    RowClicked(String),
+    CorrectClicked(OrderRecord),
+    CorrectNewPriceChanged(String),
+    CorrectNewQtyChanged(String),
+    CorrectPasswordChanged(String),
+    CorrectSubmitted,
+    CorrectCancelled,
+    CancelClicked(OrderRecord),
+    CancelPasswordChanged(String),
+    CancelSubmitted,
+    CancelCancelled,
+    OrdersUpdated(Vec<OrderRecord>),
+    ExecutionsUpdated(String, Vec<ExecutionRecord>),
+    ModifyCompleted(Result<ModifyOrderResponse, String>),
+    PollTick,
+}
+
+pub enum Action {
+    FetchOrders,
+    FetchOrderDetail { order_num: String, eig_day: String },
+    SubmitCorrect(Box<CorrectOrderRequest>),
+    SubmitCancel(Box<CancelOrderRequest>),
+}
+```
+
+**約定通知**: `newly_executed()` メソッドで `prev_orders` との diff を比較し、
+状態テキストが "全部約定" に遷移した行を検出してトーストで通知する。
+
+**自動リフレッシュ戦略**:
+
+| 方式 | 状態 |
+|---|---|
+| 手動リフレッシュ（[更新] ボタン） | ✅ 実装済み |
+| イベント駆動（注文発注・訂正・取消成功後） | 未実装（連鎖 Effect 未接続） |
+| 自動ポーリング（10秒間隔） | 未実装 |
+| 取引時間帯チェック | 未実装 |
+
+> **ポーリング設計方針（未実装）**: `iced::time::every(Duration::from_secs(10))` を
+> `dashboard.rs` の `subscription()` に追加し、`Message::PollOrders` を発行する。
+> `OrderListPanel` 側では `PollTick` メッセージを受け取り `Action::FetchOrders` を返す。
+> 取引時間外はアクションを返さない設計。
+
+---
+
+### 3.3 余力情報パネル
+
+**ファイル**: `src/screen/dashboard/panel/buying_power.rs`
+
+`Panel` trait（`canvas::Program`）は実装しない。
+
+```rust
+pub enum Message {
+    RefreshClicked,
+    BuyingPowerUpdated { cash: BuyingPowerResponse, margin: MarginPowerResponse },
+    FetchFailed(String),
+}
+
+pub enum Action {
+    FetchBuyingPower,
+}
+```
+
+**余力の更新タイミング**:
+- パネルを開いた時（初回取得）: ✅ 実装済み
+- [更新] ボタン押下時（手動）: ✅ 実装済み
+- 注文発注成功後の自動トリガー: 未実装（連鎖 Effect 未接続）
+
+---
+
+## 4. 立花証券 API 仕様
+
+### 4.1 CLMKabuNewOrder（新規注文）
 
 **リクエスト主要フィールド:**
 
@@ -129,7 +444,9 @@ pub fn split_focused_and_init_order(
 | `sKinri` | 金利（現物時は "-"） |
 | `sOrderDate` | 注文日時 (YYYYMMDDHHMMSS) |
 
-### CLMKabuCorrectOrder（訂正注文）
+---
+
+### 4.2 CLMKabuCorrectOrder（訂正注文）
 
 | フィールド | 説明 |
 |---|---|
@@ -141,7 +458,9 @@ pub fn split_focused_and_init_order(
 | `sOrderExpireDay` | "*"=変更なし, "0"=当日, YYYYMMDD=変更後の期日 |
 | `sSecondPassword` | **第二パスワード（必須）** |
 
-### CLMKabuCancelOrder（取消注文）
+---
+
+### 4.3 CLMKabuCancelOrder（取消注文）
 
 | フィールド | 説明 |
 |---|---|
@@ -149,7 +468,9 @@ pub fn split_focused_and_init_order(
 | `sEigyouDay` | 営業日 |
 | `sSecondPassword` | **第二パスワード（必須）** |
 
-### CLMOrderList（注文一覧）
+---
+
+### 4.4 CLMOrderList（注文一覧）
 
 **リクエストフィールド:**
 
@@ -172,13 +493,15 @@ pub fn split_focused_and_init_order(
 | `sOrderStatus` | 状態名称（テキスト） |
 | `sOrderYakuzyouSuryo` | 約定株数 |
 | `sOrderYakuzyouPrice` | 約定単価 |
-| `sOrderEigyouDay` | 営業日（暫定フィールド名。実 API で確認要） |
+| `sOrderEigyouDay` | 営業日（⚠️ 暫定フィールド名—要確認） |
 
 > **⚠️ 要注意**: `sOrderEigyouDay` は暫定フィールド名。実際の CLMOrderList レスポンスで
 > 別のフィールド名が使われている場合、`eig_day` が `""` になり訂正・取消 API 呼び出し時に
 > エラーが発生する。実注文照会のログで確認が必要。
 
-### CLMOrderListDetail（約定明細）
+---
+
+### 4.5 CLMOrderListDetail（約定明細）
 
 **リクエストフィールド:**
 
@@ -195,7 +518,9 @@ pub fn split_focused_and_init_order(
 | `sYakuzyouPrice` | 約定単価 |
 | `sYakuzyouDate` | 約定日時 |
 
-### CLMZanKaiKanougaku（現物買付余力）
+---
+
+### 4.6 CLMZanKaiKanougaku（現物買付余力）
 
 | フィールド | 説明 |
 |---|---|
@@ -203,7 +528,9 @@ pub fn split_focused_and_init_order(
 | `sSummaryNseityouTousiKanougaku` | NISA成長投資可能額 |
 | `sHusokukinHasseiFlg` | 不足金発生フラグ |
 
-### CLMZanShinkiKanoIjiritu（信用新規可能委託保証金率）
+---
+
+### 4.7 CLMZanShinkiKanoIjiritu（信用新規可能委託保証金率）
 
 | フィールド | 説明 |
 |---|---|
@@ -211,7 +538,9 @@ pub fn split_focused_and_init_order(
 | `sItakuhosyoukin` | 委託保証金率(%) |
 | `sOisyouKakuteiFlg` | 追証フラグ（0=なし, 1=確定） |
 
-### CLMGenbutuKabuList（現物保有株数取得）
+---
+
+### 4.8 CLMGenbutuKabuList（現物保有株数）
 
 **リクエストフィールド:**
 
@@ -229,9 +558,9 @@ pub fn split_focused_and_init_order(
 
 ---
 
-## アーキテクチャ
+## 5. アーキテクチャ
 
-### リクエスト送信の仕組み
+### 5.1 リクエスト送信の仕組み
 
 全注文 API は `serialize_order_request()` ヘルパーを通じて送信する。
 
@@ -248,7 +577,9 @@ pub fn serialize_order_request<T: Serialize>(
 `serialize_order_request()` が自動付与する。これは既存の `build_api_url_from()` とは
 別の方式として注文 API 向けに実装された。
 
-### レスポンスのエラー判定
+> **内部実装**: `serde_json::to_value()` でマップに共通フィールドをマージする方式。逆指値フィールドもここで固定値として付与する。
+
+### 5.2 レスポンスのエラー判定
 
 全レスポンスは `ApiResponse<T>` でラップし、`check()` でエラー判定する。
 
@@ -257,7 +588,7 @@ let resp: ApiResponse<NewOrderResponse> = serde_json::from_str(&body)?;
 let data = resp.check()?;  // sResultCode != "0" → TachibanaError
 ```
 
-### 営業日の管理
+### 5.3 営業日の管理
 
 `dashboard.rs` が `Option<String>` の `eig_day` フィールドを保持する。
 初回 `submit_new_order()` 成功後に `NewOrderResponse.eig_day` をセットする。
@@ -272,13 +603,36 @@ fn eig_day_or_today(&self) -> String {
 }
 ```
 
+### 5.4 銘柄連動
+
+チャートペインが銘柄変更時に `Effect::SyncIssueToOrderEntry` を発行する。
+`dashboard.rs` がこれを受け取り、同一ウィンドウ内の `OrderEntry` ペインに
+`pane::Event` として配信する。LinkGroup とは独立した単方向の連動。
+
+### 5.5 注文結果のデータフロー
+
+```
+OrderEntryPanel.update(Submitted)
+  → Action::Submit(req)
+  → pane.rs: Effect::SubmitNewOrder(req)
+  → dashboard.rs: Task::perform(connector::order::submit_new_order(...))
+  → dashboard::Message::OrderApiResult(pane_id, result)
+  → pane.rs: state.update(Event::OrderApiResult(result))
+  → OrderEntryPanel.update(OrderCompleted(result))
+```
+
+> **注文成功後の連鎖更新（未実装）**: `OrderCompleted(Ok(_))` 後に
+> `FetchBuyingPower` / `FetchOrders` を自動トリガーする処理は未実装。
+
+> **トースト通知（未実装）**: 注文受付後の "注文受付: 注文番号 XXXXXXXX" トーストは未実装。
+
 ---
 
-## API 型定義（`exchange` クレート）
+## 6. 型定義
+
+### 6.1 注文発注 API 型（exchange クレート）
 
 **ファイル**: `exchange/src/adapter/tachibana.rs`
-
-### 注文発注 API 型
 
 ```rust
 // 新規注文リクエスト（業務フィールドのみ。共通フィールドは serialize_order_request() が付与）
@@ -345,11 +699,11 @@ pub struct NewOrderResponse {
 
 // 訂正注文リクエスト（second_password を含むため Debug 手動実装）
 #[derive(Clone, Serialize)]
-pub struct CorrectOrderRequest { ... }
+pub struct CorrectOrderRequest { /* ... */ }
 
 // 取消注文リクエスト（second_password を含むため Debug 手動実装）
 #[derive(Clone, Serialize)]
-pub struct CancelOrderRequest { ... }
+pub struct CancelOrderRequest { /* ... */ }
 
 // 訂正・取消共通レスポンス（ApiResponse<ModifyOrderResponse> でラップして使用）
 #[derive(Debug, Clone, Deserialize)]
@@ -366,7 +720,9 @@ pub struct ModifyOrderResponse {
 > **`Box<NewOrderRequest>`**: `NewOrderRequest` が 240 bytes のため、
 > `Action::Submit(Box<NewOrderRequest>)` として boxed にする（clippy 警告対応）。
 
-### 注文照会 API 型
+---
+
+### 6.2 注文照会 API 型
 
 ```rust
 // 注文一覧リクエスト
@@ -424,7 +780,9 @@ impl OrderRecord {
 }
 ```
 
-### 余力情報 API 型
+---
+
+### 6.3 余力・保有株数 API 型
 
 ```rust
 // 現物買付余力レスポンス
@@ -448,11 +806,7 @@ pub struct MarginPowerResponse {
     #[serde(rename = "sOisyouKakuteiFlg", default)]
     pub margin_call_flag: String,       // "0"=なし, "1"=確定
 }
-```
 
-### 保有株数 API 型
-
-```rust
 // 現物保有レスポンス
 #[derive(Debug, Deserialize)]
 pub struct GenbutuKabuResponse {
@@ -474,9 +828,9 @@ pub struct HoldingRecord {
 
 ---
 
-## data クレート（`data/src/layout/pane.rs`）
+### 6.4 ContentKind / Pane 拡張（data クレート）
 
-### ContentKind 拡張
+**ファイル**: `data/src/layout/pane.rs`
 
 ```rust
 pub enum ContentKind {
@@ -510,10 +864,7 @@ pub const ALL: [ContentKind; 8] = [
 
 > **注文系バリアントを `ALL` から除外した理由**: 注文パネルはサイドバー注文ボタンが唯一の開き方であるため、Starter ペインの pick_list に表示する必要がなくなった。`Pane` enum のバリアントとしては残るため、保存済みレイアウト JSON のデシリアライズには影響しない。
 
-### Pane enum 拡張
-
-注文パネルは設定（stream / indicators）を持たないため **ユニット variant** として追加。
-ユニット variant の追加は既存の保存済みレイアウト JSON のデシリアライズに影響しない。
+注文パネルは設定（stream / indicators）を持たないため **ユニット variant** として追加：
 
 ```rust
 pub enum Pane {
@@ -526,282 +877,82 @@ pub enum Pane {
 
 ---
 
-## 注文入力パネル（`src/screen/dashboard/panel/order_entry.rs`）
+### 6.5 Effect / Content / pane.rs
 
-`Panel` trait（`canvas::Program` ベース）は実装しない。
-`view() -> Element<Message>` と `update(msg: Message) -> Option<Action>` を直接定義する。
-
-### UI レイアウト
-
-```
-┌─────────────────────────────────┐
-│  [買い]  [売り]                  │  売買区分タブ
-├─────────────────────────────────┤
-│  銘柄: [7203 トヨタ自動車]       │  銘柄表示（チャートペインと連動）
-│─────────────────────────────────│
-│  口座: [特定 ▼]                  │  口座区分
-│  数量: [____100____] [全数量]    │  注文株数 / 売り時のみ「全数量」ボタン
-│         (保有: 200株)            │  売り時のみ保有株数を表示
-│  価格: [成行 ▼] [▼][________][▲]│  成行/指値 + 呼値単位ステップボタン
-│  期日: [当日 ▼]                  │  注文期日
-│─────────────────────────────────│
-│  受渡金額: ¥XXX,XXX (概算)       │  確認情報
-│  手数料:   ¥YYY                  │
-│─────────────────────────────────│
-│  発注パスワード: [__________]    │  第二パスワード
-│─────────────────────────────────│
-│       [  注文確認  ]             │  確認ボタン
-└─────────────────────────────────┘
-```
-
-> **BBO（最良気配）**: 立花証券の株価気配は既存の crypto 向け depth ストリームとは
-> 別系統のため、初期実装では **BBO 表示を省く**。銘柄名・コードのみ表示する。
-
-### 注文確認モーダル
-
-```
-┌─────────────────────────────────┐
-│  注文確認                        │
-│─────────────────────────────────│
-│  銘柄:    7203 トヨタ自動車      │
-│  売買:    買い                   │
-│  数量:    100株                  │
-│  価格:    成行                   │
-│  口座:    特定                   │
-│─────────────────────────────────│
-│  [キャンセル]   [注文を発注する]  │
-└─────────────────────────────────┘
-```
-
-### 状態設計
+**ファイル**: `src/screen/dashboard/pane.rs`
 
 ```rust
-pub struct OrderEntryPanel {
-    issue_code: String,
-    issue_name: String,
-    side: Side,                         // Buy / Sell
-    account_type: AccountType,          // 特定 / 一般 / NISA / N成長
-    qty: String,
-    price_type: PriceType,              // Market / Limit
-    limit_price: String,
-    tick_size: Option<f64>,             // 呼値単位（銘柄連動で更新）
-    cash_margin: CashMarginType,        // 現物 / 信用新規 / 信用返済
-    expire_day: ExpireDay,              // Today / Specified(date)
-    holdings: Option<u64>,             // 保有株数（売り時のみ表示 / 全数量ボタン用）
-    second_password: String,
-    confirm_modal: bool,
-    loading: bool,
-    last_result: Option<OrderResult>,
-    /// REPLAY モードで仮想注文モードになったとき true
-    /// true の場合: パスワード入力欄を非表示、確認ボタンラベル変更、パスワードバリデーションをスキップ
-    pub is_virtual: bool,
+pub struct State {
+    // 既存フィールド...
+    /// REPLAY モードで仮想注文を有効にするフラグ
+    /// dashboard.rs の sync_virtual_mode() から設定される
+    pub is_virtual_mode: bool,
 }
 
-pub enum Side { Buy, Sell }
-pub enum PriceType { Market, Limit }
-pub enum AccountType { Tokutei, Ippan, Nisa, NisaGrowth }
-pub enum CashMarginType { Cash, MarginNew6M, MarginClose6M, MarginNewGeneral, MarginCloseGeneral }
-pub enum ExpireDay { Today, Specified(String) }
-
-// Warning も受注番号が返る「成功の一種」なので Success に統合
-pub struct OrderSuccess {
-    pub order_num: String,
-    pub warning: Option<String>,        // Some = 警告あり（それでも受付済み）
-}
-pub type OrderResult = Result<OrderSuccess, String>;
-
-pub enum Message {
-    SideChanged(Side),
-    AccountTypeChanged(AccountType),
-    QtyChanged(String),
-    FillFromHoldings,                   // 「全数量」ボタン: holdings を qty にセット
-    PriceTypeChanged(PriceType),
-    LimitPriceChanged(String),
-    PriceIncrementTick,                 // 「▲」ボタン: limit_price を呼値単位で+1
-    PriceDecrementTick,                 // 「▼」ボタン: limit_price を呼値単位で-1
-    CashMarginChanged(CashMarginType),
-    ExpireDayChanged(ExpireDay),
-    SecondPasswordChanged(String),
-    HoldingsUpdated(Option<u64>),
-    ConfirmClicked,
-    ConfirmCancelled,
-    Submitted,
-    OrderCompleted(OrderResult),
-    SyncIssue { issue_code: String, issue_name: String, tick_size: Option<f64> },
-}
-
-pub enum Action {
-    Submit(Box<NewOrderRequest>),       // NewOrderRequest が 240 bytes のため Box 化
-    FetchHoldings { issue_code: String },
-}
-```
-
-### `view()` シグネチャ
-
-```rust
-// is_replay を受け取り、仮想モード UI の表示を制御する
-pub fn view(&self, theme: &Theme, is_replay: bool) -> Element<Message>
-```
-
-`is_virtual_mode = self.is_virtual || is_replay` として評価する。
-仮想モード時の UI 変更:
-
-| 変更点 | 通常モード | 仮想モード |
-|---|---|---|
-| パスワード欄 | 表示 | 非表示 |
-| バナー | なし | `"⏪ 仮想注文モード"` (is_virtual) / `"⏪ REPLAYモード中 — 注文は無効です"` (is_replay のみ) |
-| 確認ボタンラベル | `"注文確認"` | `"仮想注文確認"` |
-| パスワードバリデーション | 必須 | スキップ |
-```
-
-### 銘柄連動
-
-チャートペインが銘柄変更時に `Effect::SyncIssueToOrderEntry` を発行する。
-`dashboard.rs` がこれを受け取り、同一ウィンドウ内の `OrderEntry` ペインに
-`pane::Event` として配信する。LinkGroup とは独立した単方向の連動。
-
-### 注文結果のデータフロー
-
-```
-OrderEntryPanel.update(Submitted)
-  → Action::Submit(req)
-  → pane.rs: Effect::SubmitNewOrder(req)
-  → dashboard.rs: Task::perform(connector::order::submit_new_order(...))
-  → dashboard::Message::OrderApiResult(pane_id, result)
-  → pane.rs: state.update(Event::OrderApiResult(result))
-  → OrderEntryPanel.update(OrderCompleted(result))
-```
-
-> **注文成功後の連鎖更新（未実装）**: `OrderCompleted(Ok(_))` 後に
-> `FetchBuyingPower` / `FetchOrders` を自動トリガーする処理は未実装。
-
-> **トースト通知（未実装）**: 注文受付後の "注文受付: 注文番号 XXXXXXXX" トーストは未実装。
-
----
-
-## 注文照会パネル（`src/screen/dashboard/panel/order_list.rs`）
-
-`Panel` trait（`canvas::Program`）は実装しない。
-
-```
-表示項目:
-  - 銘柄コード / 売買 / 注文株数・約定株数 / 注文単価・約定単価 / 状態 / 注文日時
-
-注文状態の色分け:
-  - "全部約定" → 通常
-  - "一部約定" → 強調（黄）
-  - "取消完了" → グレー
-  - エラー系   → 赤
-  - "受付中"/"注文中" → 薄色
-
-行の操作:
-  - クリック → 約定明細を展開
-  - [訂正] ボタン → 訂正モーダルを開く
-  - [取消] ボタン → 取消モーダルを開く
-    ※ is_cancelable() == true の行のみ表示
-
-                  [更新]  ← 手動リフレッシュボタン
-```
-
-### 状態設計
-
-```rust
-pub struct OrderListPanel {
-    orders: Vec<OrderRecord>,
-    prev_orders: Vec<OrderRecord>,          // 約定通知の diff 用
-    expanded_order: Option<String>,         // 展開中の注文番号
-    executions: HashMap<String, Vec<ExecutionRecord>>,
-    correct_modal: Option<CorrectModal>,    // 訂正モーダル状態
-    cancel_modal: Option<CancelModal>,      // 取消モーダル状態
-    loading: bool,
-    last_error: Option<String>,
-}
-
-pub enum Message {
-    RefreshClicked,
-    RowClicked(String),
-    CorrectClicked(OrderRecord),
-    CorrectNewPriceChanged(String),
-    CorrectNewQtyChanged(String),
-    CorrectPasswordChanged(String),
-    CorrectSubmitted,
-    CorrectCancelled,
-    CancelClicked(OrderRecord),
-    CancelPasswordChanged(String),
-    CancelSubmitted,
-    CancelCancelled,
-    OrdersUpdated(Vec<OrderRecord>),
-    ExecutionsUpdated(String, Vec<ExecutionRecord>),
-    ModifyCompleted(Result<ModifyOrderResponse, String>),
-    PollTick,
-}
-
-pub enum Action {
+pub enum Effect {
+    // 既存...
+    SubmitNewOrder(NewOrderRequest),
+    SubmitCorrectOrder(CorrectOrderRequest),
+    SubmitCancelOrder(CancelOrderRequest),
     FetchOrders,
-    FetchOrderDetail { order_num: String, eig_day: String },
-    SubmitCorrect(Box<CorrectOrderRequest>),
-    SubmitCancel(Box<CancelOrderRequest>),
+    FetchOrderDetail(String, String),       // (order_num, eig_day)
+    FetchBuyingPower,
+    FetchHoldings { issue_code: String },
+    SyncIssueToOrderEntry { issue_code: String, issue_name: String, tick_size: Option<f64> },
+    /// REPLAY モード中の仮想注文送信（証券 API を呼ばない）
+    SubmitVirtualOrder(crate::replay::virtual_exchange::VirtualOrder),
+}
+
+pub enum Content {
+    // 既存...
+    OrderEntry(panel::order_entry::OrderEntryPanel),
+    OrderList(panel::order_list::OrderListPanel),
+    BuyingPower(panel::buying_power::BuyingPowerPanel),
 }
 ```
 
-### 約定通知
-
-`newly_executed()` メソッドで `prev_orders` との diff を比較し、
-状態テキストが "全部約定" に遷移した行を検出してトーストで通知する。
-
-### 自動リフレッシュ戦略
-
-| 方式 | 状態 |
-|---|---|
-| 手動リフレッシュ（[更新] ボタン） | ✅ 実装済み |
-| イベント駆動（注文発注・訂正・取消成功後） | 未実装（連鎖 Effect 未接続） |
-| 自動ポーリング（10秒間隔） | 未実装 |
-| 取引時間帯チェック | 未実装 |
-
-> **ポーリング設計方針（未実装）**: `iced::time::every(Duration::from_secs(10))` を
-> `dashboard.rs` の `subscription()` に追加し、`Message::PollOrders` を発行する。
-> `OrderListPanel` 側では `PollTick` メッセージを受け取り `Action::FetchOrders` を返す。
-> 取引時間外はアクションを返さない設計。
-
----
-
-## 余力情報パネル（`src/screen/dashboard/panel/buying_power.rs`）
-
-`Panel` trait（`canvas::Program`）は実装しない。
-
-```
-現物口座:
-  現物株買付可能額:    ¥X,XXX,XXX
-  NISA成長投資残高:    ¥X,XXX,XXX
-
-信用口座:
-  信用新規建可能額:    ¥X,XXX,XXX
-  委託保証金率:        XX.XX%
-  追証: [警告なし / ⚠ 追証確定（赤）]
-
-                      [更新]  ← 手動リフレッシュボタン
-```
+**`Content::placeholder`**: `TickerInfo` 不要なパネルを初期化する際に使用する公開ファクトリ。
+`set_content_and_streams()` は `tickers[0]` に無条件アクセスするため、注文パネルでは使用不可。
 
 ```rust
-pub enum Message {
-    RefreshClicked,
-    BuyingPowerUpdated { cash: BuyingPowerResponse, margin: MarginPowerResponse },
-    FetchFailed(String),
-}
+// pub に変更済み（サイドバー注文ボタンの split_focused_and_init_order から呼び出すため）
+pub fn placeholder(kind: ContentKind) -> Self { ... }
+```
 
-pub enum Action {
-    FetchBuyingPower,
+**`virtual_order_from_new_order_request`**（プライベート）:
+
+`NewOrderRequest` を `VirtualOrder` に変換するヘルパー。`side` フィールドのマッピングは `match` で排他的に処理し、未知コードは `log::warn!` + `None` で破棄する。
+
+```rust
+// tachibana API: "3" = 買い, "1" = 売り
+let side = match req.side.as_str() {
+    "3" => PositionSide::Long,
+    "1" => PositionSide::Short,
+    unknown => {
+        log::warn!("仮想注文: 未知の side コード ({unknown:?}) — 注文を破棄");
+        return None;
+    }
+};
+```
+
+**`panel::Message`**: 注文関連 variant は `String` フィールドを含むため `Copy` 不可。
+`panel::Message` は `#[derive(Debug, Clone)]`（`Copy` を削除済み）。
+
+```rust
+#[derive(Debug, Clone)]
+pub enum Message {
+    // 既存...
+    OrderEntry(order_entry::Message),
+    OrderList(order_list::Message),
+    BuyingPower(buying_power::Message),
 }
 ```
 
-> **余力の更新タイミング**:
-> - パネルを開いた時（初回取得）: ✅ 実装済み
-> - [更新] ボタン押下時（手動）: ✅ 実装済み
-> - 注文発注成功後の自動トリガー: 未実装（連鎖 Effect 未接続）
-
 ---
 
-## connector（`src/connector/order.rs`）
+### 6.6 connector（order.rs）
+
+**ファイル**: `src/connector/order.rs`
 
 ```rust
 pub async fn submit_new_order(
@@ -852,102 +1003,14 @@ pub async fn fetch_holdings(
 
 ---
 
-## pane.rs（`src/screen/dashboard/pane.rs`）
-
-### State struct（抜粋）
-
-```rust
-pub struct State {
-    // 既存フィールド...
-    /// REPLAY モードで仮想注文を有効にするフラグ
-    /// dashboard.rs の sync_virtual_mode() から設定される
-    pub is_virtual_mode: bool,
-}
-```
-
-### Effect enum
-
-```rust
-pub enum Effect {
-    // 既存...
-    SubmitNewOrder(NewOrderRequest),
-    SubmitCorrectOrder(CorrectOrderRequest),
-    SubmitCancelOrder(CancelOrderRequest),
-    FetchOrders,
-    FetchOrderDetail(String, String),       // (order_num, eig_day)
-    FetchBuyingPower,
-    FetchHoldings { issue_code: String },
-    SyncIssueToOrderEntry { issue_code: String, issue_name: String, tick_size: Option<f64> },
-    /// REPLAY モード中の仮想注文送信（証券 API を呼ばない）
-    SubmitVirtualOrder(crate::replay::virtual_exchange::VirtualOrder),
-}
-```
-
-### Content enum
-
-非 canvas パネル（注文パネル）は `Panel` trait を実装しない。
-`pane.rs` の view/update match に専用アームを追加する。
-
-```rust
-pub enum Content {
-    // 既存...
-    OrderEntry(panel::order_entry::OrderEntryPanel),
-    OrderList(panel::order_list::OrderListPanel),
-    BuyingPower(panel::buying_power::BuyingPowerPanel),
-}
-```
-
-### `Content::placeholder`
-
-`TickerInfo` 不要なパネルを初期化する際に使用する公開ファクトリ。
-`set_content_and_streams()` は `tickers[0]` に無条件アクセスするため、注文パネルでは使用不可。
-
-```rust
-// pub に変更済み（サイドバー注文ボタンの split_focused_and_init_order から呼び出すため）
-pub fn placeholder(kind: ContentKind) -> Self { ... }
-```
-
-### `virtual_order_from_new_order_request`（プライベート）
-
-`NewOrderRequest` を `VirtualOrder` に変換するヘルパー。`side` フィールドのマッピングは `match` で排他的に処理し、未知コードは `log::warn!` + `None` で破棄する。
-
-```rust
-// tachibana API: "3" = 買い, "1" = 売り
-let side = match req.side.as_str() {
-    "3" => PositionSide::Long,
-    "1" => PositionSide::Short,
-    unknown => {
-        log::warn!("仮想注文: 未知の side コード ({unknown:?}) — 注文を破棄");
-        return None;
-    }
-};
-```
-
-### panel::Message
-
-注文関連 variant は `String` フィールドを含むため `Copy` 不可。
-`panel::Message` は `#[derive(Debug, Clone)]`（`Copy` を削除済み）。
-
-```rust
-#[derive(Debug, Clone)]
-pub enum Message {
-    // 既存...
-    OrderEntry(order_entry::Message),
-    OrderList(order_list::Message),
-    BuyingPower(buying_power::Message),
-}
-```
-
----
-
-## 仮想約定エンジン（`src/replay/virtual_exchange/`）
+## 7. 仮想約定エンジン
 
 REPLAY モード中に証券 API を呼ばずに仮想注文を処理するエンジン。
 `main.rs` が `Option<VirtualExchangeEngine>` として保持する（Arc/Mutex 不使用 — iced の
 同期 update() コンテキスト内で直接アクセスするため、排他制御は不要）。
 HTTP API スレッドからのアクセスは `replay_api.rs` の `ApiCommand` チャネル経由で行う。
 
-### モジュール構成
+### 7.1 モジュール構成
 
 ```
 src/replay/virtual_exchange/
@@ -956,7 +1019,7 @@ src/replay/virtual_exchange/
 └── portfolio.rs    VirtualPortfolio（ポジション管理・PnL 計算）
 ```
 
-### 型定義
+### 7.2 型定義
 
 ```rust
 // --- portfolio.rs ---
@@ -980,28 +1043,21 @@ pub struct VirtualPortfolio {
     pub cash: f64,
     positions: Vec<Position>,       // private; 外部からは公開メソッド経由のみアクセス
 }
+```
 
-// --- VirtualPortfolio の主要メソッド ---
-//
-// record_open(pos)
-//   約定時に呼ぶ。Long: cash -= entry_price * qty / Short: cash += entry_price * qty
-//
-// record_close(order_id, exit_price, exit_time_ms)
-//   クローズ時に呼ぶ。realized_pnl を確定し売却代金/買戻コストを cash に反映する。
-//   Long close: cash += exit_price * qty / Short close: cash -= exit_price * qty
-//
-// oldest_open_long_order_id(ticker) -> Option<&str>
-//   指定 ticker のオープン中 Long ポジションの中で entry_time_ms が最小（最古）の
-//   order_id を返す（FIFO クローズ用）。
-//   ※ 返り値の &str は self.portfolio を借用するため、呼び出し後に可変借用する場合は
-//     `.map(str::to_string)` でクローンしてから record_close() を呼ぶこと。
-//
-// unrealized_pnl(current_price) -> f64
-//   単一銘柄前提。Phase 2 で複数銘柄対応予定。
-//
-// snapshot(current_price) -> PortfolioSnapshot
-//   HTTP GET /api/replay/portfolio のレスポンスに使用する。
+**`VirtualPortfolio` の主要メソッド**:
 
+| メソッド | 説明 |
+|---|---|
+| `record_open(pos)` | 約定時に呼ぶ。Long: cash -= entry_price * qty / Short: cash += entry_price * qty |
+| `record_close(order_id, exit_price, exit_time_ms)` | クローズ時に呼ぶ。realized_pnl を確定し売却代金/買戻コストを cash に反映する |
+| `oldest_open_long_order_id(ticker) -> Option<&str>` | 指定 ticker のオープン中 Long ポジションの中で entry_time_ms が最小（最古）の order_id を返す（FIFO クローズ用）|
+| `unrealized_pnl(current_price) -> f64` | 単一銘柄前提。Phase 2 で複数銘柄対応予定 |
+| `snapshot(current_price) -> PortfolioSnapshot` | HTTP GET /api/replay/portfolio のレスポンスに使用 |
+
+> **`oldest_open_long_order_id()` の borrow checker**: 返り値の `&str` は `self.portfolio` を借用する。呼び出し後に可変借用する場合は `.map(str::to_string)` でクローンしてから `record_close()` を呼ぶこと。
+
+```rust
 #[derive(serde::Serialize)]
 pub struct PortfolioSnapshot {
     pub cash: f64,
@@ -1046,7 +1102,7 @@ pub struct FillEvent {
 }
 ```
 
-### 約定ルール
+### 7.3 約定ルール
 
 | 注文種別 | 約定条件 |
 |---|---|
@@ -1056,7 +1112,7 @@ pub struct FillEvent {
 
 `place()` は `Pending` 状態で登録するのみ。約定は必ず次の `on_tick()` で行う。
 
-### ポジションのネットアウト（sell → Long close）
+**ポジションのネットアウト（sell → Long close）**:
 
 Sell 注文の約定時、`on_tick()` は以下の優先順位でポジションを処理する:
 
@@ -1083,7 +1139,7 @@ match order.side {
 }
 ```
 
-### REPLAY モード Safety Guard
+### 7.4 REPLAY 安全ガード
 
 REPLAY 中の誤発注を防ぐための二重ガード:
 
@@ -1105,6 +1161,10 @@ pane::Effect::SubmitNewOrder(req) => {
 // SubmitCorrectOrder / SubmitCancelOrder も同様にブロック
 ```
 
+> **ボローチェッカー対策**: `dashboard.update()` 内で `self.is_replay` を
+> `let is_replay = self.is_replay;` としてコピーしてから `get_mut_pane()` で `self` を
+> 可変借用する。フラグを先にコピーしないと E0503 が発生する。
+
 **2. pane.rs レベルのルーティング**
 
 ```rust
@@ -1118,40 +1178,18 @@ panel::order_entry::Action::Submit(req) => {
 }
 ```
 
-### dashboard.rs の拡張
+**dashboard.rs の拡張**:
 
 ```rust
-// 追加フィールド
 pub struct Dashboard {
     // 既存...
     pub is_replay: bool,
-}
-
-// 追加 Event / Message
-pub enum Event {
-    // 既存...
-    SubmitVirtualOrder(crate::replay::virtual_exchange::VirtualOrder),
-}
-
-pub enum Message {
-    // 既存...
-    VirtualOrderFilled(crate::replay::virtual_exchange::FillEvent),
 }
 
 // pane 間の仮想モード同期
 fn sync_virtual_mode(&mut self) {
     // 全ペインの is_virtual_mode と OrderEntryPanel の is_virtual を同期する
 }
-
-// フォーカスなし・単一ペイン時の自動フォーカス（内部ヘルパー）
-fn auto_focus_single_pane(&mut self, main_window: window::Id) { ... }
-
-// 注文パネル専用 Split（TickerInfo 不要）
-pub fn split_focused_and_init_order(
-    &mut self,
-    main_window: window::Id,
-    content_kind: data::layout::pane::ContentKind,
-) -> Task<Message> { ... }
 ```
 
 `VirtualOrderFilled` ハンドラはトースト通知を表示する:
@@ -1159,21 +1197,13 @@ pub fn split_focused_and_init_order(
 "[仮想] 約定: {ticker} {side} {qty:.4} @ {price:.2}"
 ```
 
-### main.rs の拡張
+### 7.5 StepForward 時の合成トレード注入
 
-```rust
-pub struct Flowsurface {
-    // 既存...
-    virtual_engine: Option<replay::virtual_exchange::VirtualExchangeEngine>,
-}
-```
+Trades EventStore は未統合（`ingest_loaded(..., LoadedData { klines, trades: vec![] })`）のため
+`on_tick()` に実際のトレードが届かない。StepForward 後に kline の close 価格から合成
+トレードを生成して注文約定を駆動する。
 
-**ライフサイクル:**
-- Live → Replay 遷移: `VirtualExchangeEngine::new(1_000_000.0)` で初期化（既存なら `reset()`）
-- Replay → Live 遷移: `engine.reset()`
-- `StepForward` 時: エンジンをリセット**しない**（下記参照）
-
-**StepForward 時のエンジンリセット抑止（2026-04-17 修正）:**
+**StepForward 時のエンジンリセット抑止（2026-04-17 修正）**:
 
 `StepForward` メッセージを `handle_message()` に渡すと内部でリプレイ時刻が進み、
 `time_before != time_after` の条件が真になってエンジンが毎回リセットされるバグがあった。
@@ -1195,11 +1225,7 @@ let task = self.replay.handle_message(msg);
 }
 ```
 
-**StepForward 時の合成トレード注入:**
-
-Trades EventStore は未統合（`ingest_loaded(..., LoadedData { klines, trades: vec![] })`）のため
-`on_tick()` に実際のトレードが届かない。StepForward 後に kline の close 価格から合成
-トレードを生成して注文約定を駆動する:
+**合成トレード生成**:
 
 ```rust
 // controller.rs に追加した synthetic_trades_at_current_time()
@@ -1219,7 +1245,12 @@ if is_replay_now && is_step_forward {
 }
 ```
 
-### HTTP API（ポート 9876）
+**main.rs のライフサイクル**:
+- Live → Replay 遷移: `VirtualExchangeEngine::new(1_000_000.0)` で初期化（既存なら `reset()`）
+- Replay → Live 遷移: `engine.reset()`
+- `StepForward` 時: エンジンをリセット**しない**
+
+### 7.6 HTTP API
 
 | メソッド | パス | 説明 |
 |---|---|---|
@@ -1227,33 +1258,16 @@ if is_replay_now && is_step_forward {
 | `GET` | `/api/replay/portfolio` | ポートフォリオスナップショット取得 |
 | `GET` | `/api/replay/orders` | 仮想注文一覧取得（pending / filled / cancelled） |
 | `GET` | `/api/replay/state` | エンジン状態確認（REPLAY 中かどうか等） |
-| `POST` | `/api/replay/pause` | リプレイを一時停止する |
-| `POST` | `/api/replay/resume` | リプレイを再開する |
-| `POST` | `/api/replay/step-forward` | 1 step 前進する（StepForward） |
 
-**POST /api/replay/order リクエスト JSON:**
+詳細スキーマは [replay.md §11](replay.md#11-http-制御-api) を参照。
 
-```json
-{
-  "ticker": "BTCUSDT",
-  "side": "buy",
-  "qty": 0.1,
-  "order_type": "market"
-}
-// 指値の場合:
-{
-  "ticker": "BTCUSDT",
-  "side": "sell",
-  "qty": 0.5,
-  "order_type": { "limit": 92000.0 }
-}
-```
-
-> **注意**: HTTP API の `side` は `"buy"` / `"sell"`（小文字）。内部の `PositionSide` enum は `Long` / `Short` だが、HTTP リクエストに `"Long"` を送ると `400 Bad Request` になる。レスポンス（`GET /api/replay/orders`）では `"Long"` / `"Short"` で返る（Rust enum シリアライズ）。
+> **HTTP API の `side` は `"buy"` / `"sell"`（小文字）**。内部の `PositionSide` enum は `Long` / `Short` だが、HTTP リクエストに `"Long"` を送ると `400 Bad Request` になる。レスポンスでは `"Long"` / `"Short"` で返る（Rust enum シリアライズ）。
 
 ---
 
-## スタイル（`src/style.rs`）
+## 8. スタイル
+
+**ファイル**: `src/style.rs`
 
 ```rust
 // 注文状態色（sOrderStatus テキストで分岐）
@@ -1271,7 +1285,7 @@ pub fn margin_call_color(theme: &Theme) -> Color
 
 ---
 
-## セキュリティ上の注意事項
+## 9. セキュリティ要件
 
 - **第二パスワードはメモリ上にのみ保持**し、ログ・設定ファイルへの書き込みを禁止
 - 注文送信後は第二パスワードフィールドをクリア
@@ -1281,9 +1295,9 @@ pub fn margin_call_color(theme: &Theme) -> Color
 
 ---
 
-## 実装状況
+## 10. 実装状況
 
-### 完了済み
+### 10.1 完了済み
 
 | 機能 | ファイル |
 |---|---|
@@ -1301,30 +1315,30 @@ pub fn margin_call_color(theme: &Theme) -> Color
 | `dashboard.rs` の Effect ハンドラ接続 | `src/screen/dashboard.rs` |
 | `eig_day_or_today()` フォールバック | `src/screen/dashboard.rs` |
 | スタイル関数 | `src/style.rs` |
-| **REPLAY 中の誤発注防止ガード** | `src/screen/dashboard.rs` |
-| **`OrderEntryPanel.is_virtual` フィールド・仮想モード UI** | `src/screen/dashboard/panel/order_entry.rs` |
-| **`Pane.is_virtual_mode` フィールド・仮想注文ルーティング** | `src/screen/dashboard/pane.rs` |
-| **`VirtualPortfolio`（ポジション管理・PnL 計算）** | `src/replay/virtual_exchange/portfolio.rs` |
-| **`VirtualOrderBook`（注文受付・約定判定）** | `src/replay/virtual_exchange/order_book.rs` |
-| **`VirtualExchangeEngine`（ファサード）** | `src/replay/virtual_exchange/mod.rs` |
-| **仮想注文エンジンの main.rs 統合** | `src/main.rs` |
-| **HTTP API（POST /api/replay/order 等）** | `src/replay_api.rs` |
-| **GET /api/replay/orders エンドポイント** | `src/replay_api.rs` |
-| **仮想約定トースト通知** | `src/screen/dashboard.rs` |
-| **サイドバー注文ボタン・インラインパネル** | `src/screen/dashboard/sidebar.rs` |
-| **注文パネル専用 Split（`split_focused_and_init_order`）** | `src/screen/dashboard.rs` |
-| **`auto_focus_single_pane` 共通ヘルパー化** | `src/screen/dashboard.rs` |
-| **`ContentKind::ALL` から注文系除外** | `data/src/layout/pane.rs` |
-| **`record_open()` cash deduction/credit** | `src/replay/virtual_exchange/portfolio.rs` |
-| **`record_close()` sell proceeds / buyback return** | `src/replay/virtual_exchange/portfolio.rs` |
-| **`oldest_open_long_order_id()` FIFO クローズ** | `src/replay/virtual_exchange/portfolio.rs` |
-| **Sell 約定時の Long ネットアウト（A-2）** | `src/replay/virtual_exchange/order_book.rs` |
-| **StepForward 時のエンジンリセット抑止** | `src/main.rs` |
-| **`synthetic_trades_at_current_time()` 合成トレード生成** | `src/replay/controller.rs` |
-| **StepForward 時の合成トレード注入・約定駆動** | `src/main.rs` |
-| **E2E スクリプト `s40_virtual_order_fill_cycle.sh`** | `tests/` |
+| REPLAY 中の誤発注防止ガード | `src/screen/dashboard.rs` |
+| `OrderEntryPanel.is_virtual` フィールド・仮想モード UI | `src/screen/dashboard/panel/order_entry.rs` |
+| `Pane.is_virtual_mode` フィールド・仮想注文ルーティング | `src/screen/dashboard/pane.rs` |
+| `VirtualPortfolio`（ポジション管理・PnL 計算） | `src/replay/virtual_exchange/portfolio.rs` |
+| `VirtualOrderBook`（注文受付・約定判定） | `src/replay/virtual_exchange/order_book.rs` |
+| `VirtualExchangeEngine`（ファサード） | `src/replay/virtual_exchange/mod.rs` |
+| 仮想注文エンジンの main.rs 統合 | `src/main.rs` |
+| HTTP API（POST /api/replay/order 等） | `src/replay_api.rs` |
+| GET /api/replay/orders エンドポイント | `src/replay_api.rs` |
+| 仮想約定トースト通知 | `src/screen/dashboard.rs` |
+| サイドバー注文ボタン・インラインパネル | `src/screen/dashboard/sidebar.rs` |
+| 注文パネル専用 Split（`split_focused_and_init_order`） | `src/screen/dashboard.rs` |
+| `auto_focus_single_pane` 共通ヘルパー化 | `src/screen/dashboard.rs` |
+| `ContentKind::ALL` から注文系除外 | `data/src/layout/pane.rs` |
+| `record_open()` cash deduction/credit | `src/replay/virtual_exchange/portfolio.rs` |
+| `record_close()` sell proceeds / buyback return | `src/replay/virtual_exchange/portfolio.rs` |
+| `oldest_open_long_order_id()` FIFO クローズ | `src/replay/virtual_exchange/portfolio.rs` |
+| Sell 約定時の Long ネットアウト | `src/replay/virtual_exchange/order_book.rs` |
+| StepForward 時のエンジンリセット抑止 | `src/main.rs` |
+| `synthetic_trades_at_current_time()` 合成トレード生成 | `src/replay/controller.rs` |
+| StepForward 時の合成トレード注入・約定駆動 | `src/main.rs` |
+| E2E スクリプト `s40_virtual_order_fill_cycle.sh` | `tests/` |
 
-### 未実装・残課題
+### 10.2 未実装・残課題
 
 | 課題 | 優先度 | 備考 |
 |---|---|---|
@@ -1336,15 +1350,15 @@ pub fn margin_call_color(theme: &Theme) -> Color
 | スタイル関数のパネル view への接続 | 低 | `dead_code` 警告解消のため |
 | 逆指値 UI | 低 | 現在は通常注文固定。立花証券イベント API 接続後に検討 |
 | BBO（最良気配）表示 | 低 | 立花証券イベント API 接続後に追加 |
-| **仮想注文の UI 一覧表示（Phase 2）** | 中 | `VirtualOrderBook::orders()` を利用。仮想注文ペインの実装 |
-| **SeekBackward 時のエンジンリセット** | 中 | StepForward は対応済み。Seek（シーク）時はリセット対象のまま |
-| **Trades EventStore の本統合** | 中 | 現状は StepForward 時に kline close から合成トレードで代替。実トレード ingestion は Phase 2 |
-| **PnL 履歴グラフ（Phase 2）** | 低 | `exit_time_ms` フィールドは実装済み・未使用 |
-| **仮想注文の `placed_time_ms` 正確化** | 低 | 現状は pane.rs で `0` を設定。`replay.current_time_ms()` で上書きする設計（Phase 2） |
+| 仮想注文の UI 一覧表示（Phase 2） | 中 | `VirtualOrderBook::orders()` を利用。仮想注文ペインの実装 |
+| SeekBackward 時のエンジンリセット | 中 | StepForward は対応済み。Seek（シーク）時はリセット対象のまま |
+| Trades EventStore の本統合 | 中 | 現状は StepForward 時に kline close から合成トレードで代替 |
+| PnL 履歴グラフ（Phase 2） | 低 | `exit_time_ms` フィールドは実装済み・未使用 |
+| 仮想注文の `placed_time_ms` 正確化 | 低 | 現状は pane.rs で `0` を設定。`replay.current_time_ms()` で上書きする設計（Phase 2） |
 
 ---
 
-## ファイル変更サマリー
+## 11. ファイル変更サマリー
 
 | ファイル | 変更種別 |
 |---|---|
@@ -1361,39 +1375,42 @@ pub fn margin_call_color(theme: &Theme) -> Color
 | `src/style.rs` | 注文状態・売買・追証警告色追加 |
 | `src/replay/mod.rs` | `pub mod virtual_exchange;` 追加 |
 | `src/replay/virtual_exchange/mod.rs` | **新規** `VirtualExchangeEngine` ファサード |
-| `src/replay/virtual_exchange/portfolio.rs` | **新規 → 拡張** `VirtualPortfolio`・`PortfolioSnapshot`（ユニットテスト 12 件）。cash flow・close logic・`oldest_open_long_order_id()` 追加 |
-| `src/replay/virtual_exchange/order_book.rs` | **新規 → 拡張** `VirtualOrderBook`・`FillEvent`（ユニットテスト 13 件）。Sell 約定時 Long ネットアウト追加 |
+| `src/replay/virtual_exchange/portfolio.rs` | **新規 → 拡張** `VirtualPortfolio`・`PortfolioSnapshot`（ユニットテスト 12 件） |
+| `src/replay/virtual_exchange/order_book.rs` | **新規 → 拡張** `VirtualOrderBook`・`FillEvent`（ユニットテスト 13 件） |
 | `src/replay/controller.rs` | `current_time_ms()` + `synthetic_trades_at_current_time()` メソッド追加 |
 | `src/replay_api.rs` | `ApiCommand::VirtualExchange` と 4 エンドポイント追加（`GET /api/replay/orders` 含む） |
-| `src/main.rs` | `virtual_engine` フィールド（Arc/Mutex なし）・StepForward 合成トレード注入・StepForward リセット抑止・仮想注文ハンドラ・`OpenOrderPane` ハンドラ・`Menu::Order` アーム |
+| `src/main.rs` | `virtual_engine` フィールド・StepForward 合成トレード注入・リセット抑止・仮想注文ハンドラ・`OpenOrderPane` ハンドラ |
 | `tests/s40_virtual_order_fill_cycle.sh` | **新規** buy→fill→close→PnL E2E スクリプト（TC-A〜I） |
 | `data/src/config/sidebar.rs` | `Menu::Order` バリアント追加 |
 | `src/screen/dashboard/sidebar.rs` | `Message::OrderPaneSelected` / `Action::OpenOrderPane` 追加・注文ボタン・インラインパネル・相互排他ロジック |
 
 ---
 
-## 実装時の知見
+## 12. 付録: 実装上の注意事項
 
-- `second_password` を持つ構造体は `#[derive(Debug)]` 不可。手動実装で `[REDACTED]` を返す。
-- `Effect` が `Debug + Clone` を要求するため全リクエスト / レスポンス struct に `Clone` が必要。
-- `NewOrderRequest` は 240 bytes のため `Action::Submit(Box<NewOrderRequest>)` にする（clippy 警告）。
-- `serialize_order_request()` は `serde_json::to_value()` でマップに共通フィールドをマージする方式。逆指値フィールドもここで固定値として付与する。
-- `row![].extend(...)` は iced の `Row` が `IntoIterator` を実装しないためコンパイルエラー。各ブランチにラベルを直接含めるか `Vec<Element>` を作って extend する。
-- `iced::Padding` は `[u16; 4]` に対応していない。`iced::padding::left(N)` などを使う。
-- `panel.rs` の `Content` match は view / invalidate / update_interval / last_tick / reorder_indicators / studies / kind / initialized など多箇所に存在する。
-- `layout.rs` の `From<&pane::State>` と `configuration()` 関数も新 variant を処理する必要がある。
-- `fetch_buying_power` は現物余力と信用余力の 2 API を `tokio::join!` で並列取得してタプルで返す。
-- `iter_all_panes_mut()` は `(window::Id, pane_grid::Pane, &mut pane::State)` タプルを返す。
-- `連鎖 if let ... && let ...` パターン（Rust 1.64+）でネストした `if let` をフラットにできる。
-- **REPLAY ガードのボローチェッカー対策**: `dashboard.update()` 内で `self.is_replay` を `let is_replay = self.is_replay;` としてコピーしてから `get_mut_pane()` で `self` を可変借用する。フラグを先にコピーしないと E0503（不変参照と可変参照の競合）が発生する。
-- **`Trade` struct に ticker フィールドはない**: `VirtualOrderBook::on_tick()` は ticker を引数で受け取る設計にした。呼び出し側（main.rs）が `StreamKind` から ticker 文字列を特定して渡す。
-- **`virtual_engine` は Arc/Mutex 不使用**: iced の `update()` は同期コンテキストなので `Option<VirtualExchangeEngine>` として直保持できる。Arc/Mutex や `block_in_place` は不要。HTTP API スレッドからのアクセスは `ApiCommand` チャネル経由で main.rs の update ループに委譲する。
-- **仮想注文の `placed_time_ms`**: pane.rs の `virtual_order_from_new_order_request()` では `0` を入れている。正確な時刻は `dashboard.rs` → `main.rs` の `SubmitVirtualOrder` ハンドラで `replay.current_time_ms()` を取得して上書きする設計にする（Phase 2）。
-- **`#[allow(dead_code)]` は使用開始時に削除**: `record_close()` は Phase 1 で本接続したため `#[allow(dead_code)]` を削除済み。Phase 2 待ちのフィールド（`exit_time_ms`）には引き続き付ける。
-- **StepForward 前に `is_step_forward` フラグを取る**: `handle_message(msg)` は msg を消費するため、StepForward 判定を先に行う必要がある。`let is_step_forward = matches!(msg, ...)` のパターンを使う。
-- **`oldest_open_long_order_id()` の borrow checker**: `Option<&str>` は `self.portfolio` を借用する。直後に `record_close(&mut self.portfolio)` を呼ぶと競合する。`.map(str::to_string)` で `String` にクローンしてから可変借用する。
-- **cash の不変条件**: Long open @P, qty q: `cash -= P*q` → Long close @Q: `cash += Q*q` → net cash delta = (Q-P)*q = realized_pnl。initial_cash を基準に `total_equity = cash + unrealized_pnl` が常に成立する。
-- **注文パネルを `ALL` から除外すると `set_content_and_streams` の bypass が必要**: `set_content_and_streams` は `tickers[0]` に無条件アクセスするため、TickerInfo 不要な注文パネルには使えない。`Content::placeholder()` を `pub` にして `split_focused_and_init_order` から呼び出す設計にした。
-- **`Menu::Order` の modal 処理**: `main.rs` の `view_with_menu()` は `match menu` で全バリアントを網羅する。`Order` は modal を出さずサイドバーインラインで表示するため、アームは `base` をそのまま返す。
-- **`split_focused_and_init_order` は `Option<Task>` でなく `Task` を返す**: フォーカスなし複数ペイン時も Toast 警告を含む `Task` を返すため、呼び出し側で `None` 分岐が不要。`split_focused_and_init`（`Option<Task>` 返し）との設計差異に注意。
-- **サイレント失敗を避ける**: `panes.split()` 失敗は頻度が低いが「ボタンを押したのに何も起きない」UX になる。`Task::none()` ではなく `Toast::warn("Could not split pane")` を返すことでデバッグ可能にする。
+本節は実装中に発見したコンパイル・設計上の注意点をまとめたものである。
+
+### Rust / iced 固有の制約
+
+| # | 注意点 | 背景 |
+|---|---|---|
+| 1 | `second_password` を持つ構造体は `#[derive(Debug)]` 不可。手動実装で `[REDACTED]` を返す | セキュリティ要件（§9）|
+| 2 | `Effect` が `Debug + Clone` を要求するため全リクエスト / レスポンス struct に `Clone` が必要 | iced の型制約 |
+| 3 | `NewOrderRequest` は 240 bytes のため `Action::Submit(Box<NewOrderRequest>)` にする | clippy large_enum_variant 警告 |
+| 4 | `row![].extend(...)` は iced の `Row` が `IntoIterator` を実装しないためコンパイルエラー | iced 0.14.x の制限 |
+| 5 | `iced::Padding` は `[u16; 4]` に対応していない。`iced::padding::left(N)` などを使う | iced 0.14.x の API |
+| 6 | `panel.rs` の `Content` match は view / invalidate / update_interval / last_tick 等、多箇所に存在する | 新 Content 追加時に全アーム追加が必要 |
+| 7 | `layout.rs` の `From<&pane::State>` と `configuration()` 関数も新 variant を処理する必要がある | 保存状態の互換性 |
+
+### 設計上の知見
+
+| # | 知見 |
+|---|---|
+| 8 | `fetch_buying_power` は現物余力と信用余力の 2 API を `tokio::join!` で並列取得してタプルで返す |
+| 9 | `iter_all_panes_mut()` は `(window::Id, pane_grid::Pane, &mut pane::State)` タプルを返す |
+| 10 | `連鎖 if let ... && let ...` パターン（Rust 1.64+）でネストした `if let` をフラットにできる |
+| 11 | **cash の不変条件**: Long open @P, qty q: `cash -= P*q` → Long close @Q: `cash += Q*q` → net cash delta = (Q-P)*q = realized_pnl |
+| 12 | `split_focused_and_init_order` は `Option<Task>` でなく `Task` を返す。`split_focused_and_init`（`Option<Task>` 返し）との設計差異に注意 |
+| 13 | `Menu::Order` の modal 処理: `main.rs` の `view_with_menu()` は `match menu` で全バリアントを網羅する。`Order` は modal を出さずサイドバーインラインで表示するため、アームは `base` をそのまま返す |
+| 14 | `StepForward` 前に `is_step_forward` フラグを取る: `handle_message(msg)` は msg を消費するため、StepForward 判定を先に行う必要がある |
+| 15 | `#[allow(dead_code)]` は使用開始時に削除: Phase 2 待ちのフィールド（`exit_time_ms`）には引き続き付ける |

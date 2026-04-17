@@ -28,8 +28,8 @@ echo "=== S14: Auto-play タイムアウト廃止 ==="
 backup_state
 trap 'stop_app; restore_state' EXIT ERR
 
-START=$(utc_offset -4)
-END=$(utc_offset -2)
+START=$(utc_offset -120)
+END=$(utc_offset -24)
 
 write_tachibana_state() {
   cat > "$DATA_DIR/saved-state.json" <<EOF
@@ -130,13 +130,9 @@ start_app
 # ↑ try_restore_session() → None → SessionRestoreResult(None) → on_session_unavailable()
 #   → pending_auto_play=false + Toast::info("Replay auto-play was deferred: please log in to resume")
 
-echo "  セッションなしで 15 秒待機中..."
-sleep 15
-STATUS=$(jqn "$(curl -s "$API/replay/status")" "d.status")
-[ "$STATUS" != "Playing" ] \
-  && pass "TC-S14-03a: セッションなし → Playing でない (status=${STATUS:-none})" \
-  || fail "TC-S14-03a" "Playing になった（セッションなしなのに）"
-
+# TC-S14-03b: toast は DEFAULT_TIMEOUT=8s でタイムアウト → 3s 以内に確認
+echo "  セッションなしで 3 秒待機中（SessionRestoreResult 処理待ち）..."
+sleep 3
 NOTIFS=$(curl -s "$API/notification/list")
 HAS_WAIT_INFO=$(node -e "
   const ns = (JSON.parse(process.argv[1]).notifications || []);
@@ -157,6 +153,14 @@ NOTIFS_TEXT=$(node -e "
 [ "$HAS_WAIT_INFO" = "true" ] \
   && pass "TC-S14-03b: 待機系 info トーストあり" \
   || fail "TC-S14-03b" "待機系 info トーストなし。通知一覧: $NOTIFS_TEXT"
+
+# TC-S14-03a: 15 秒経過後も Playing でないことを確認
+echo "  さらに 12 秒待機中（合計 15 秒）..."
+sleep 12
+STATUS=$(jqn "$(curl -s "$API/replay/status")" "d.status")
+[ "$STATUS" != "Playing" ] \
+  && pass "TC-S14-03a: セッションなし → Playing でない (status=${STATUS:-none})" \
+  || fail "TC-S14-03a" "Playing になった（セッションなしなのに）"
 
 stop_app
 

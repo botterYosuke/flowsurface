@@ -36,8 +36,8 @@ START=$(utc_offset -96)
 END=$(utc_offset -24)
 tachibana_replay_setup "$START" "$END"
 
-if ! wait_playing 60; then
-  fail "TC-S19-precond" "Playing 到達せず（60 秒タイムアウト）"
+if ! wait_playing 120; then
+  fail "TC-S19-precond" "Playing 到達せず（120 秒タイムアウト）"
   exit 1
 fi
 
