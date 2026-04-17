@@ -1212,14 +1212,13 @@ impl Dashboard {
             state.content = pane::Content::placeholder(content_kind);
         }
 
-        if content_kind == ContentKind::BuyingPower {
-            if let Some(state) = self.get_pane(main_window, window, new_pane) {
-                let pane_id = state.unique_id();
-                return Task::perform(
-                    order_connector::fetch_buying_power(),
-                    move |result| Message::BuyingPowerResult { pane_id, result },
-                );
-            }
+        if content_kind == ContentKind::BuyingPower
+            && let Some(state) = self.get_pane(main_window, window, new_pane)
+        {
+            let pane_id = state.unique_id();
+            return Task::perform(order_connector::fetch_buying_power(), move |result| {
+                Message::BuyingPowerResult { pane_id, result }
+            });
         }
 
         Task::none()
@@ -2230,16 +2229,17 @@ mod tests {
     fn initial_order_list_fetch_finds_order_list_pane_and_does_not_crash() {
         let mut dashboard = single_pane_dashboard();
         let main_window = window::Id::unique();
-        let _task = dashboard.split_focused_and_init_order(
-            main_window,
-            data::layout::pane::ContentKind::OrderList,
-        );
+        let _task = dashboard
+            .split_focused_and_init_order(main_window, data::layout::pane::ContentKind::OrderList);
 
         let order_list_count = dashboard
             .iter_all_panes(main_window)
             .filter(|(_, _, s)| matches!(s.content, pane::Content::OrderList(_)))
             .count();
-        assert_eq!(order_list_count, 1, "setup: exactly 1 OrderList pane must exist");
+        assert_eq!(
+            order_list_count, 1,
+            "setup: exactly 1 OrderList pane must exist"
+        );
 
         let pane_count_before = dashboard.panes.len();
         let _task = dashboard.initial_order_list_fetch(main_window);
@@ -2263,7 +2263,10 @@ mod tests {
             .iter_all_panes(main_window)
             .filter(|(_, _, s)| matches!(s.content, pane::Content::OrderList(_)))
             .count();
-        assert_eq!(order_list_count, 0, "BuyingPower pane must not be counted as OrderList");
+        assert_eq!(
+            order_list_count, 0,
+            "BuyingPower pane must not be counted as OrderList"
+        );
 
         let _task = dashboard.initial_order_list_fetch(main_window);
         assert_eq!(dashboard.panes.len(), 2);
@@ -2310,10 +2313,8 @@ mod tests {
         let mut dashboard = single_pane_dashboard();
         let main_window = window::Id::unique();
 
-        let _task = dashboard.split_focused_and_init_order(
-            main_window,
-            data::layout::pane::ContentKind::OrderList,
-        );
+        let _task = dashboard
+            .split_focused_and_init_order(main_window, data::layout::pane::ContentKind::OrderList);
 
         assert_eq!(dashboard.panes.len(), 2);
         let (_, focused_pane) = dashboard.focus.unwrap();

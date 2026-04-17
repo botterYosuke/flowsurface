@@ -2783,7 +2783,10 @@ mod tests {
     fn content_selected_buying_power_does_not_open_ticker_modal() {
         let mut state = State::new();
         let effect = state.update(Event::ContentSelected(ContentKind::BuyingPower));
-        assert!(effect.is_none());
+        assert!(
+            matches!(effect, Some(Effect::FetchBuyingPower)),
+            "BuyingPower selection should return FetchBuyingPower effect"
+        );
         assert!(state.modal.is_none());
     }
 
