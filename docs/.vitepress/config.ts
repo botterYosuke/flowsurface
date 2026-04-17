@@ -6,6 +6,10 @@ export default defineConfig({
   description: 'Rust 製デスクトップチャートアプリ — 操作ガイド',
   base: '/flowsurface/',
 
+  // wiki/ と index.md のみをビルド対象にする
+  // plan/ spec/ は開発者向け内部ドキュメントのため除外
+  srcExclude: ['plan/**', 'spec/**'],
+
   lastUpdated: true,
 
   themeConfig: {
