@@ -42,14 +42,14 @@ static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// 初回呼び出し時にタイムスタンプベースで初期化される。
 /// `compare_exchange` で初期化を排他し、複数スレッドが同時に呼んでも安全。
 pub fn next_p_no() -> String {
-    let epoch_ms = std::time::SystemTime::now()
+    let epoch_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
-        .as_millis() as u64;
-    // CAS: カウンタが 0（未初期化）の場合のみ epoch_ms で初期化。
-    // ミリ秒精度により再起動時に前回セッションの最終 p_no を下回る確率を大幅に低減。
+        .as_secs();
+    // CAS: カウンタが 0（未初期化）の場合のみ epoch_secs で初期化。
+    // API 上限は 9999999999（10桁）。Unix 秒は ~1745174929 で上限内に収まる。
     // 複数スレッドが同時に呼んでも 1 つだけが成功し、残りは失敗して既存値を使う。
-    let _ = REQUEST_COUNTER.compare_exchange(0, epoch_ms, Ordering::Relaxed, Ordering::Relaxed);
+    let _ = REQUEST_COUNTER.compare_exchange(0, epoch_secs, Ordering::Relaxed, Ordering::Relaxed);
     let val = REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed);
     val.to_string()
 }
