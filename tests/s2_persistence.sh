@@ -10,7 +10,7 @@
 # 仕様根拠:
 #   docs/replay_header.md §3 — saved-state.json 永続化スキーマ
 #
-# フィクスチャ: BinanceLinear:BTCUSDT M1, saved-state.json を書き換えて複数回起動
+# フィクスチャ: $E2E_TICKER M1, saved-state.json を書き換えて複数回起動
 source "$(dirname "$0")/common_helpers.sh"
 
 echo "=== S2: 永続化往復テスト ==="
@@ -25,7 +25,7 @@ cat > "$DATA_DIR/saved-state.json" <<EOF
   "layout_manager":{"layouts":[{"name":"S2","dashboard":{"pane":{
     "KlineChart":{
       "layout":{"splits":[0.78],"autoscale":"FitToVisible"},"kind":"Candles",
-      "stream_type":[{"Kline":{"ticker":"BinanceLinear:BTCUSDT","timeframe":"M1"}}],
+      "stream_type":[{"Kline":{"ticker":"$E2E_TICKER","timeframe":"M1"}}],
       "settings":{"tick_multiply":null,"visual_config":null,"selected_basis":{"Time":"M1"}},
       "indicators":["Volume"],"link_group":"A"
     }
@@ -48,7 +48,7 @@ cat > "$DATA_DIR/saved-state.json" <<EOF
   "layout_manager":{"layouts":[{"name":"S2","dashboard":{"pane":{
     "KlineChart":{
       "layout":{"splits":[0.78],"autoscale":"FitToVisible"},"kind":"Candles",
-      "stream_type":[{"Kline":{"ticker":"BinanceLinear:BTCUSDT","timeframe":"M1"}}],
+      "stream_type":[{"Kline":{"ticker":"$E2E_TICKER","timeframe":"M1"}}],
       "settings":{"tick_multiply":null,"visual_config":null,"selected_basis":{"Time":"M1"}},
       "indicators":["Volume"],"link_group":"A"
     }

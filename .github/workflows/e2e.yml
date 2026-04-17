@@ -1,0 +1,68 @@
+name: E2E Tests (Hyperliquid)
+
+# Binance / Bybit は GitHub Actions の US IP からブロックされる (HTTP 451/403)。
+# Hyperliquid は geo-restriction なしで US IP からアクセス可能なため採用。
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e-hyperliquid:
+    name: "E2E S1–S2 (HyperliquidLinear:BTC)"
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry & target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: windows-cargo-debug-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: windows-cargo-debug-
+
+      - name: Build (debug)
+        run: cargo build
+
+      - name: Prepare data directory
+        shell: bash
+        run: mkdir -p "$APPDATA/flowsurface"
+
+      - name: "S1 Basic lifecycle (HyperliquidLinear:BTC)"
+        shell: bash
+        env:
+          FLOWSURFACE_EXE: ${{ github.workspace }}/target/debug/flowsurface.exe
+          E2E_TICKER: HyperliquidLinear:BTC
+        run: bash tests/s1_basic_lifecycle.sh
+
+      - name: "S2 Persistence (HyperliquidLinear:BTC)"
+        shell: bash
+        env:
+          FLOWSURFACE_EXE: ${{ github.workspace }}/target/debug/flowsurface.exe
+          E2E_TICKER: HyperliquidLinear:BTC
+        run: bash tests/s2_persistence.sh
+
+      - name: Upload debug log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-debug-log
+          path: ${{ runner.temp }}/e2e_debug.log

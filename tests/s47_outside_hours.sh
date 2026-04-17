@@ -62,7 +62,7 @@ ORDER_RESP=$(curl -s -X POST "$API/tachibana/order" \
   -H "Content-Type: application/json" \
   -d '{
     "issue_code":   "7203",
-    "qty":          "1",
+    "qty":          "100",
     "side":         "3",
     "price":        "0",
     "account_type": "1",
@@ -103,7 +103,11 @@ elif [ "$HAS_ERROR" = "true" ]; then
   " "$ERR_MSG")
   echo "  エラーコード: $ERR_CODE"
   echo "  エラーメッセージ: $ERR_MSG"
-  pass "Step 3: エラーレスポンス確認（code=$ERR_CODE）— 市場時間外の可能性あり"
+  if [ "$ERR_CODE" = "unknown" ]; then
+    fail "Step 3" "エラーコードが解析できない形式: $ORDER_RESP"
+  else
+    pass "Step 3: エラーレスポンス確認（code=$ERR_CODE）— 市場時間外の可能性あり"
+  fi
 else
   fail "Step 3" "予期しないレスポンス形式: $ORDER_RESP"
 fi

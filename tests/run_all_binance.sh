@@ -37,6 +37,9 @@ SCRIPTS=(
   s36_sidebar_order_pane.sh
   s37_order_panels_integrated.sh
   s39_buying_power_portfolio.sh
+  s40_virtual_order_fill_cycle.sh
+  s41_limit_order_round_trip.sh
+  s42_naked_short_cycle.sh
   s43_get_state_endpoint.sh
 )
 

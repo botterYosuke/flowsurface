@@ -850,20 +850,21 @@ pub async fn init_issue_master(
     cache_path: Option<&std::path::Path>,
 ) -> Result<(), TachibanaError> {
     let records = fetch_all_master(client, session).await?;
-    if let Ok(mut guard) = ISSUE_MASTER_CACHE.write() {
-        *guard = Some(Arc::new(records.clone()));
-    }
+    let arc = Arc::new(records);
     if let Some(path) = cache_path
-        && let Ok(json) = serde_json::to_string(&records)
+        && let Ok(json) = serde_json::to_string(arc.as_ref())
     {
         if let Err(e) = std::fs::write(path, json) {
             log::warn!("Failed to write Tachibana master disk cache: {e}");
         } else {
             log::info!(
                 "Tachibana master cache saved to disk ({} records)",
-                records.len()
+                arc.len()
             );
         }
+    }
+    if let Ok(mut guard) = ISSUE_MASTER_CACHE.write() {
+        *guard = Some(arc);
     }
     Ok(())
 }
@@ -891,16 +892,17 @@ pub fn load_master_from_disk(
         "Tachibana master loaded from disk cache ({} records)",
         records.len()
     );
-    if let Ok(mut guard) = ISSUE_MASTER_CACHE.write() {
-        *guard = Some(Arc::new(records.clone()));
-    }
+    let arc = Arc::new(records);
     let mut out = HashMap::new();
-    for record in records.iter() {
+    for record in arc.iter() {
         if let Some((ticker, info)) = master_record_to_ticker_info(record) {
             let ticker_no_display = Ticker::new(&record.issue_code, Exchange::Tachibana);
             out.entry(ticker_no_display).or_insert(Some(info));
             out.insert(ticker, Some(info));
         }
+    }
+    if let Ok(mut guard) = ISSUE_MASTER_CACHE.write() {
+        *guard = Some(arc);
     }
     Some(out)
 }
@@ -4134,6 +4136,7 @@ mod tests {
     /// Phase 4-2: 発注パスワード誤りのとき ApiError が返る（sResultCode 非ゼロ）
     #[tokio::test]
     async fn submit_new_order_returns_error_on_wrong_password_response() {
+        // sResultCode="11304" は 2026-04-17 デモ環境実機確認値（第二暗証番号誤り）。
         let mut server = mockito::Server::new_async().await;
         let _mock = server
             .mock("POST", mockito::Matcher::Any)
@@ -4143,8 +4146,8 @@ mod tests {
                 r#"{
                     "p_errno": "0",
                     "p_err": "",
-                    "sResultCode": "91001",
-                    "sResultText": "発注パスワードが誤っています"
+                    "sResultCode": "11304",
+                    "sResultText": "第二暗証番号が誤っています"
                 }"#,
             )
             .create_async()
@@ -4166,8 +4169,8 @@ mod tests {
         };
         let result = submit_new_order(&client, &session, &req).await;
         assert!(
-            matches!(result, Err(TachibanaError::ApiError { ref code, .. }) if code == "91001"),
-            "発注パスワード誤り: ApiError が返るべき: {:?}",
+            matches!(result, Err(TachibanaError::ApiError { ref code, .. }) if code == "11304"),
+            "発注パスワード誤り: ApiError(11304) が返るべき: {:?}",
             result
         );
         let err_str = result.unwrap_err().to_string();
@@ -4230,8 +4233,8 @@ mod tests {
                 r#"{
                     "p_errno": "0",
                     "p_err": "",
-                    "sResultCode": "11001",
-                    "sResultText": "銘柄コードが不正です"
+                    "sResultCode": "11104",
+                    "sResultText": "銘柄がありません"
                 }"#,
             )
             .create_async()
@@ -4253,14 +4256,84 @@ mod tests {
         };
         let result = submit_new_order(&client, &session, &req).await;
         assert!(
-            result.is_err(),
-            "存在しない銘柄コード: エラーが返るべき: {:?}",
+            matches!(result, Err(TachibanaError::ApiError { ref code, .. }) if code == "11104"),
+            "存在しない銘柄: ApiError(11104) が返るべき: {:?}",
             result
         );
         let err_str = result.unwrap_err().to_string();
         assert!(
             err_str.contains("code="),
             "エラー文字列に code= が含まれるべき（E2E スクリプトが解析できる形式）: {err_str}"
+        );
+    }
+
+    /// 1-6: 信用新規売り（制度6M、成行）の sGenkinShinyouKubun="2" + sBaibaiKubun="1" がシリアライズされる
+    #[test]
+    fn new_order_request_credit_new_sell_serializes_cash_margin_and_side() {
+        let req = NewOrderRequest {
+            account_type: "1".to_string(),
+            issue_code: "7203".to_string(),
+            market_code: "00".to_string(),
+            side: "1".to_string(),
+            condition: "0".to_string(),
+            price: "0".to_string(),
+            qty: "100".to_string(),
+            cash_margin: "2".to_string(),
+            expire_day: "0".to_string(),
+            second_password: "pw".to_string(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(
+            json.contains(r#""sGenkinShinyouKubun":"2""#),
+            "信用新規売り(制度6M) の sGenkinShinyouKubun=2 が必要: {json}"
+        );
+        assert!(
+            json.contains(r#""sBaibaiKubun":"1""#),
+            "信用新規売り(制度6M) の sBaibaiKubun=1（売）が必要: {json}"
+        );
+    }
+
+    /// 1-8a: 一般信用新規買い（sGenkinShinyouKubun="6"）がシリアライズされる
+    #[test]
+    fn new_order_request_general_credit_new_buy_serializes_cash_margin() {
+        let req = NewOrderRequest {
+            account_type: "1".to_string(),
+            issue_code: "7203".to_string(),
+            market_code: "00".to_string(),
+            side: "3".to_string(),
+            condition: "0".to_string(),
+            price: "0".to_string(),
+            qty: "100".to_string(),
+            cash_margin: "6".to_string(),
+            expire_day: "0".to_string(),
+            second_password: "pw".to_string(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(
+            json.contains(r#""sGenkinShinyouKubun":"6""#),
+            "一般信用新規買い の sGenkinShinyouKubun=6 が必要: {json}"
+        );
+    }
+
+    /// 1-8b: 一般信用返済買い（sGenkinShinyouKubun="8"）がシリアライズされる
+    #[test]
+    fn new_order_request_general_credit_close_buy_serializes_cash_margin() {
+        let req = NewOrderRequest {
+            account_type: "1".to_string(),
+            issue_code: "7203".to_string(),
+            market_code: "00".to_string(),
+            side: "3".to_string(),
+            condition: "0".to_string(),
+            price: "0".to_string(),
+            qty: "100".to_string(),
+            cash_margin: "8".to_string(),
+            expire_day: "0".to_string(),
+            second_password: "pw".to_string(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(
+            json.contains(r#""sGenkinShinyouKubun":"8""#),
+            "一般信用返済買い の sGenkinShinyouKubun=8 が必要: {json}"
         );
     }
 }

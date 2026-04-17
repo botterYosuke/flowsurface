@@ -2329,8 +2329,10 @@ mod tests {
 
     #[test]
     fn eig_day_or_today_returns_stored_value_when_set() {
-        let mut dashboard = Dashboard::default();
-        dashboard.eig_day = Some("20240417".to_string());
+        let dashboard = Dashboard {
+            eig_day: Some("20240417".to_string()),
+            ..Default::default()
+        };
         assert_eq!(dashboard.eig_day_or_today(), "20240417");
     }
 

@@ -39,6 +39,10 @@ pub enum ApiCommand {
     TachibanaOrderCancel {
         req: Box<exchange::adapter::tachibana::CancelOrderRequest>,
     },
+    /// 保有現物株数を取得する（GET /api/tachibana/holdings?issue_code=XXXX）。
+    FetchTachibanaHoldings {
+        issue_code: String,
+    },
     /// E2E テスト用コマンド（debug ビルドで有効）。
     #[cfg(debug_assertions)]
     Test(TestCommand),
@@ -444,6 +448,14 @@ fn route(method: &str, path: &str, body: &str) -> Result<ApiCommand, RouteError>
         ("POST", "/api/tachibana/order/correct") => parse_tachibana_correct_order(body),
         ("POST", "/api/tachibana/order/cancel") => parse_tachibana_cancel_order(body),
 
+        // ── 立花証券保有現物株数 ──────────────────────────────────────────
+        ("GET", p)
+            if p == "/api/tachibana/holdings" || p.starts_with("/api/tachibana/holdings?") =>
+        {
+            let issue_code = query_param(p, "issue_code").ok_or(RouteError::BadRequest)?;
+            Ok(ApiCommand::FetchTachibanaHoldings { issue_code })
+        }
+
         // ── debug ビルドで有効（keyring クリア） ─────────────────────────
         #[cfg(debug_assertions)]
         ("POST", "/api/test/tachibana/delete-persisted-session") => Ok(ApiCommand::Test(
@@ -603,12 +615,18 @@ fn parse_tachibana_new_order(body: &str) -> Result<ApiCommand, RouteError> {
         .unwrap_or("0")
         .to_string();
 
-    let second_password = parsed
-        .get("second_password")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .or_else(|| std::env::var("DEV_SECOND_PASSWORD").ok())
-        .ok_or(RouteError::BadRequest)?;
+    // DEV_SECOND_PASSWORD フォールバックは debug ビルド（E2E テスト）専用
+    let second_password = {
+        let from_body = parsed
+            .get("second_password")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        #[cfg(debug_assertions)]
+        let pw = from_body.or_else(|| std::env::var("DEV_SECOND_PASSWORD").ok());
+        #[cfg(not(debug_assertions))]
+        let pw = from_body;
+        pw.ok_or(RouteError::BadRequest)?
+    };
 
     let req = exchange::adapter::tachibana::NewOrderRequest {
         account_type,
@@ -672,12 +690,18 @@ fn parse_tachibana_correct_order(body: &str) -> Result<ApiCommand, RouteError> {
         .and_then(|v| v.as_str())
         .unwrap_or("*")
         .to_string();
-    let second_password = parsed
-        .get("second_password")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .or_else(|| std::env::var("DEV_SECOND_PASSWORD").ok())
-        .ok_or(RouteError::BadRequest)?;
+    // DEV_SECOND_PASSWORD フォールバックは debug ビルド（E2E テスト）専用
+    let second_password = {
+        let from_body = parsed
+            .get("second_password")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        #[cfg(debug_assertions)]
+        let pw = from_body.or_else(|| std::env::var("DEV_SECOND_PASSWORD").ok());
+        #[cfg(not(debug_assertions))]
+        let pw = from_body;
+        pw.ok_or(RouteError::BadRequest)?
+    };
     let req = exchange::adapter::tachibana::CorrectOrderRequest {
         order_number,
         eig_day,
@@ -704,12 +728,18 @@ fn parse_tachibana_cancel_order(body: &str) -> Result<ApiCommand, RouteError> {
     };
     let order_number = str_field("order_number")?;
     let eig_day = str_field("eig_day")?;
-    let second_password = parsed
-        .get("second_password")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .or_else(|| std::env::var("DEV_SECOND_PASSWORD").ok())
-        .ok_or(RouteError::BadRequest)?;
+    // DEV_SECOND_PASSWORD フォールバックは debug ビルド（E2E テスト）専用
+    let second_password = {
+        let from_body = parsed
+            .get("second_password")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        #[cfg(debug_assertions)]
+        let pw = from_body.or_else(|| std::env::var("DEV_SECOND_PASSWORD").ok());
+        #[cfg(not(debug_assertions))]
+        let pw = from_body;
+        pw.ok_or(RouteError::BadRequest)?
+    };
     let req = exchange::adapter::tachibana::CancelOrderRequest {
         order_number,
         eig_day,
@@ -1449,6 +1479,25 @@ mod tests {
     #[test]
     fn route_post_tachibana_order_cancel_invalid_json() {
         let result = route("POST", "/api/tachibana/order/cancel", "not json");
+        assert!(matches!(result, Err(RouteError::BadRequest)));
+    }
+
+    /// GET /api/tachibana/holdings?issue_code=7203 → FetchTachibanaHoldings
+    #[test]
+    fn route_get_tachibana_holdings_with_issue_code() {
+        let cmd = route("GET", "/api/tachibana/holdings?issue_code=7203", "").unwrap();
+        match cmd {
+            ApiCommand::FetchTachibanaHoldings { issue_code } => {
+                assert_eq!(issue_code, "7203");
+            }
+            _ => panic!("Expected FetchTachibanaHoldings, got {cmd:?}"),
+        }
+    }
+
+    /// GET /api/tachibana/holdings (issue_code なし) → BadRequest
+    #[test]
+    fn route_get_tachibana_holdings_missing_issue_code_bad_request() {
+        let result = route("GET", "/api/tachibana/holdings", "");
         assert!(matches!(result, Err(RouteError::BadRequest)));
     }
 }

@@ -16,10 +16,12 @@
 # 仕様根拠:
 #   docs/replay_header.md §4〜§8 — Replay ライフサイクル・clock 状態機械
 #
-# フィクスチャ: BinanceLinear:BTCUSDT M1, Live モード起動 → 手動 toggle/play
+# フィクスチャ: E2E_TICKER(デフォルト BinanceLinear:BTCUSDT) M1, Live モード起動 → 手動 toggle/play
+# E2E_TICKER 環境変数でティッカーを切り替え可能（例: HyperliquidLinear:BTC）
 source "$(dirname "$0")/common_helpers.sh"
 
-echo "=== S1: 基本ライフサイクル ==="
+TICKER="${E2E_TICKER:-BinanceLinear:BTCUSDT}"
+echo "=== S1: 基本ライフサイクル (ticker=$TICKER) ==="
 backup_state
 
 START=$(utc_offset -3)
@@ -31,7 +33,7 @@ cat > "$DATA_DIR/saved-state.json" <<EOF
     "layouts": [{"name":"S1-Basic","dashboard":{"pane":{
       "KlineChart":{
         "layout":{"splits":[0.78],"autoscale":"FitToVisible"},"kind":"Candles",
-        "stream_type":[{"Kline":{"ticker":"BinanceLinear:BTCUSDT","timeframe":"M1"}}],
+        "stream_type":[{"Kline":{"ticker":"$TICKER","timeframe":"M1"}}],
         "settings":{"tick_multiply":null,"visual_config":null,"selected_basis":{"Time":"M1"}},
         "indicators":["Volume"],"link_group":"A"
       }
@@ -44,7 +46,7 @@ EOF
 
 start_app
 
-# Live ストリームが Ready になるまで待つ（Binance メタデータ取得に数秒かかる）
+# Live ストリームが Ready になるまで待つ（メタデータ取得に数秒かかる）
 # pane/list の streams_ready が true になるまでポーリング（最大 30s）
 for i in $(seq 1 30); do
   PLIST=$(curl -s "$API/pane/list" 2>/dev/null || echo '{}')

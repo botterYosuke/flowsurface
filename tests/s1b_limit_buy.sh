@@ -7,9 +7,13 @@
 #   3: 注文番号が返ることを確認（正常受付）
 #   4: エラーレスポンスのパースが正しく行われることを確認
 #
-# 前提: DEV_SECOND_PASSWORD 環境変数が設定済みであること
+# 前提: DEV_USER_ID / DEV_PASSWORD / DEV_SECOND_PASSWORD 環境変数が設定済みであること
 set -euo pipefail
 source "$(dirname "$0")/common_helpers.sh"
+
+if [ -z "${DEV_USER_ID:-}" ] || [ -z "${DEV_PASSWORD:-}" ]; then
+  echo "  SKIP: DEV_USER_ID / DEV_PASSWORD が未設定 — 自動ログインが無効です"; exit 0
+fi
 
 echo "=== TOYOTA (7203) 指値買い E2E テスト ==="
 backup_state

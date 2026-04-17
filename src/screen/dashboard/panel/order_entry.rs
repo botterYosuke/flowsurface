@@ -215,6 +215,7 @@ pub enum Message {
     },
 }
 
+#[derive(Debug)]
 pub enum Action {
     Submit(Box<NewOrderRequest>),
     FetchHoldings { issue_code: String },
@@ -367,7 +368,8 @@ impl OrderEntryPanel {
             },
             Message::OrderCompleted(result) => {
                 self.loading = false;
-                // 成功後にパスワードをクリア（セキュリティ）
+                // 成功時のみパスワードをクリア。エラー時は保持し、再発注時に
+                // 再入力不要にする（UX 優先）。パスワードは Debug で REDACTED 表示済み。
                 if result.is_ok() {
                     self.second_password.clear();
                 }
@@ -836,6 +838,117 @@ mod tests {
         panel.second_password = "mypassword".to_string();
         panel.update(Message::OrderCompleted(Err("エラー".to_string())));
         assert!(!panel.second_password.is_empty());
+    }
+
+    // ── Cycle 7b: SyncIssue — 銘柄切り替えリセット（5-1） ─────────────────
+    // 5-1: 銘柄切り替え時に注文パネルがリセットされること
+
+    #[test]
+    fn sync_issue_resets_holdings_on_issue_change() {
+        let mut panel = make_panel();
+        panel.side = Side::Sell;
+        panel.holdings = Some(500);
+        panel.update(Message::SyncIssue {
+            issue_code: "6758".to_string(), // 別銘柄（ソニー）
+            issue_name: "ソニーグループ".to_string(),
+            tick_size: Some(5.0),
+        });
+        assert!(
+            panel.holdings.is_none(),
+            "銘柄変更で holdings がリセットされるべき"
+        );
+    }
+
+    #[test]
+    fn sync_issue_same_issue_does_not_reset_holdings() {
+        let mut panel = make_panel(); // issue_code = "7203"
+        panel.holdings = Some(200);
+        panel.update(Message::SyncIssue {
+            issue_code: "7203".to_string(), // 同じ銘柄
+            issue_name: "トヨタ自動車".to_string(),
+            tick_size: None,
+        });
+        assert_eq!(panel.holdings, Some(200), "同一銘柄なら holdings を保持");
+    }
+
+    #[test]
+    fn sync_issue_sell_mode_emits_fetch_holdings() {
+        let mut panel = make_panel();
+        panel.side = Side::Sell;
+        let action = panel.update(Message::SyncIssue {
+            issue_code: "6758".to_string(),
+            issue_name: "ソニーグループ".to_string(),
+            tick_size: None,
+        });
+        assert!(
+            matches!(action, Some(Action::FetchHoldings { ref issue_code }) if issue_code == "6758"),
+            "銘柄変更+売りモードで FetchHoldings が発行されるべき: {action:?}"
+        );
+    }
+
+    #[test]
+    fn sync_issue_buy_mode_does_not_emit_fetch_holdings() {
+        let mut panel = make_panel(); // side = Buy
+        let action = panel.update(Message::SyncIssue {
+            issue_code: "6758".to_string(),
+            issue_name: "ソニーグループ".to_string(),
+            tick_size: None,
+        });
+        assert!(
+            action.is_none(),
+            "買いモードでは FetchHoldings を発行しない"
+        );
+    }
+
+    // ── Cycle 7c: CashMarginChanged — 現物⇔信用切り替え（5-2） ─────────────
+    // 5-2: 現物⇔信用切り替え時の cash_margin フィールド更新
+
+    #[test]
+    fn cash_margin_changed_updates_field() {
+        let mut panel = make_panel();
+        assert_eq!(panel.cash_margin, CashMarginType::Cash);
+        panel.update(Message::CashMarginChanged(CashMarginType::MarginNew6M));
+        assert_eq!(panel.cash_margin, CashMarginType::MarginNew6M);
+        panel.update(Message::CashMarginChanged(CashMarginType::MarginNewGeneral));
+        assert_eq!(panel.cash_margin, CashMarginType::MarginNewGeneral);
+    }
+
+    #[test]
+    fn cash_margin_changed_to_close_updates_field() {
+        let mut panel = make_panel();
+        panel.update(Message::CashMarginChanged(CashMarginType::MarginClose6M));
+        assert_eq!(panel.cash_margin, CashMarginType::MarginClose6M);
+        panel.update(Message::CashMarginChanged(
+            CashMarginType::MarginCloseGeneral,
+        ));
+        assert_eq!(panel.cash_margin, CashMarginType::MarginCloseGeneral);
+    }
+
+    // ── Cycle 7d: OrderCompleted Err — エラー表示（5-4） ────────────────────
+    // 5-4: 注文エラー時に last_result が Err になること（エラーメッセージ格納確認）
+
+    #[test]
+    fn order_completed_err_stores_error_in_last_result() {
+        let mut panel = make_panel();
+        panel.update(Message::OrderCompleted(Err(
+            "code=11304, 第二暗証番号が誤っています".to_string(),
+        )));
+        assert!(
+            matches!(&panel.last_result, Some(Err(e)) if e.contains("11304")),
+            "エラー結果が last_result に格納されるべき: {:?}",
+            panel.last_result
+        );
+    }
+
+    #[test]
+    fn order_completed_err_does_not_clear_loading() {
+        let mut panel = make_panel();
+        panel.loading = true;
+        panel.update(Message::OrderCompleted(Err("エラー".to_string())));
+        assert!(
+            !panel.loading,
+            "OrderCompleted 後は loading がクリアされるべき"
+        );
     }
 
     // ── Cycle 7: AccountType / CashMarginType api_code ─────────────────────
