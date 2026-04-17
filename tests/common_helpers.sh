@@ -23,6 +23,8 @@ FAIL=0
 PEND=0
 # FLOWSURFACE_EXE 環境変数でオーバーライド可能（CI・他環境用）
 EXE="${FLOWSURFACE_EXE:-$REPO_ROOT/target/release/flowsurface.exe}"
+# E2E_TICKER: テストで使うデフォルトティッカー（CI では HyperliquidLinear:BTC など geo-restriction なしのものを指定）
+E2E_TICKER="${E2E_TICKER:-BinanceLinear:BTCUSDT}"
 
 # テスト実行前にデータディレクトリを確保（CI 環境では $APPDATA/flowsurface が存在しない場合がある）
 mkdir -p "$DATA_DIR"

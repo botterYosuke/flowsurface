@@ -2,7 +2,6 @@ name: E2E Tests (Hyperliquid)
 
 # Binance / Bybit は GitHub Actions の US IP からブロックされる (HTTP 451/403)。
 # Hyperliquid は geo-restriction なしで US IP からアクセス可能なため採用。
-# archive/e2e.yml を参照。
 on:
   push:
     branches: [main]
@@ -16,7 +15,7 @@ concurrency:
 
 jobs:
   e2e-hyperliquid:
-    name: "E2E S1 (HyperliquidLinear:BTC)"
+    name: "E2E S1–S2 (HyperliquidLinear:BTC)"
     runs-on: windows-latest
     timeout-minutes: 30
 
@@ -53,6 +52,13 @@ jobs:
           FLOWSURFACE_EXE: ${{ github.workspace }}/target/debug/flowsurface.exe
           E2E_TICKER: HyperliquidLinear:BTC
         run: bash tests/s1_basic_lifecycle.sh
+
+      - name: "S2 Persistence (HyperliquidLinear:BTC)"
+        shell: bash
+        env:
+          FLOWSURFACE_EXE: ${{ github.workspace }}/target/debug/flowsurface.exe
+          E2E_TICKER: HyperliquidLinear:BTC
+        run: bash tests/s2_persistence.sh
 
       - name: Upload debug log on failure
         if: failure()
