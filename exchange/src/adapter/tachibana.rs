@@ -4145,8 +4145,8 @@ mod tests {
                 r#"{
                     "p_errno": "0",
                     "p_err": "",
-                    "sResultCode": "91001",
-                    "sResultText": "発注パスワードが誤っています"
+                    "sResultCode": "11304",
+                    "sResultText": "第二暗証番号が誤っています"
                 }"#,
             )
             .create_async()
@@ -4168,8 +4168,8 @@ mod tests {
         };
         let result = submit_new_order(&client, &session, &req).await;
         assert!(
-            matches!(result, Err(TachibanaError::ApiError { ref code, .. }) if code == "91001"),
-            "発注パスワード誤り: ApiError が返るべき: {:?}",
+            matches!(result, Err(TachibanaError::ApiError { ref code, .. }) if code == "11304"),
+            "発注パスワード誤り: ApiError(11304) が返るべき: {:?}",
             result
         );
         let err_str = result.unwrap_err().to_string();
@@ -4223,8 +4223,6 @@ mod tests {
     /// Phase 4-4: 存在しない銘柄コードのとき ApiError が返る（sResultCode 非ゼロ）
     #[tokio::test]
     async fn submit_new_order_returns_error_on_invalid_issue_code_response() {
-        // NOTE: sResultCode="11001" は実機確認で得られたプレースホルダー値。
-        // 正確なコードは立花証券 API 仕様書で確認後に更新すること。
         let mut server = mockito::Server::new_async().await;
         let _mock = server
             .mock("POST", mockito::Matcher::Any)
@@ -4234,8 +4232,8 @@ mod tests {
                 r#"{
                     "p_errno": "0",
                     "p_err": "",
-                    "sResultCode": "11001",
-                    "sResultText": "銘柄コードが不正です"
+                    "sResultCode": "11104",
+                    "sResultText": "銘柄がありません"
                 }"#,
             )
             .create_async()
@@ -4257,8 +4255,8 @@ mod tests {
         };
         let result = submit_new_order(&client, &session, &req).await;
         assert!(
-            result.is_err(),
-            "存在しない銘柄コード: エラーが返るべき: {:?}",
+            matches!(result, Err(TachibanaError::ApiError { ref code, .. }) if code == "11104"),
+            "存在しない銘柄: ApiError(11104) が返るべき: {:?}",
             result
         );
         let err_str = result.unwrap_err().to_string();
