@@ -559,7 +559,7 @@ Shift-JIS リードバイト（`0x81..=0x9F | 0xE0..=0xEF`）を検出したら 
 
 ## 8. リプレイ対応の設計判断
 
-立花証券のリプレイサポート（D1 のみ）は、他取引所とは異なる 4 つの API 制約から独自の設計判断を伴っている。本節はその意思決定の背景を記録する。実装の仕様と操作手順は [docs/spec/replay.md](spec/replay.md) §10「取引所別対応状況」を参照。
+立花証券のリプレイサポート（D1 のみ）は、他取引所とは異なる 4 つの API 制約から独自の設計判断を伴っている。本節はその意思決定の背景を記録する。実装の仕様と操作手順は [docs/replay.md](replay.md) §10「取引所別対応状況」を参照。
 
 ### 8.1 なぜ D1 のみ対応か
 
@@ -599,9 +599,9 @@ Shift-JIS リードバイト（`0x81..=0x9F | 0xE0..=0xEF`）を検出したら 
 - 1x → 1 秒 / 本
 - 10x → 100 ms / 本
 
-で D1 が進行する。現在の `StepClock` ベースの設計については [docs/spec/replay.md](spec/replay.md) §7.1 / §15 を参照。
+で D1 が進行する。現在の `StepClock` ベースの設計については [docs/replay.md](replay.md) §7.1 / §15 を参照。
 
-> **アーキテクチャ注記（R3 以降）**: 本節で述べた「粗補正モード（`COARSE_CUTOFF_MS = 3_600_000ms` / `COARSE_BAR_MS = 1_000ms`）」および `TradeBuffer::drain_all_trade_buffers()` は R3 アーキテクチャ刷新（[docs/spec/replay.md §15](spec/replay.md#15-付録-実装履歴と設計判断) 参照）で廃止済み。現在は `StepClock + EventStore + dispatch_tick` による統一ステップ制御に置き換えられており、D1 も `BASE_STEP_DELAY_MS = 100ms`（1 ステップ = 1 本）で進行する。本節は「なぜ粗補正が必要だったか」という設計判断の背景として残している。
+> **アーキテクチャ注記（R3 以降）**: 本節で述べた「粗補正モード（`COARSE_CUTOFF_MS = 3_600_000ms` / `COARSE_BAR_MS = 1_000ms`）」および `TradeBuffer::drain_all_trade_buffers()` は R3 アーキテクチャ刷新（[docs/replay.md §15](replay.md#15-付録-実装履歴と設計判断) 参照）で廃止済み。現在は `StepClock + EventStore + dispatch_tick` による統一ステップ制御に置き換えられており、D1 も `BASE_STEP_DELAY_MS = 100ms`（1 ステップ = 1 本）で進行する。本節は「なぜ粗補正が必要だったか」という設計判断の背景として残している。
 
 **立花証券特有の副次要件**: `drain_all_trade_buffers()` が `pending_trade_streams` を除外するスキップ条件を持つため、trade_buffers が空の Tachibana ケースでは drain が no-op になり、無駄な iteration が発生しない。一方で **Binance の D1 kline + Heatmap ペイン混在** ケースでは drain が必要なので、単純な「D1 なら drain スキップ」ではなく trade_buffers の空判定ベースにした経緯がある（Phase 3 実装判断）。
 
@@ -611,7 +611,7 @@ Shift-JIS リードバイト（`0x81..=0x9F | 0xE0..=0xEF`）を検出したら 
 
 Phase 6 で `process_tick()` による統一経路へ移行し、`is_all_d1_klines()` / `advance_d1` / `process_d1_tick` を削除した。統一経路は `delta_to_next` ベースの threshold 切替（§8.4）で D1 要件を満たしつつ、M1+D1 混在も自然に扱える。
 
-この設計変更の背景と代替案の比較は [docs/spec/replay.md §15](spec/replay.md#15-付録-実装履歴と設計判断) を参照。
+この設計変更の背景と代替案の比較は [docs/replay.md §15](replay.md#15-付録-実装履歴と設計判断) を参照。
 
 ### 8.6 日足自動再生の UX 判断
 

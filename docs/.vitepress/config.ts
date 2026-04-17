@@ -9,6 +9,12 @@ export default defineConfig({
   // plan/ は開発者向け作業ドキュメントのため除外
   srcExclude: ['plan/**', 'spec/tachibana/**'],
 
+  // plan/ は srcExclude で除外済み、../src/ は Rust ソースファイルのため無視
+  ignoreDeadLinks: [
+    /\/plan\//,
+    /\.\.\/src\//,
+  ],
+
   lastUpdated: true,
 
   themeConfig: {

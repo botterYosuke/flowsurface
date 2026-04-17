@@ -16,7 +16,7 @@
 - [docs/plan/replay_auto_play_no_timeout.md](plan/replay_auto_play_no_timeout.md) — Auto-play タイムアウト廃止（イベント駆動化）
 - [docs/plan/archive/tachibana_replay.md](plan/archive/tachibana_replay.md) — 立花証券 D1 対応の実装経緯（完了、アーカイブ）
 - [docs/plan/archive/replay_unified_step.md](plan/archive/replay_unified_step.md) — 統一 Tick ハンドラ設計メモ（完了、アーカイブ）
-- [docs/tachibana_spec.md §8](tachibana_spec.md#8-リプレイ対応の設計判断) — 立花証券リプレイ設計の「なぜ」
+- [docs/tachibana.md §8](tachibana.md#8-リプレイ対応の設計判断) — 立花証券リプレイ設計の「なぜ」
 
 本書は flowsurface のリプレイ機能を、実装・API 利用・運用に十分な粒度で説明するリファレンス仕様書である。実装履歴は本文では触れず、必要に応じて §15 の付録を参照する。
 
@@ -733,7 +733,7 @@ fn subscription(&self) -> Subscription<Message> {
 2. **離散ステップ**: StepForward / StepBackward が EventStore から次/前 kline timestamp を検索し、休場日（土日祝）を自動スキップ
 3. **Play 時の挙動**: `dispatch_tick` が各 Tick で kline スライスを返すため、D1 リプレイも同一経路で動作
 
-設計判断の背景（なぜこの実装か）は [docs/tachibana_spec.md §8](tachibana_spec.md#8-リプレイ対応の設計判断) を参照。実装経緯（Phase 1〜3 作業ログ）は [docs/plan/archive/tachibana_replay.md](plan/archive/tachibana_replay.md) に保存。
+設計判断の背景（なぜこの実装か）は [docs/tachibana.md §8](tachibana.md#8-リプレイ対応の設計判断) を参照。実装経緯（Phase 1〜3 作業ログ）は [docs/plan/archive/tachibana_replay.md](plan/archive/tachibana_replay.md) に保存。
 
 ---
 
@@ -1181,7 +1181,7 @@ curl -X POST http://127.0.0.1:9876/api/app/save
 | Phase 6 | 統一 Tick ハンドラ（D1 分岐撤廃） | [docs/plan/archive/replay_unified_step.md](plan/archive/replay_unified_step.md) |
 | Phase 7 | mid-replay ペイン操作許容 | 本書 §8 |
 | Phase 8 | レビュー駆動の設計不整合修正 | 本書 §12.3 (旧) |
-| Tachibana Phase 1〜3 | 立花証券 D1 対応 | [docs/tachibana_spec.md §8](tachibana_spec.md) / [docs/plan/archive/tachibana_replay.md](plan/archive/tachibana_replay.md) |
+| Tachibana Phase 1〜3 | 立花証券 D1 対応 | [docs/tachibana.md §8](tachibana.md) / [docs/plan/archive/tachibana_replay.md](plan/archive/tachibana_replay.md) |
 | **R3: アーキテクチャ刷新** | `PlaybackState` / `FireStatus` / `process_tick` / `ReplayKlineBuffer` / `TradeBuffer` を全廃し、`StepClock` + `EventStore` + `dispatch_tick` に置き換え | [docs/plan/replay_redesign.md](plan/replay_redesign.md) |
 | **Fixture 直接起動** | `pending_auto_play` / `all_panes_have_ready_streams` を追加し、`saved-state.json` の replay 構成で自動 Play | [docs/plan/replay_fixture_direct_boot.md](plan/replay_fixture_direct_boot.md) |
 | **R4-1: Dead Code 除去** | `SPEED_INSTANT` 定数・`extend_range_end()` / `set_seek_to_start_on_end()` / `seek_to_start_on_end` フィールド（`clock.rs`）と `extend_loaded_range_end_to()`（`store.rs`）を削除。`#[allow(dead_code)]` 全消去 | [docs/plan/replay_refactoring.md](plan/replay_refactoring.md) |
