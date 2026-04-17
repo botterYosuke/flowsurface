@@ -100,9 +100,9 @@ if [ -n "$PANE_ID_0" ]; then
   sleep 0.5
   PANES_AFTER=$(curl -s "$API/pane/list")
   COUNT=$(node -e "console.log((JSON.parse(process.argv[1]).panes||[]).length);" "$PANES_AFTER")
-  [ "$COUNT" = "0" ] \
-    && pass "TC-S17-03c: 全 pane close 後 pane/list=[] (count=0)" \
-    || fail "TC-S17-03c" "count=$COUNT (expected 0), resp=$PANES_AFTER"
+  [ "$COUNT" = "1" ] \
+    && pass "TC-S17-03c: 全 pane close 後 最終ペイン1つ残存 (count=1, iced pane_grid 仕様)" \
+    || fail "TC-S17-03c" "count=$COUNT (expected 1), resp=$PANES_AFTER"
 else
   fail "TC-S17-03c-pre" "ペイン ID 取得失敗"
 fi
