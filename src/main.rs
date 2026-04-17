@@ -322,6 +322,7 @@ impl Flowsurface {
                 return Task::none();
             }
             Message::SessionRestoreResult(result) => {
+                log::info!("[dbg] SessionRestoreResult: session_present={}", result.is_some());
                 if let Some(session) = result {
                     // 再ログイン成功 → メイン画面を直接表示
                     connector::auth::store_session(session.clone());
@@ -572,9 +573,16 @@ impl Flowsurface {
                             let has_any_ticker_info =
                                 tickers_info.values().any(|opt| opt.is_some());
                             log::info!(
-                                "[e2e-live] ResolveStreams pane={pane_id} streams={} has_ticker_info={has_any_ticker_info}",
-                                streams.len()
+                                "[e2e-live] ResolveStreams pane={pane_id} streams={} has_ticker_info={has_any_ticker_info} meta_entries={}",
+                                streams.len(),
+                                tickers_info.len()
                             );
+                            // Tachibana キーのサンプル出力（最初の5件）
+                            if !has_any_ticker_info || tickers_info.len() > 0 {
+                                for (k, v) in tickers_info.iter().filter(|(k, _)| k.exchange == exchange::adapter::Exchange::Tachibana).take(5) {
+                                    log::info!("[dbg] meta_key={k:?} has_info={}", v.is_some());
+                                }
+                            }
                             if !has_any_ticker_info {
                                 log::debug!(
                                     "Deferring persisted stream resolution for pane {pane_id}: ticker metadata not loaded yet"
@@ -585,7 +593,22 @@ impl Flowsurface {
                             let resolved_streams =
                                 streams.into_iter().try_fold(vec![], |mut acc, persist| {
                                     let resolver = |t: &exchange::Ticker| {
-                                        tickers_info.get(t).and_then(|opt| *opt)
+                                        let result = tickers_info.get(t).and_then(|opt| *opt);
+                                        log::info!(
+                                            "[dbg] resolver ticker={t:?} display={:?} found={}",
+                                            t.display_symbol(),
+                                            result.is_some()
+                                        );
+                                        if result.is_none() {
+                                            let (sym, _) = t.to_full_symbol_and_type();
+                                            let no_display = exchange::Ticker::new(&sym, t.exchange);
+                                            let fallback = tickers_info.get(&no_display).and_then(|opt| *opt);
+                                            log::info!(
+                                                "[dbg] resolver fallback no_display={no_display:?} found={}",
+                                                fallback.is_some()
+                                            );
+                                        }
+                                        result
                                     };
 
                                     match persist.into_stream_kinds(resolver) {
@@ -1319,7 +1342,7 @@ impl Flowsurface {
                                                 high: k.high.to_f64(),
                                                 low: k.low.to_f64(),
                                                 close: k.close.to_f64(),
-                                                volume: k.volume.total().to_f32_lossy() as f64,
+                                                volume: k.volume.total().to_f64(),
                                             })
                                         })
                                         .collect();
@@ -1331,7 +1354,7 @@ impl Flowsurface {
                                                 stream: stream.clone(),
                                                 time: t.time,
                                                 price: t.price.to_f64(),
-                                                qty: t.qty.to_f32_lossy() as f64,
+                                                qty: t.qty.to_f64(),
                                                 is_sell: t.is_sell,
                                             })
                                         })
@@ -1343,6 +1366,12 @@ impl Flowsurface {
                                             "trades": trades,
                                         })
                                         .to_string(),
+                                    );
+                                } else if self.replay.is_loading() {
+                                    reply_tx.send_status(
+                                        503,
+                                        r#"{"error":"replay is loading, try again shortly"}"#
+                                            .to_string(),
                                     );
                                 } else {
                                     reply_tx.send_status(
@@ -2449,8 +2478,11 @@ impl Flowsurface {
 
         Task::perform(
             async move {
+                log::info!("[dbg] start_master_download: calling init_issue_master");
                 let client = reqwest::Client::new();
-                exchange::adapter::tachibana::init_issue_master(&client, &session).await?;
+                let r = exchange::adapter::tachibana::init_issue_master(&client, &session).await;
+                log::info!("[dbg] init_issue_master result: {}", r.is_ok());
+                r?;
                 Ok(exchange::adapter::tachibana::cached_ticker_metadata().await)
             },
             |result: Result<_, exchange::adapter::tachibana::TachibanaError>| {
