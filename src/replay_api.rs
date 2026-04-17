@@ -15,6 +15,8 @@ pub enum ApiCommand {
     Auth(AuthCommand),
     /// 仮想約定エンジンコマンド（Phase 2 互換）。
     VirtualExchange(VirtualExchangeCommand),
+    /// 立花証券余力情報を取得する（GET /api/buying-power）。
+    FetchBuyingPower,
     /// E2E テスト用コマンド（debug ビルドで有効）。
     #[cfg(debug_assertions)]
     Test(TestCommand),
@@ -402,6 +404,9 @@ fn route(method: &str, path: &str, body: &str) -> Result<ApiCommand, RouteError>
         ("GET", "/api/replay/orders") => Ok(ApiCommand::VirtualExchange(
             VirtualExchangeCommand::GetOrders,
         )),
+
+        // ── 立花証券余力情報 ──────────────────────────────────────────────
+        ("GET", "/api/buying-power") => Ok(ApiCommand::FetchBuyingPower),
 
         // ── debug ビルドで有効（keyring クリア） ─────────────────────────
         #[cfg(debug_assertions)]

@@ -207,6 +207,16 @@ enum Message {
     AudioStream(modal::audio::Message),
     LoginCompleted(Result<exchange::adapter::tachibana::TachibanaSession, String>),
     SessionRestoreResult(Option<exchange::adapter::tachibana::TachibanaSession>),
+    BuyingPowerApiResult {
+        reply: replay_api::ReplySender,
+        result: Result<
+            (
+                exchange::adapter::tachibana::BuyingPowerResponse,
+                exchange::adapter::tachibana::MarginPowerResponse,
+            ),
+            String,
+        >,
+    },
     Replay(ReplayMessage),
     ReplayApi(replay_api::ApiMessage),
 }
@@ -312,7 +322,21 @@ impl Flowsurface {
                         connector::auth::persist_session(&session);
                         let dashboard_task = self.transition_to_dashboard();
                         let master_task = Self::start_master_download(session);
-                        return Task::batch([dashboard_task, master_task]);
+                        let disk_cache_task: Task<Message> = {
+                            let path = data::data_path(Some("market_data/tachibana_master_cache.json"));
+                            match exchange::adapter::tachibana::load_master_from_disk(&path) {
+                                Some(metadata) => Task::done(Message::Sidebar(
+                                    dashboard::sidebar::Message::TickersTable(
+                                        dashboard::tickers_table::Message::UpdateMetadata(
+                                            exchange::adapter::Venue::Tachibana,
+                                            metadata,
+                                        ),
+                                    ),
+                                )),
+                                None => Task::none(),
+                            }
+                        };
+                        return Task::batch([dashboard_task, disk_cache_task, master_task]);
                     }
                     Err(error_msg) => {
                         log::warn!("Login failed: {error_msg}");
@@ -322,13 +346,27 @@ impl Flowsurface {
                 return Task::none();
             }
             Message::SessionRestoreResult(result) => {
-                log::info!("[dbg] SessionRestoreResult: session_present={}", result.is_some());
                 if let Some(session) = result {
                     // 再ログイン成功 → メイン画面を直接表示
                     connector::auth::store_session(session.clone());
                     let dashboard_task = self.transition_to_dashboard();
                     let master_task = Self::start_master_download(session);
-                    return Task::batch([dashboard_task, master_task]);
+                    // ディスクキャッシュが存在する場合、ダウンロード完了前に即座に metadata を供給する
+                    let disk_cache_task: Task<Message> = {
+                        let path = data::data_path(Some("market_data/tachibana_master_cache.json"));
+                        match exchange::adapter::tachibana::load_master_from_disk(&path) {
+                            Some(metadata) => Task::done(Message::Sidebar(
+                                dashboard::sidebar::Message::TickersTable(
+                                    dashboard::tickers_table::Message::UpdateMetadata(
+                                        exchange::adapter::Venue::Tachibana,
+                                        metadata,
+                                    ),
+                                ),
+                            )),
+                            None => Task::none(),
+                        }
+                    };
+                    return Task::batch([dashboard_task, disk_cache_task, master_task]);
                 }
                 // 再ログイン失敗 → ログイン画面を表示（e2e-mock ではスキップ）
                 let main_window_id = self.main_window.id;
@@ -363,6 +401,21 @@ impl Flowsurface {
                 }
                 #[cfg(not(debug_assertions))]
                 return open_login_window.discard();
+            }
+            Message::BuyingPowerApiResult { reply, result } => {
+                let body = match result {
+                    Ok((cash, margin)) => serde_json::json!({
+                        "cash_buying_power": cash.cash_buying_power,
+                        "nisa_growth_buying_power": cash.nisa_growth_buying_power,
+                        "shortage_flag": cash.shortage_flag,
+                        "margin_new_order_power": margin.margin_new_order_power,
+                        "maintenance_margin_rate": margin.maintenance_margin_rate,
+                        "margin_call_flag": margin.margin_call_flag,
+                    })
+                    .to_string(),
+                    Err(e) => serde_json::json!({ "error": e }).to_string(),
+                };
+                reply.send(body);
             }
             Message::MarketWsEvent(event) => {
                 let main_window_id = self.main_window.id;
@@ -573,16 +626,9 @@ impl Flowsurface {
                             let has_any_ticker_info =
                                 tickers_info.values().any(|opt| opt.is_some());
                             log::info!(
-                                "[e2e-live] ResolveStreams pane={pane_id} streams={} has_ticker_info={has_any_ticker_info} meta_entries={}",
-                                streams.len(),
-                                tickers_info.len()
+                                "[e2e-live] ResolveStreams pane={pane_id} streams={} has_ticker_info={has_any_ticker_info}",
+                                streams.len()
                             );
-                            // Tachibana キーのサンプル出力（最初の5件）
-                            if !has_any_ticker_info || tickers_info.len() > 0 {
-                                for (k, v) in tickers_info.iter().filter(|(k, _)| k.exchange == exchange::adapter::Exchange::Tachibana).take(5) {
-                                    log::info!("[dbg] meta_key={k:?} has_info={}", v.is_some());
-                                }
-                            }
                             if !has_any_ticker_info {
                                 log::debug!(
                                     "Deferring persisted stream resolution for pane {pane_id}: ticker metadata not loaded yet"
@@ -593,22 +639,7 @@ impl Flowsurface {
                             let resolved_streams =
                                 streams.into_iter().try_fold(vec![], |mut acc, persist| {
                                     let resolver = |t: &exchange::Ticker| {
-                                        let result = tickers_info.get(t).and_then(|opt| *opt);
-                                        log::info!(
-                                            "[dbg] resolver ticker={t:?} display={:?} found={}",
-                                            t.display_symbol(),
-                                            result.is_some()
-                                        );
-                                        if result.is_none() {
-                                            let (sym, _) = t.to_full_symbol_and_type();
-                                            let no_display = exchange::Ticker::new(&sym, t.exchange);
-                                            let fallback = tickers_info.get(&no_display).and_then(|opt| *opt);
-                                            log::info!(
-                                                "[dbg] resolver fallback no_display={no_display:?} found={}",
-                                                fallback.is_some()
-                                            );
-                                        }
-                                        result
+                                        tickers_info.get(t).and_then(|opt| *opt)
                                     };
 
                                     match persist.into_stream_kinds(resolver) {
@@ -1048,13 +1079,15 @@ impl Flowsurface {
                     None => {}
                 }
 
-                if is_metadata_update && self.replay.is_auto_play_pending() {
+                if is_metadata_update {
                     let main_window_id = self.main_window.id;
                     self.active_dashboard_mut()
                         .refresh_waiting_panes(main_window_id);
-                    log::info!(
-                        "[auto-play] metadata updated — refreshed waiting panes for stream resolution"
-                    );
+                    if self.replay.is_auto_play_pending() {
+                        log::info!(
+                            "[auto-play] metadata updated — refreshed waiting panes for stream resolution"
+                        );
+                    }
                 }
 
                 return task.map(Message::Sidebar);
@@ -1261,6 +1294,12 @@ impl Flowsurface {
                     ApiCommand::Auth(cmd) => {
                         let body = self.handle_auth_api(cmd);
                         reply_tx.send(body);
+                    }
+                    ApiCommand::FetchBuyingPower => {
+                        return Task::perform(
+                            connector::order::fetch_buying_power(),
+                            move |result| Message::BuyingPowerApiResult { reply: reply_tx, result },
+                        );
                     }
                     ApiCommand::VirtualExchange(cmd) => {
                         use replay::virtual_exchange::{
@@ -2450,15 +2489,45 @@ impl Flowsurface {
 
         self.main_window = window::Window::new(main_window_id);
 
-        let active_layout_id = self.layout_manager.active_layout_id().unwrap_or(
-            &self
-                .layout_manager
-                .layouts
-                .first()
-                .expect("No layouts available")
-                .id,
-        );
-        let load_layout = self.load_layout(active_layout_id.unique, main_window_id);
+        let active_layout_uid = self
+            .layout_manager
+            .active_layout_id()
+            .map(|id| id.unique)
+            .unwrap_or_else(|| {
+                self.layout_manager
+                    .layouts
+                    .first()
+                    .expect("No layouts available")
+                    .id
+                    .unique
+            });
+        let initial_buying_power = self
+            .layout_manager
+            .get(active_layout_uid)
+            .map(|layout| {
+                layout
+                    .dashboard
+                    .initial_buying_power_fetch(main_window_id)
+                    .map(|msg| Message::Dashboard {
+                        layout_id: None,
+                        event: msg,
+                    })
+            })
+            .unwrap_or_else(Task::none);
+        let initial_order_list = self
+            .layout_manager
+            .get(active_layout_uid)
+            .map(|layout| {
+                layout
+                    .dashboard
+                    .initial_order_list_fetch(main_window_id)
+                    .map(|msg| Message::Dashboard {
+                        layout_id: None,
+                        event: msg,
+                    })
+            })
+            .unwrap_or_else(Task::none);
+        let load_layout = self.load_layout(active_layout_uid, main_window_id);
 
         let close_login = login_win
             .map(window::close::<Message>)
@@ -2468,9 +2537,12 @@ impl Flowsurface {
             .chain(open_main.discard())
             .chain(iced::window::maximize(main_window_id, true))
             .chain(load_layout)
+            .chain(initial_buying_power)
+            .chain(initial_order_list)
     }
 
     /// 銘柄マスタをバックグラウンドでダウンロードし、完了後に TickersTable へ反映する。
+    /// ネットワークエラー時は最大3回・30秒間隔でリトライする。
     fn start_master_download(
         session: exchange::adapter::tachibana::TachibanaSession,
     ) -> Task<Message> {
@@ -2478,12 +2550,38 @@ impl Flowsurface {
 
         Task::perform(
             async move {
-                log::info!("[dbg] start_master_download: calling init_issue_master");
+                let cache_path = data::data_path(Some("market_data/tachibana_master_cache.json"));
                 let client = reqwest::Client::new();
-                let r = exchange::adapter::tachibana::init_issue_master(&client, &session).await;
-                log::info!("[dbg] init_issue_master result: {}", r.is_ok());
-                r?;
-                Ok(exchange::adapter::tachibana::cached_ticker_metadata().await)
+                const MAX_RETRIES: u32 = 3;
+                let mut last_err = None;
+                for attempt in 0..MAX_RETRIES {
+                    if attempt > 0 {
+                        log::info!(
+                            "Tachibana master download retry {attempt}/{} (previous: {:?})",
+                            MAX_RETRIES - 1,
+                            last_err
+                        );
+                        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    }
+                    match exchange::adapter::tachibana::init_issue_master(
+                        &client,
+                        &session,
+                        Some(&cache_path),
+                    )
+                    .await
+                    {
+                        Ok(()) => {
+                            return Ok(
+                                exchange::adapter::tachibana::cached_ticker_metadata().await
+                            );
+                        }
+                        Err(e) => {
+                            log::warn!("Tachibana master download attempt {attempt} failed: {e}");
+                            last_err = Some(e);
+                        }
+                    }
+                }
+                Err(last_err.unwrap())
             },
             |result: Result<_, exchange::adapter::tachibana::TachibanaError>| {
                 let venue = Venue::Tachibana;
@@ -2492,7 +2590,7 @@ impl Flowsurface {
                         dashboard::tickers_table::Message::UpdateMetadata(venue, metadata),
                     )),
                     Err(e) => {
-                        log::error!("Tachibana master download failed: {e}");
+                        log::error!("Tachibana master download failed after retries: {e}");
                         Message::Sidebar(dashboard::sidebar::Message::TickersTable(
                             dashboard::tickers_table::Message::MetadataFetchFailed(
                                 venue,

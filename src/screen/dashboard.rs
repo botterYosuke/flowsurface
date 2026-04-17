@@ -1212,7 +1212,57 @@ impl Dashboard {
             state.content = pane::Content::placeholder(content_kind);
         }
 
+        if content_kind == ContentKind::BuyingPower {
+            if let Some(state) = self.get_pane(main_window, window, new_pane) {
+                let pane_id = state.unique_id();
+                return Task::perform(
+                    order_connector::fetch_buying_power(),
+                    move |result| Message::BuyingPowerResult { pane_id, result },
+                );
+            }
+        }
+
         Task::none()
+    }
+
+    /// レイアウト復元後など、既存 BuyingPower ペインすべてに初回フェッチを発行する。
+    pub fn initial_buying_power_fetch(&self, main_window: window::Id) -> Task<Message> {
+        let tasks: Vec<Task<Message>> = self
+            .iter_all_panes(main_window)
+            .filter_map(|(_, _, state)| {
+                if matches!(state.content, pane::Content::BuyingPower(_)) {
+                    let pane_id = state.unique_id();
+                    Some(Task::perform(
+                        order_connector::fetch_buying_power(),
+                        move |result| Message::BuyingPowerResult { pane_id, result },
+                    ))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        Task::batch(tasks)
+    }
+
+    /// レイアウト復元後など、既存 OrderList ペインすべてに初回フェッチを発行する。
+    pub fn initial_order_list_fetch(&self, main_window: window::Id) -> Task<Message> {
+        let eig_day = self.eig_day_or_today();
+        let tasks: Vec<Task<Message>> = self
+            .iter_all_panes(main_window)
+            .filter_map(|(_, _, state)| {
+                if matches!(state.content, pane::Content::OrderList(_)) {
+                    let pane_id = state.unique_id();
+                    let eig_day = eig_day.clone();
+                    Some(Task::perform(
+                        order_connector::fetch_orders(eig_day),
+                        move |result| Message::OrdersListResult { pane_id, result },
+                    ))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        Task::batch(tasks)
     }
 
     pub fn switch_tickers_in_group(
