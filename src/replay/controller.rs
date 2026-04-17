@@ -545,7 +545,7 @@ impl ReplayController {
                 let current_time = self.state.current_time();
 
                 // 全アクティブ stream の前の kline 時刻の最大値
-                let (prev_time, start_ms) = match &self.state.session {
+                let (prev_time, start_ms, step_size) = match &self.state.session {
                     ReplaySession::Active {
                         clock,
                         store,
@@ -563,12 +563,17 @@ impl ReplayController {
                                     .map(|k| k.time)
                             })
                             .max();
-                        (prev, clock.full_range().start)
+                        let step = super::min_timeframe_ms(active_streams);
+                        (prev, clock.full_range().start, step)
                     }
                     _ => return (Task::none(), None),
                 };
-                let new_time =
-                    super::compute_step_backward_target(prev_time, current_time, start_ms);
+                let new_time = super::compute_step_backward_target(
+                    prev_time,
+                    current_time,
+                    start_ms,
+                    step_size,
+                );
 
                 // ビューポートを保持したままデータのみリセット（KlineChart 再構築なし）
                 self.seek_to(new_time, dashboard, main_window_id);

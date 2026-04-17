@@ -1828,7 +1828,18 @@ impl Flowsurface {
 
         // リプレイモード中は WebSocket ストリームを購読しない
         if self.replay.is_replay() {
-            return Subscription::batch(vec![window_events, sidebar, tick, hotkeys, replay_api]);
+            // headless CI 環境では window::frames() が発火しないため、
+            // タイマーを補助 tick ソースとして追加する。
+            let replay_tick =
+                iced::time::every(std::time::Duration::from_millis(100)).map(Message::Tick);
+            return Subscription::batch(vec![
+                window_events,
+                sidebar,
+                tick,
+                replay_tick,
+                hotkeys,
+                replay_api,
+            ]);
         }
 
         let exchange_streams = self

@@ -51,12 +51,15 @@ pub fn pre_start_history(klines: &[Kline], start_ms: u64) -> Vec<Kline> {
 /// StepBackward で clock を戻す先の時刻を計算する。
 /// history 範囲 (< start_ms) のバーが EventStore に存在しても
 /// start_ms 未満には seek しないようにクランプする。
+/// klines が見つからない場合（prev_time = None）は step_ms 分後退するフォールバックを使う。
 pub fn compute_step_backward_target(
     prev_time: Option<u64>,
     current_time: u64,
     start_ms: u64,
+    step_ms: u64,
 ) -> u64 {
-    prev_time.unwrap_or(current_time).max(start_ms)
+    let target = prev_time.unwrap_or_else(|| current_time.saturating_sub(step_ms));
+    target.max(start_ms)
 }
 
 // ── 公開 API ────────────────────────────────────────────────────────────────
@@ -989,7 +992,7 @@ mod tests {
     #[test]
     fn step_backward_target_clamps_to_start_ms_when_prev_is_below() {
         // prev=900, current=1000, start_ms=1000 → history bar below start, must clamp
-        let target = compute_step_backward_target(Some(900), 1000, 1000);
+        let target = compute_step_backward_target(Some(900), 1000, 1000, 60_000);
         assert_eq!(
             target, 1000,
             "seeking to a pre-start history bar (t=900) must be clamped to start_ms=1000"
@@ -999,7 +1002,7 @@ mod tests {
     #[test]
     fn step_backward_target_allows_seek_within_replay_range() {
         // prev=1000 (exactly start_ms), current=2000, start_ms=1000 → valid seek
-        let target = compute_step_backward_target(Some(1000), 2000, 1000);
+        let target = compute_step_backward_target(Some(1000), 2000, 1000, 60_000);
         assert_eq!(
             target, 1000,
             "seeking from t=2000 to t=1000 (exactly start_ms) must be allowed"
@@ -1007,12 +1010,22 @@ mod tests {
     }
 
     #[test]
-    fn step_backward_target_stays_at_current_when_no_prev() {
-        // prev=None, current=1500, start_ms=1000 → no previous bar, stay put
-        let target = compute_step_backward_target(None, 1500, 1000);
+    fn step_backward_target_falls_back_by_step_when_no_prev() {
+        // prev=None, current=1500, start_ms=1000, step_ms=500 → fallback: 1500-500=1000
+        let target = compute_step_backward_target(None, 1500, 1000, 500);
         assert_eq!(
-            target, 1500,
-            "when no previous bar exists, target must equal current_time"
+            target, 1000,
+            "when no previous bar exists, target must fall back to current_time - step_ms"
+        );
+    }
+
+    #[test]
+    fn step_backward_target_no_prev_clamps_to_start_ms() {
+        // prev=None, current=1200, start_ms=1000, step_ms=500 → 1200-500=700 → clamped to 1000
+        let target = compute_step_backward_target(None, 1200, 1000, 500);
+        assert_eq!(
+            target, 1000,
+            "fallback target below start_ms must be clamped to start_ms"
         );
     }
 }
