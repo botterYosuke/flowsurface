@@ -899,7 +899,7 @@ mod tests {
         };
 
         // Play ハンドラと同様のフィルタリングをシミュレートする
-        let kline_targets = vec![
+        let kline_targets = [
             (uuid::Uuid::new_v4(), kline_stream),
             (uuid::Uuid::new_v4(), trades_stream),
         ];

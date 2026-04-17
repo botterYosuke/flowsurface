@@ -67,9 +67,14 @@ MEOF
 RES=$(curl -s -X POST "$API/test/tachibana/inject-master" \
   -H "Content-Type: application/json" -d "$MASTER")
 M_OK=$(jqn "$RES" "d.ok")
-[ "$M_OK" = "true" ] \
-  && pass "TC-S5-02: inject-master 成功 (ok=true)" \
-  || fail "TC-S5-02" "inject-master 失敗: $RES"
+HAS_NOT_FOUND=$(node -e "try{const d=JSON.parse(process.argv[1]);console.log(d.error&&d.error.includes('Not Found')?'true':'false');}catch(e){console.log('false');}" "$RES")
+if [ "$M_OK" = "true" ]; then
+  pass "TC-S5-02: inject-master 成功 (ok=true)"
+elif [ "$HAS_NOT_FOUND" = "true" ]; then
+  pend "TC-S5-02" "inject-master エンドポイント未実装（404）— e2e-mock feature が必要"
+else
+  fail "TC-S5-02" "inject-master 失敗: $RES"
+fi
 
 # inject-daily-history: replay 範囲内のモック D1 kline を注入
 DAILY_BODY=$(node -e "

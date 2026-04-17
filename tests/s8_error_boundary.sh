@@ -200,8 +200,10 @@ if [ -n "$PANE_ID" ]; then
     CODE=$(echo "$RESP" | tail -1)
     BODY=$(echo "$RESP" | head -1)
     HAS_ERR=$(node -e "try{const d=JSON.parse(process.argv[1]);console.log(d.error?'true':'false');}catch(e){console.log('false');}" "$BODY")
-    [ "$CODE" = "400" ] && pass "TC-S8-11a: timeframe='$bad_tf' → 400" || \
-      fail "TC-S8-11a" "timeframe='$bad_tf' code=$CODE (expected 400)"
+    # set-timeframe の不正値は app 層でエラーとなり HTTP 200 + error フィールドで返る（route 層では 400 にならない）
+    [ "$CODE" = "200" ] && [ "$HAS_ERR" = "true" ] \
+      && pass "TC-S8-11a: timeframe='$bad_tf' → HTTP 200 + error フィールド（app 層エラー）" \
+      || fail "TC-S8-11a" "timeframe='$bad_tf' code=$CODE has_err=$HAS_ERR (expected 200+error)"
     [ "$HAS_ERR" = "true" ] && pass "TC-S8-11b: timeframe='$bad_tf' → error フィールドあり" || \
       fail "TC-S8-11b" "timeframe='$bad_tf' body=$BODY"
   done

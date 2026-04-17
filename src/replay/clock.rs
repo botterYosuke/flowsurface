@@ -86,11 +86,10 @@ impl StepClock {
             return;
         }
         let offset = clamped.saturating_sub(self.range.start);
-        let snapped_offset = if self.step_size_ms > 0 {
-            (offset / self.step_size_ms) * self.step_size_ms
-        } else {
-            offset
-        };
+        let snapped_offset = offset
+            .checked_div(self.step_size_ms)
+            .map(|q| q * self.step_size_ms)
+            .unwrap_or(offset);
         self.now_ms = self.range.start + snapped_offset;
     }
 
@@ -108,11 +107,10 @@ impl StepClock {
     pub fn set_step_size(&mut self, step_size_ms: u64) {
         self.step_size_ms = step_size_ms;
         let offset = self.now_ms.saturating_sub(self.range.start);
-        let aligned_offset = if step_size_ms > 0 {
-            (offset / step_size_ms) * step_size_ms
-        } else {
-            offset
-        };
+        let aligned_offset = offset
+            .checked_div(step_size_ms)
+            .map(|q| q * step_size_ms)
+            .unwrap_or(offset);
         self.now_ms = self.range.start + aligned_offset;
     }
 

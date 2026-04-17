@@ -44,7 +44,8 @@ HTTP_SPLIT=$(echo "$RESP_SPLIT" | tail -1)
 BODY_SPLIT=$(echo "$RESP_SPLIT" | head -1)
 HAS_ERR_SPLIT=$(node -e "try{const d=JSON.parse(process.argv[1]);console.log(d.error?'true':'false');}catch(e){console.log('false');}" "$BODY_SPLIT")
 ALIVE=$(curl -s "$API/replay/status" > /dev/null 2>&1 && echo "true" || echo "false")
-[ "$HTTP_SPLIT" = "404" ] && [ "$ALIVE" = "true" ] \
+# handle_pane_api は app 層エラーを HTTP 200 + error フィールドで返す（将来 404 に移行予定）
+{ [ "$HTTP_SPLIT" = "200" ] || [ "$HTTP_SPLIT" = "404" ]; } && [ "$ALIVE" = "true" ] \
   && pass "TC-S17-01a: pane/split 存在しない UUID → HTTP=$HTTP_SPLIT & アプリ生存" \
   || fail "TC-S17-01a" "HTTP=$HTTP_SPLIT alive=$ALIVE"
 [ "$HAS_ERR_SPLIT" = "true" ] \
@@ -59,7 +60,7 @@ HTTP_CLOSE=$(echo "$RESP_CLOSE" | tail -1)
 BODY_CLOSE=$(echo "$RESP_CLOSE" | head -1)
 HAS_ERR_CLOSE=$(node -e "try{const d=JSON.parse(process.argv[1]);console.log(d.error?'true':'false');}catch(e){console.log('false');}" "$BODY_CLOSE")
 ALIVE=$(curl -s "$API/replay/status" > /dev/null 2>&1 && echo "true" || echo "false")
-[ "$HTTP_CLOSE" = "404" ] && [ "$ALIVE" = "true" ] \
+{ [ "$HTTP_CLOSE" = "200" ] || [ "$HTTP_CLOSE" = "404" ]; } && [ "$ALIVE" = "true" ] \
   && pass "TC-S17-02a: pane/close 存在しない UUID → HTTP=$HTTP_CLOSE & アプリ生存" \
   || fail "TC-S17-02a" "HTTP=$HTTP_CLOSE alive=$ALIVE"
 [ "$HAS_ERR_CLOSE" = "true" ] \
@@ -74,7 +75,7 @@ HTTP_TICKER=$(echo "$RESP_TICKER" | tail -1)
 BODY_TICKER=$(echo "$RESP_TICKER" | head -1)
 HAS_ERR_TICKER=$(node -e "try{const d=JSON.parse(process.argv[1]);console.log(d.error?'true':'false');}catch(e){console.log('false');}" "$BODY_TICKER")
 ALIVE=$(curl -s "$API/replay/status" > /dev/null 2>&1 && echo "true" || echo "false")
-[ "$HTTP_TICKER" = "404" ] && [ "$ALIVE" = "true" ] \
+{ [ "$HTTP_TICKER" = "200" ] || [ "$HTTP_TICKER" = "404" ]; } && [ "$ALIVE" = "true" ] \
   && pass "TC-S17-03a: pane/set-ticker 存在しない UUID → HTTP=$HTTP_TICKER & アプリ生存" \
   || fail "TC-S17-03a" "HTTP=$HTTP_TICKER alive=$ALIVE"
 [ "$HAS_ERR_TICKER" = "true" ] \

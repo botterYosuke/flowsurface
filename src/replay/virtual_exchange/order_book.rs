@@ -214,6 +214,7 @@ impl VirtualOrderBook {
 
     /// ポートフォリオへの参照（テスト用）
     #[cfg(test)]
+    #[allow(dead_code)]
     pub fn portfolio(&self) -> &VirtualPortfolio {
         &self.portfolio
     }
