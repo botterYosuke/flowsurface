@@ -76,7 +76,7 @@ data.workspace = true
 [dependencies.tokio]
 version = "1.43"
 default-features = false
-features = ["net", "io-util", "sync"]
+features = ["net", "io-util", "sync", "time"]
 
 [dev-dependencies]
 mockito = "1.5"

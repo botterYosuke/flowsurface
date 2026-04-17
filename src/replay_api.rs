@@ -15,6 +15,30 @@ pub enum ApiCommand {
     Auth(AuthCommand),
     /// 仮想約定エンジンコマンド（Phase 2 互換）。
     VirtualExchange(VirtualExchangeCommand),
+    /// 立花証券余力情報を取得する（GET /api/buying-power）。
+    FetchBuyingPower,
+    /// 立花証券新規注文を発注する（POST /api/tachibana/order）。
+    TachibanaNewOrder {
+        req: Box<exchange::adapter::tachibana::NewOrderRequest>,
+    },
+    /// 立花証券注文一覧を取得する（GET /api/tachibana/orders）。
+    /// `eig_day`: 執行予定日 YYYYMMDD。空文字=全件。
+    FetchTachibanaOrders {
+        eig_day: String,
+    },
+    /// 立花証券約定明細を取得する（GET /api/tachibana/order/{order_num}）。
+    FetchTachibanaOrderDetail {
+        order_num: String,
+        eig_day: String,
+    },
+    /// 立花証券訂正注文を発注する（POST /api/tachibana/order/correct）。
+    TachibanaCorrectOrder {
+        req: Box<exchange::adapter::tachibana::CorrectOrderRequest>,
+    },
+    /// 立花証券取消注文を発注する（POST /api/tachibana/order/cancel）。
+    TachibanaOrderCancel {
+        req: Box<exchange::adapter::tachibana::CancelOrderRequest>,
+    },
     /// E2E テスト用コマンド（debug ビルドで有効）。
     #[cfg(debug_assertions)]
     Test(TestCommand),
@@ -403,6 +427,23 @@ fn route(method: &str, path: &str, body: &str) -> Result<ApiCommand, RouteError>
             VirtualExchangeCommand::GetOrders,
         )),
 
+        // ── 立花証券余力情報 ──────────────────────────────────────────────
+        ("GET", "/api/buying-power") => Ok(ApiCommand::FetchBuyingPower),
+
+        // ── 立花証券新規注文 ──────────────────────────────────────────────
+        ("POST", "/api/tachibana/order") => parse_tachibana_new_order(body),
+
+        // ── 立花証券注文管理 ──────────────────────────────────────────────
+        ("GET", p) if p == "/api/tachibana/orders" || p.starts_with("/api/tachibana/orders?") => {
+            let eig_day = query_param(p, "eig_day").unwrap_or_default();
+            Ok(ApiCommand::FetchTachibanaOrders { eig_day })
+        }
+        ("GET", p) if p.starts_with("/api/tachibana/order/") => {
+            parse_tachibana_order_detail_command(p)
+        }
+        ("POST", "/api/tachibana/order/correct") => parse_tachibana_correct_order(body),
+        ("POST", "/api/tachibana/order/cancel") => parse_tachibana_cancel_order(body),
+
         // ── debug ビルドで有効（keyring クリア） ─────────────────────────
         #[cfg(debug_assertions)]
         ("POST", "/api/test/tachibana/delete-persisted-session") => Ok(ApiCommand::Test(
@@ -516,6 +557,165 @@ fn parse_open_order_pane(body: &str) -> Result<ApiCommand, RouteError> {
         _ => return Err(RouteError::BadRequest),
     }
     Ok(ApiCommand::Pane(PaneCommand::OpenOrderPane { kind }))
+}
+
+/// `POST /api/tachibana/order` のボディをパースして ApiCommand を返す。
+/// `second_password` は本文中のフィールドか `DEV_SECOND_PASSWORD` 環境変数から取得する。
+fn parse_tachibana_new_order(body: &str) -> Result<ApiCommand, RouteError> {
+    let parsed: serde_json::Value =
+        serde_json::from_str(body).map_err(|_| RouteError::BadRequest)?;
+
+    let str_field = |key: &str| -> Result<String, RouteError> {
+        parsed
+            .get(key)
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .ok_or(RouteError::BadRequest)
+    };
+
+    let issue_code = str_field("issue_code")?;
+    let qty = str_field("qty")?;
+    let side = str_field("side")?;
+    let price = str_field("price")?;
+    let account_type = parsed
+        .get("account_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("1")
+        .to_string();
+    let market_code = parsed
+        .get("market_code")
+        .and_then(|v| v.as_str())
+        .unwrap_or("00")
+        .to_string();
+    let condition = parsed
+        .get("condition")
+        .and_then(|v| v.as_str())
+        .unwrap_or("0")
+        .to_string();
+    let cash_margin = parsed
+        .get("cash_margin")
+        .and_then(|v| v.as_str())
+        .unwrap_or("0")
+        .to_string();
+    let expire_day = parsed
+        .get("expire_day")
+        .and_then(|v| v.as_str())
+        .unwrap_or("0")
+        .to_string();
+
+    let second_password = parsed
+        .get("second_password")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .or_else(|| std::env::var("DEV_SECOND_PASSWORD").ok())
+        .ok_or(RouteError::BadRequest)?;
+
+    let req = exchange::adapter::tachibana::NewOrderRequest {
+        account_type,
+        issue_code,
+        market_code,
+        side,
+        condition,
+        price,
+        qty,
+        cash_margin,
+        expire_day,
+        second_password,
+    };
+    Ok(ApiCommand::TachibanaNewOrder { req: Box::new(req) })
+}
+
+/// `GET /api/tachibana/order/{order_num}[?eig_day=YYYYMMDD]` をパースして ApiCommand を返す。
+fn parse_tachibana_order_detail_command(path: &str) -> Result<ApiCommand, RouteError> {
+    // パス部分とクエリ部分を分離する
+    let (path_part, _) = path.split_once('?').unwrap_or((path, ""));
+    let order_num = path_part
+        .strip_prefix("/api/tachibana/order/")
+        .filter(|s| !s.is_empty())
+        .ok_or(RouteError::BadRequest)?
+        .to_string();
+    let eig_day = query_param(path, "eig_day").unwrap_or_default();
+    Ok(ApiCommand::FetchTachibanaOrderDetail { order_num, eig_day })
+}
+
+/// `POST /api/tachibana/order/correct` のボディをパースして ApiCommand を返す。
+/// `second_password` は本文または `DEV_SECOND_PASSWORD` 環境変数から取得する。
+fn parse_tachibana_correct_order(body: &str) -> Result<ApiCommand, RouteError> {
+    let parsed: serde_json::Value =
+        serde_json::from_str(body).map_err(|_| RouteError::BadRequest)?;
+    let str_field = |key: &str| -> Result<String, RouteError> {
+        parsed
+            .get(key)
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .ok_or(RouteError::BadRequest)
+    };
+    let order_number = str_field("order_number")?;
+    let eig_day = str_field("eig_day")?;
+    let condition = parsed
+        .get("condition")
+        .and_then(|v| v.as_str())
+        .unwrap_or("*")
+        .to_string();
+    let price = parsed
+        .get("price")
+        .and_then(|v| v.as_str())
+        .unwrap_or("*")
+        .to_string();
+    let qty = parsed
+        .get("qty")
+        .and_then(|v| v.as_str())
+        .unwrap_or("*")
+        .to_string();
+    let expire_day = parsed
+        .get("expire_day")
+        .and_then(|v| v.as_str())
+        .unwrap_or("*")
+        .to_string();
+    let second_password = parsed
+        .get("second_password")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .or_else(|| std::env::var("DEV_SECOND_PASSWORD").ok())
+        .ok_or(RouteError::BadRequest)?;
+    let req = exchange::adapter::tachibana::CorrectOrderRequest {
+        order_number,
+        eig_day,
+        condition,
+        price,
+        qty,
+        expire_day,
+        second_password,
+    };
+    Ok(ApiCommand::TachibanaCorrectOrder { req: Box::new(req) })
+}
+
+/// `POST /api/tachibana/order/cancel` のボディをパースして ApiCommand を返す。
+/// `second_password` は本文または `DEV_SECOND_PASSWORD` 環境変数から取得する。
+fn parse_tachibana_cancel_order(body: &str) -> Result<ApiCommand, RouteError> {
+    let parsed: serde_json::Value =
+        serde_json::from_str(body).map_err(|_| RouteError::BadRequest)?;
+    let str_field = |key: &str| -> Result<String, RouteError> {
+        parsed
+            .get(key)
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .ok_or(RouteError::BadRequest)
+    };
+    let order_number = str_field("order_number")?;
+    let eig_day = str_field("eig_day")?;
+    let second_password = parsed
+        .get("second_password")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .or_else(|| std::env::var("DEV_SECOND_PASSWORD").ok())
+        .ok_or(RouteError::BadRequest)?;
+    let req = exchange::adapter::tachibana::CancelOrderRequest {
+        order_number,
+        eig_day,
+        second_password,
+    };
+    Ok(ApiCommand::TachibanaOrderCancel { req: Box::new(req) })
 }
 
 /// `POST /api/sidebar/select-ticker` のボディをパースして ApiCommand を返す。
@@ -1127,5 +1327,128 @@ mod tests {
     fn opt_str_field_invalid_json() {
         let r = body_opt_str_field("not json", "kind");
         assert!(matches!(r, Err(RouteError::BadRequest)));
+    }
+
+    // ── Phase 3: 注文管理 4 ルート RED テスト ──────────────────────────────────
+
+    /// GET /api/tachibana/orders → FetchTachibanaOrders { eig_day: "" }
+    #[test]
+    fn route_get_tachibana_orders_no_param() {
+        let cmd = route("GET", "/api/tachibana/orders", "").unwrap();
+        match cmd {
+            ApiCommand::FetchTachibanaOrders { eig_day } => {
+                assert_eq!(eig_day, "", "クエリなしは eig_day=空文字");
+            }
+            _ => panic!("Expected FetchTachibanaOrders, got {cmd:?}"),
+        }
+    }
+
+    /// GET /api/tachibana/orders?eig_day=20260417 → eig_day が取れる
+    #[test]
+    fn route_get_tachibana_orders_with_eig_day() {
+        let cmd = route("GET", "/api/tachibana/orders?eig_day=20260417", "").unwrap();
+        match cmd {
+            ApiCommand::FetchTachibanaOrders { eig_day } => {
+                assert_eq!(eig_day, "20260417");
+            }
+            _ => panic!("Expected FetchTachibanaOrders, got {cmd:?}"),
+        }
+    }
+
+    /// GET /api/tachibana/order/12345678 → FetchTachibanaOrderDetail
+    #[test]
+    fn route_get_tachibana_order_detail() {
+        let cmd = route("GET", "/api/tachibana/order/12345678", "").unwrap();
+        match cmd {
+            ApiCommand::FetchTachibanaOrderDetail { order_num, eig_day } => {
+                assert_eq!(order_num, "12345678");
+                assert_eq!(eig_day, "", "クエリなしは eig_day=空文字");
+            }
+            _ => panic!("Expected FetchTachibanaOrderDetail, got {cmd:?}"),
+        }
+    }
+
+    /// GET /api/tachibana/order/12345678?eig_day=20260417 → eig_day クエリパラメータ取得
+    #[test]
+    fn route_get_tachibana_order_detail_with_eig_day() {
+        let cmd = route("GET", "/api/tachibana/order/12345678?eig_day=20260417", "").unwrap();
+        match cmd {
+            ApiCommand::FetchTachibanaOrderDetail { order_num, eig_day } => {
+                assert_eq!(order_num, "12345678");
+                assert_eq!(eig_day, "20260417");
+            }
+            _ => panic!("Expected FetchTachibanaOrderDetail, got {cmd:?}"),
+        }
+    }
+
+    /// GET /api/tachibana/order/ (order_num 空) → BadRequest
+    #[test]
+    fn route_get_tachibana_order_detail_empty_order_num_bad_request() {
+        let result = route("GET", "/api/tachibana/order/", "");
+        assert!(matches!(result, Err(RouteError::BadRequest)));
+    }
+
+    /// POST /api/tachibana/order/correct → TachibanaCorrectOrder
+    #[test]
+    fn route_post_tachibana_order_correct_valid() {
+        let body = r#"{
+            "order_number": "12345678",
+            "eig_day": "20260417",
+            "condition": "*",
+            "price": "2600",
+            "qty": "*",
+            "expire_day": "*",
+            "second_password": "testpw"
+        }"#;
+        let cmd = route("POST", "/api/tachibana/order/correct", body).unwrap();
+        match cmd {
+            ApiCommand::TachibanaCorrectOrder { req } => {
+                assert_eq!(req.order_number, "12345678");
+                assert_eq!(req.price, "2600");
+                assert_eq!(req.qty, "*");
+            }
+            _ => panic!("Expected TachibanaCorrectOrder, got {cmd:?}"),
+        }
+    }
+
+    /// POST /api/tachibana/order/correct: 必須フィールド欠落 → BadRequest
+    #[test]
+    fn route_post_tachibana_order_correct_missing_field() {
+        let body = r#"{"price":"2600"}"#;
+        let result = route("POST", "/api/tachibana/order/correct", body);
+        assert!(matches!(result, Err(RouteError::BadRequest)));
+    }
+
+    /// POST /api/tachibana/order/cancel → TachibanaOrderCancel
+    #[test]
+    fn route_post_tachibana_order_cancel_valid() {
+        let body = r#"{
+            "order_number": "87654321",
+            "eig_day": "20260417",
+            "second_password": "testpw"
+        }"#;
+        let cmd = route("POST", "/api/tachibana/order/cancel", body).unwrap();
+        match cmd {
+            ApiCommand::TachibanaOrderCancel { req } => {
+                assert_eq!(req.order_number, "87654321");
+                assert_eq!(req.eig_day, "20260417");
+            }
+            _ => panic!("Expected TachibanaOrderCancel, got {cmd:?}"),
+        }
+    }
+
+    /// POST /api/tachibana/order/cancel: 必須フィールド欠落 → BadRequest
+    #[test]
+    fn route_post_tachibana_order_cancel_missing_order_number() {
+        let body = r#"{"eig_day":"20260417"}"#;
+        let result = route("POST", "/api/tachibana/order/cancel", body);
+        assert!(matches!(result, Err(RouteError::BadRequest)));
+    }
+
+    /// POST /api/tachibana/order/cancel: 不正 JSON → BadRequest
+    #[test]
+    fn route_post_tachibana_order_cancel_invalid_json() {
+        let result = route("POST", "/api/tachibana/order/cancel", "not json");
+        assert!(matches!(result, Err(RouteError::BadRequest)));
     }
 }

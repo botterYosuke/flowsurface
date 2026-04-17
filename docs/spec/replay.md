@@ -762,9 +762,10 @@ fn subscription(&self) -> Subscription<Message> {
 | コード | 意味 |
 |---|---|
 | 200 | 成功 |
-| 400 | Bad Request — 不正 JSON、必須フィールド欠落、不正 UUID、不正 axis |
+| 400 | Bad Request — 不正 JSON、必須フィールド欠落、不正 UUID、不正 axis、セッション未開始 |
 | 404 | Not Found — 未定義のパスまたは method |
 | 500 | Internal Server Error — アプリチャネル切断、応答タイムアウト |
+| 503 | Service Unavailable — リプレイセッションがロード中。リトライ可能 |
 
 ### 11.2 エンドポイント一覧
 
@@ -790,7 +791,7 @@ REPLAY モード専用。LIVE モード時は 400 を返す。
 | POST | `/api/replay/order` | `VirtualOrderRequest` (下記参照) | `{"order_id": "<uuid>", "status": "pending"}` |
 | GET | `/api/replay/portfolio` | — | `PortfolioSnapshot` (下記参照) |
 | GET | `/api/replay/orders` | — | `VirtualOrder[]` (下記参照) |
-| GET | `/api/replay/state` | — | `{"current_time_ms": <u64>, "not_implemented": true}` ※骨格のみ |
+| GET | `/api/replay/state` | — | `StateSnapshot`（下記参照）。セッション未開始: 400、ロード中: 503 |
 
 **`VirtualOrderRequest` リクエストボディ**:
 
@@ -979,6 +980,63 @@ pub struct ReplayStatus {
 | `status` | string \| object | `"Pending"` \| `"Cancelled"` \| `{"Filled": {"fill_price": <f64>, "fill_time_ms": <u64>}}` |
 
 > **注意**: リクエスト（`POST /api/replay/order`）の `side` は `"buy"`/`"sell"`（小文字）だが、レスポンスの `side` は内部 `PositionSide` enum のシリアライズ値（`"Long"`/`"Short"`）になる。
+
+#### `StateSnapshot` (`GET /api/replay/state`)
+
+`ReplaySession::Active` のときのみ 200 を返す。`Loading` 時は 503、`Idle` 時は 400。
+
+```json
+{
+  "current_time_ms": 1743492600000,
+  "klines": [
+    {
+      "stream": "BinanceLinear:BTCUSDT:1m",
+      "time":   1743492540000,
+      "open":   92100.0,
+      "high":   92800.0,
+      "low":    91900.0,
+      "close":  92500.0,
+      "volume": 1234.5
+    }
+  ],
+  "trades": [
+    {
+      "stream":  "BinanceLinear:BTCUSDT:Trades",
+      "time":    1743492580000,
+      "price":   92450.0,
+      "qty":     0.03,
+      "is_sell": false
+    }
+  ]
+}
+```
+
+| フィールド | 型 | 説明 |
+|---|---|---|
+| `current_time_ms` | `u64` | 現在の仮想時刻（Unix ms）|
+| `klines` | array | 直近 50 件の Kline エントリ（全 active stream 合計）|
+| `trades` | array | 直近 300 秒ウィンドウ内の Trade エントリ（最大 50 件）|
+
+**`klines` エントリ**:
+
+| フィールド | 型 | 説明 |
+|---|---|---|
+| `stream` | string | `"<Exchange>:<Ticker>:<Timeframe>"` 形式（例: `"BinanceLinear:BTCUSDT:1m"`）|
+| `time` | `u64` | バー開始時刻（Unix ms）|
+| `open` / `high` / `low` / `close` | `f64` | OHLC 価格 |
+| `volume` | `f64` | 出来高（f64 精度で返却）|
+
+**`trades` エントリ**:
+
+| フィールド | 型 | 説明 |
+|---|---|---|
+| `stream` | string | `"<Exchange>:<Ticker>:Trades"` 形式（例: `"BinanceLinear:BTCUSDT:Trades"`）|
+| `time` | `u64` | Trade 発生時刻（Unix ms）|
+| `price` | `f64` | 約定価格 |
+| `qty` | `f64` | 約定数量（f64 精度で返却）|
+| `is_sell` | bool | 売り方向の Trade なら `true` |
+
+> **取得件数と時間ウィンドウ**: kline は時刻降順で最大 50 件（`limit=50` 定数）。trade は `current_time - 300,000ms .. current_time` の半開区間で最大 50 件。複数 stream が active な場合は全 stream の klines/trades をフラットに結合して返す（stream ラベルで識別可能）。Binance 以外の取引所は trades が EventStore に未格納のため `"trades": []` となる。
 
 #### ペインリスト (`GET /api/pane/list`)
 

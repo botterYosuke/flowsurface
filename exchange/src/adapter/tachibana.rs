@@ -14,6 +14,26 @@
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+/// 立花証券 API は注文ゼロ時に配列フィールドを `[]` ではなく `""` で返すことがある。
+/// このデシリアライザは空文字列を空 Vec として扱い、通常の配列はそのままデシリアライズする。
+fn deserialize_tachibana_list<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::Array(_) => {
+            serde_json::from_value(value).map_err(serde::de::Error::custom)
+        }
+        serde_json::Value::String(s) if s.is_empty() => Ok(Vec::new()),
+        serde_json::Value::Null => Ok(Vec::new()),
+        other => Err(serde::de::Error::custom(format!(
+            "expected array or empty string, got {other}"
+        ))),
+    }
+}
+
 /// リクエスト通番カウンタ。全リクエストで共有し、インクリメントする。
 /// 初期値は起動時のUnix秒を使用し、セッション復元時に前回の値を常に超える。
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -27,6 +47,7 @@ pub fn next_p_no() -> String {
         .unwrap_or_default()
         .as_secs();
     // CAS: カウンタが 0（未初期化）の場合のみ epoch_secs で初期化。
+    // API 上限は 9999999999（10桁）。Unix 秒は ~1745174929 で上限内に収まる。
     // 複数スレッドが同時に呼んでも 1 つだけが成功し、残りは失敗して既存値を使う。
     let _ = REQUEST_COUNTER.compare_exchange(0, epoch_secs, Ordering::Relaxed, Ordering::Relaxed);
     let val = REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -597,7 +618,7 @@ use std::sync::{Arc, RwLock};
 
 /// 全マスタダウンロードの各レコードをパースするための汎用型。
 /// sCLMID でレコード種別を判定し、CLMIssueMstKabu のみ抽出する。
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct MasterRecord {
     #[serde(rename = "sCLMID", default)]
     pub clm_id: String,
@@ -721,7 +742,6 @@ pub async fn fetch_all_master(
     let url = build_api_url_from(&session.url_master, &req)?;
 
     log::debug!("Tachibana master download URL: {url}");
-
     let resp = client.get(&url).send().await?;
     let mut stream = resp.bytes_stream();
 
@@ -823,13 +843,27 @@ pub async fn fetch_all_master(
 static ISSUE_MASTER_CACHE: RwLock<Option<Arc<Vec<MasterRecord>>>> = RwLock::new(None);
 
 /// ログイン成功時に呼び出し、銘柄マスタをキャッシュに格納する。
+/// ダウンロード完了後に `cache_path` が指定されていればディスクへも保存する。
 pub async fn init_issue_master(
     client: &reqwest::Client,
     session: &TachibanaSession,
+    cache_path: Option<&std::path::Path>,
 ) -> Result<(), TachibanaError> {
     let records = fetch_all_master(client, session).await?;
     if let Ok(mut guard) = ISSUE_MASTER_CACHE.write() {
-        *guard = Some(Arc::new(records));
+        *guard = Some(Arc::new(records.clone()));
+    }
+    if let Some(path) = cache_path
+        && let Ok(json) = serde_json::to_string(&records)
+    {
+        if let Err(e) = std::fs::write(path, json) {
+            log::warn!("Failed to write Tachibana master disk cache: {e}");
+        } else {
+            log::info!(
+                "Tachibana master cache saved to disk ({} records)",
+                records.len()
+            );
+        }
     }
     Ok(())
 }
@@ -839,13 +873,45 @@ pub async fn get_cached_issue_master() -> Option<Arc<Vec<MasterRecord>>> {
     ISSUE_MASTER_CACHE.read().ok()?.clone()
 }
 
+/// `cache_path` からディスクキャッシュを読み込み、メモリキャッシュと metadata HashMap を返す。
+/// 起動時に呼び出すことで、ネットワークダウンロード前に即座に metadata を提供できる。
+pub fn load_master_from_disk(
+    cache_path: &std::path::Path,
+) -> Option<HashMap<Ticker, Option<TickerInfo>>> {
+    let json = std::fs::read_to_string(cache_path)
+        .map_err(|e| log::debug!("Tachibana master disk cache not found: {e}"))
+        .ok()?;
+    let records: Vec<MasterRecord> = serde_json::from_str(&json)
+        .map_err(|e| log::warn!("Tachibana master disk cache parse error: {e}"))
+        .ok()?;
+    if records.is_empty() {
+        return None;
+    }
+    log::info!(
+        "Tachibana master loaded from disk cache ({} records)",
+        records.len()
+    );
+    if let Ok(mut guard) = ISSUE_MASTER_CACHE.write() {
+        *guard = Some(Arc::new(records.clone()));
+    }
+    let mut out = HashMap::new();
+    for record in records.iter() {
+        if let Some((ticker, info)) = master_record_to_ticker_info(record) {
+            let ticker_no_display = Ticker::new(&record.issue_code, Exchange::Tachibana);
+            out.entry(ticker_no_display).or_insert(Some(info));
+            out.insert(ticker, Some(info));
+        }
+    }
+    Some(out)
+}
+
 /// バックグラウンドで銘柄マスタをダウンロードしキャッシュに格納する。
 /// ログイン成功後に呼び出す。tokio::spawn でタスクを起動するため、
 /// 呼び出し元は完了を待つ必要がない。
 pub fn spawn_init_issue_master(session: TachibanaSession) {
     tokio::spawn(async move {
         let client = reqwest::Client::new();
-        if let Err(e) = init_issue_master(&client, &session).await {
+        if let Err(e) = init_issue_master(&client, &session, None).await {
             log::error!("Tachibana master download failed: {e}");
         }
     });
@@ -1388,7 +1454,11 @@ pub struct OrderListRequest {
 /// CLMOrderList 注文一覧レスポンス。
 #[derive(Debug, Deserialize)]
 pub struct OrderListResponse {
-    #[serde(rename = "aOrderList", default)]
+    #[serde(
+        rename = "aOrderList",
+        deserialize_with = "deserialize_tachibana_list",
+        default
+    )]
     pub orders: Vec<OrderRecord>,
 }
 
@@ -1441,7 +1511,11 @@ pub struct OrderDetailRequest {
 /// CLMOrderListDetail 約定明細レスポンス。
 #[derive(Debug, Deserialize)]
 pub struct OrderDetailResponse {
-    #[serde(rename = "aYakuzyouSikkouList", default)]
+    #[serde(
+        rename = "aYakuzyouSikkouList",
+        deserialize_with = "deserialize_tachibana_list",
+        default
+    )]
     pub executions: Vec<ExecutionRecord>,
 }
 
@@ -1530,6 +1604,20 @@ pub fn serialize_order_request<T: Serialize>(
             "sJsonOfmt".to_string(),
             serde_json::Value::String("5".to_string()),
         );
+        // 新規注文時: 逆指値・建日種類関連フィールドのデフォルト（通常現物=なし）を付与
+        // 公式サンプル e_api_order_genbutsu_buy_tel.py の request 電文例より
+        if clm_id == "CLMKabuNewOrder" {
+            obj.entry("sGyakusasiOrderType")
+                .or_insert(serde_json::Value::String("0".to_string()));
+            obj.entry("sGyakusasiZyouken")
+                .or_insert(serde_json::Value::String("0".to_string()));
+            obj.entry("sGyakusasiPrice")
+                .or_insert(serde_json::Value::String("*".to_string()));
+            obj.entry("sTatebiType")
+                .or_insert(serde_json::Value::String("*".to_string()));
+            obj.entry("sTategyokuZyoutoekiKazeiC")
+                .or_insert(serde_json::Value::String("*".to_string()));
+        }
     }
     Ok(serde_json::to_string(&value)?)
 }
@@ -3824,6 +3912,355 @@ mod tests {
         assert!(
             json.contains("p_sd_date"),
             "p_sd_date が付与されるべき: {json}"
+        );
+    }
+
+    // ── Phase 1: serialize_order_request デフォルトフィールド検証 ───────────────
+
+    /// CLMKabuNewOrder では逆指値・建日種類の5フィールドがデフォルト付与される
+    #[test]
+    fn serialize_order_request_new_order_adds_new_order_default_fields() {
+        let req = NewOrderRequest {
+            account_type: "1".to_string(),
+            issue_code: "7203".to_string(),
+            market_code: "00".to_string(),
+            side: "3".to_string(),
+            condition: "0".to_string(),
+            price: "0".to_string(),
+            qty: "100".to_string(),
+            cash_margin: "0".to_string(),
+            expire_day: "0".to_string(),
+            second_password: "pw".to_string(),
+        };
+        let json = serialize_order_request(&req, "CLMKabuNewOrder").unwrap();
+        assert!(
+            json.contains(r#""sGyakusasiOrderType":"0""#),
+            "sGyakusasiOrderType=0 が必要: {json}"
+        );
+        assert!(
+            json.contains(r#""sGyakusasiZyouken":"0""#),
+            "sGyakusasiZyouken=0 が必要: {json}"
+        );
+        assert!(
+            json.contains(r#""sGyakusasiPrice":"*""#),
+            "sGyakusasiPrice=* が必要: {json}"
+        );
+        assert!(
+            json.contains(r#""sTatebiType":"*""#),
+            "sTatebiType=* が必要: {json}"
+        );
+        assert!(
+            json.contains(r#""sTategyokuZyoutoekiKazeiC":"*""#),
+            "sTategyokuZyoutoekiKazeiC=* が必要: {json}"
+        );
+    }
+
+    /// CLMKabuNewOrder 以外では逆指値・建日種類のデフォルトフィールドは付与されない
+    #[test]
+    fn serialize_order_request_non_new_order_omits_new_order_default_fields() {
+        let req = CancelOrderRequest {
+            order_number: "11223344".to_string(),
+            eig_day: "20260416".to_string(),
+            second_password: "pw".to_string(),
+        };
+        let json = serialize_order_request(&req, "CLMKabuCancelOrder").unwrap();
+        assert!(
+            !json.contains("sGyakusasiOrderType"),
+            "CancelOrder に sGyakusasiOrderType は不要: {json}"
+        );
+        assert!(
+            !json.contains("sTatebiType"),
+            "CancelOrder に sTatebiType は不要: {json}"
+        );
+        assert!(
+            !json.contains("sTategyokuZyoutoekiKazeiC"),
+            "CancelOrder に sTategyokuZyoutoekiKazeiC は不要: {json}"
+        );
+    }
+
+    /// 信用新規買い（制度6M）のフィールドが正しくシリアライズされる
+    #[test]
+    fn new_order_request_credit_new_buy_serializes_cash_margin() {
+        let req = NewOrderRequest {
+            account_type: "1".to_string(),
+            issue_code: "7203".to_string(),
+            market_code: "00".to_string(),
+            side: "3".to_string(),
+            condition: "0".to_string(),
+            price: "0".to_string(),
+            qty: "100".to_string(),
+            cash_margin: "2".to_string(),
+            expire_day: "0".to_string(),
+            second_password: "pw".to_string(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(
+            json.contains(r#""sGenkinShinyouKubun":"2""#),
+            "信用新規(制度6M) の sGenkinShinyouKubun=2 が必要: {json}"
+        );
+    }
+
+    /// 信用返済（制度）のフィールドが正しくシリアライズされる
+    #[test]
+    fn new_order_request_credit_close_buy_serializes_cash_margin() {
+        let req = NewOrderRequest {
+            account_type: "1".to_string(),
+            issue_code: "7203".to_string(),
+            market_code: "00".to_string(),
+            side: "3".to_string(),
+            condition: "0".to_string(),
+            price: "0".to_string(),
+            qty: "100".to_string(),
+            cash_margin: "4".to_string(),
+            expire_day: "0".to_string(),
+            second_password: "pw".to_string(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(
+            json.contains(r#""sGenkinShinyouKubun":"4""#),
+            "信用返済(制度) の sGenkinShinyouKubun=4 が必要: {json}"
+        );
+    }
+
+    /// NISA 口座の発注で sZyoutoekiKazeiC=5 がシリアライズされる
+    #[test]
+    fn new_order_request_nisa_account_serializes_account_type() {
+        let req = NewOrderRequest {
+            account_type: "5".to_string(),
+            issue_code: "7203".to_string(),
+            market_code: "00".to_string(),
+            side: "3".to_string(),
+            condition: "0".to_string(),
+            price: "0".to_string(),
+            qty: "100".to_string(),
+            cash_margin: "0".to_string(),
+            expire_day: "0".to_string(),
+            second_password: "pw".to_string(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(
+            json.contains(r#""sZyoutoekiKazeiC":"5""#),
+            "NISA 口座の sZyoutoekiKazeiC=5 が必要: {json}"
+        );
+    }
+
+    /// 成行売り注文で sBaibaiKubun=1 がシリアライズされる
+    #[test]
+    fn new_order_request_market_sell_serializes_side() {
+        let req = NewOrderRequest {
+            account_type: "1".to_string(),
+            issue_code: "7203".to_string(),
+            market_code: "00".to_string(),
+            side: "1".to_string(),
+            condition: "0".to_string(),
+            price: "0".to_string(),
+            qty: "100".to_string(),
+            cash_margin: "0".to_string(),
+            expire_day: "0".to_string(),
+            second_password: "pw".to_string(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(
+            json.contains(r#""sBaibaiKubun":"1""#),
+            "成行売り sBaibaiKubun=1 が必要: {json}"
+        );
+        assert!(
+            json.contains(r#""sOrderPrice":"0""#),
+            "成行の sOrderPrice=0 が必要: {json}"
+        );
+    }
+
+    /// 指値買い注文で sOrderPrice に値段が入る
+    #[test]
+    fn new_order_request_limit_buy_serializes_price_and_side() {
+        let req = NewOrderRequest {
+            account_type: "1".to_string(),
+            issue_code: "7203".to_string(),
+            market_code: "00".to_string(),
+            side: "3".to_string(),
+            condition: "0".to_string(),
+            price: "2500".to_string(),
+            qty: "100".to_string(),
+            cash_margin: "0".to_string(),
+            expire_day: "0".to_string(),
+            second_password: "pw".to_string(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(
+            json.contains(r#""sOrderPrice":"2500""#),
+            "指値買い sOrderPrice=2500 が必要: {json}"
+        );
+        assert!(
+            json.contains(r#""sBaibaiKubun":"3""#),
+            "買い sBaibaiKubun=3 が必要: {json}"
+        );
+    }
+
+    /// serialize_order_request が CLMKabuCorrectOrder には新規注文デフォルトを付与しない
+    #[test]
+    fn serialize_order_request_correct_order_omits_new_order_defaults() {
+        let req = CorrectOrderRequest {
+            order_number: "12345678".to_string(),
+            eig_day: "20260416".to_string(),
+            condition: "*".to_string(),
+            price: "2600".to_string(),
+            qty: "*".to_string(),
+            expire_day: "*".to_string(),
+            second_password: "pw".to_string(),
+        };
+        let json = serialize_order_request(&req, "CLMKabuCorrectOrder").unwrap();
+        assert!(
+            !json.contains("sGyakusasiOrderType"),
+            "CorrectOrder に sGyakusasiOrderType は不要: {json}"
+        );
+        assert!(
+            !json.contains("sTatebiType"),
+            "CorrectOrder に sTatebiType は不要: {json}"
+        );
+    }
+
+    // ── Phase 4: エラー系 ──────────────────────────────────────────────────────
+
+    fn test_session(url: &str) -> TachibanaSession {
+        TachibanaSession {
+            url_request: format!("{url}/"),
+            url_master: format!("{url}/"),
+            url_price: format!("{url}/"),
+            url_event: format!("{url}/"),
+            url_event_ws: format!("{url}/ws"),
+        }
+    }
+
+    /// Phase 4-2: 発注パスワード誤りのとき ApiError が返る（sResultCode 非ゼロ）
+    #[tokio::test]
+    async fn submit_new_order_returns_error_on_wrong_password_response() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("POST", mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                    "p_errno": "0",
+                    "p_err": "",
+                    "sResultCode": "91001",
+                    "sResultText": "発注パスワードが誤っています"
+                }"#,
+            )
+            .create_async()
+            .await;
+
+        let client = reqwest::Client::new();
+        let session = test_session(&server.url());
+        let req = NewOrderRequest {
+            account_type: "1".to_string(),
+            issue_code: "7203".to_string(),
+            market_code: "00".to_string(),
+            side: "3".to_string(),
+            condition: "0".to_string(),
+            price: "0".to_string(),
+            qty: "100".to_string(),
+            cash_margin: "0".to_string(),
+            expire_day: "0".to_string(),
+            second_password: "wrongpassword".to_string(),
+        };
+        let result = submit_new_order(&client, &session, &req).await;
+        assert!(
+            matches!(result, Err(TachibanaError::ApiError { ref code, .. }) if code == "91001"),
+            "発注パスワード誤り: ApiError が返るべき: {:?}",
+            result
+        );
+        let err_str = result.unwrap_err().to_string();
+        assert!(
+            err_str.contains("code="),
+            "エラー文字列に code= が含まれるべき（E2E スクリプトが解析できる形式）: {err_str}"
+        );
+    }
+
+    /// Phase 4-3: 市場時間外エラーのとき ApiError が返る（sResultCode 非ゼロ）
+    #[tokio::test]
+    async fn submit_new_order_returns_error_on_market_closed_response() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("POST", mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                    "p_errno": "0",
+                    "p_err": "",
+                    "sResultCode": "-62",
+                    "sResultText": "稼働時間外です"
+                }"#,
+            )
+            .create_async()
+            .await;
+
+        let client = reqwest::Client::new();
+        let session = test_session(&server.url());
+        let req = NewOrderRequest {
+            account_type: "1".to_string(),
+            issue_code: "7203".to_string(),
+            market_code: "00".to_string(),
+            side: "3".to_string(),
+            condition: "0".to_string(),
+            price: "0".to_string(),
+            qty: "100".to_string(),
+            cash_margin: "0".to_string(),
+            expire_day: "0".to_string(),
+            second_password: "pass".to_string(),
+        };
+        let result = submit_new_order(&client, &session, &req).await;
+        assert!(
+            matches!(result, Err(TachibanaError::ApiError { ref code, .. }) if code == "-62"),
+            "市場時間外: ApiError(-62) が返るべき: {:?}",
+            result
+        );
+    }
+
+    /// Phase 4-4: 存在しない銘柄コードのとき ApiError が返る（sResultCode 非ゼロ）
+    #[tokio::test]
+    async fn submit_new_order_returns_error_on_invalid_issue_code_response() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("POST", mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                    "p_errno": "0",
+                    "p_err": "",
+                    "sResultCode": "11001",
+                    "sResultText": "銘柄コードが不正です"
+                }"#,
+            )
+            .create_async()
+            .await;
+
+        let client = reqwest::Client::new();
+        let session = test_session(&server.url());
+        let req = NewOrderRequest {
+            account_type: "1".to_string(),
+            issue_code: "0000".to_string(),
+            market_code: "00".to_string(),
+            side: "3".to_string(),
+            condition: "0".to_string(),
+            price: "0".to_string(),
+            qty: "100".to_string(),
+            cash_margin: "0".to_string(),
+            expire_day: "0".to_string(),
+            second_password: "pass".to_string(),
+        };
+        let result = submit_new_order(&client, &session, &req).await;
+        assert!(
+            result.is_err(),
+            "存在しない銘柄コード: エラーが返るべき: {:?}",
+            result
+        );
+        let err_str = result.unwrap_err().to_string();
+        assert!(
+            err_str.contains("code="),
+            "エラー文字列に code= が含まれるべき（E2E スクリプトが解析できる形式）: {err_str}"
         );
     }
 }

@@ -207,6 +207,32 @@ enum Message {
     AudioStream(modal::audio::Message),
     LoginCompleted(Result<exchange::adapter::tachibana::TachibanaSession, String>),
     SessionRestoreResult(Option<exchange::adapter::tachibana::TachibanaSession>),
+    BuyingPowerApiResult {
+        reply: replay_api::ReplySender,
+        result: Result<
+            (
+                exchange::adapter::tachibana::BuyingPowerResponse,
+                exchange::adapter::tachibana::MarginPowerResponse,
+            ),
+            String,
+        >,
+    },
+    TachibanaOrderApiResult {
+        reply: replay_api::ReplySender,
+        result: Result<exchange::adapter::tachibana::NewOrderResponse, String>,
+    },
+    FetchOrdersApiResult {
+        reply: replay_api::ReplySender,
+        result: Result<Vec<exchange::adapter::tachibana::OrderRecord>, String>,
+    },
+    FetchOrderDetailApiResult {
+        reply: replay_api::ReplySender,
+        result: Result<Vec<exchange::adapter::tachibana::ExecutionRecord>, String>,
+    },
+    ModifyOrderApiResult {
+        reply: replay_api::ReplySender,
+        result: Result<exchange::adapter::tachibana::ModifyOrderResponse, String>,
+    },
     Replay(ReplayMessage),
     ReplayApi(replay_api::ApiMessage),
 }
@@ -312,7 +338,8 @@ impl Flowsurface {
                         connector::auth::persist_session(&session);
                         let dashboard_task = self.transition_to_dashboard();
                         let master_task = Self::start_master_download(session);
-                        return Task::batch([dashboard_task, master_task]);
+                        let disk_cache_task = Self::make_disk_cache_task();
+                        return Task::batch([dashboard_task, disk_cache_task, master_task]);
                     }
                     Err(error_msg) => {
                         log::warn!("Login failed: {error_msg}");
@@ -327,7 +354,9 @@ impl Flowsurface {
                     connector::auth::store_session(session.clone());
                     let dashboard_task = self.transition_to_dashboard();
                     let master_task = Self::start_master_download(session);
-                    return Task::batch([dashboard_task, master_task]);
+                    // ディスクキャッシュが存在する場合、ダウンロード完了前に即座に metadata を供給する
+                    let disk_cache_task = Self::make_disk_cache_task();
+                    return Task::batch([dashboard_task, disk_cache_task, master_task]);
                 }
                 // 再ログイン失敗 → ログイン画面を表示（e2e-mock ではスキップ）
                 let main_window_id = self.main_window.id;
@@ -362,6 +391,91 @@ impl Flowsurface {
                 }
                 #[cfg(not(debug_assertions))]
                 return open_login_window.discard();
+            }
+            Message::BuyingPowerApiResult { reply, result } => {
+                let body = match result {
+                    Ok((cash, margin)) => serde_json::json!({
+                        "cash_buying_power": cash.cash_buying_power,
+                        "nisa_growth_buying_power": cash.nisa_growth_buying_power,
+                        "shortage_flag": cash.shortage_flag,
+                        "margin_new_order_power": margin.margin_new_order_power,
+                        "maintenance_margin_rate": margin.maintenance_margin_rate,
+                        "margin_call_flag": margin.margin_call_flag,
+                    })
+                    .to_string(),
+                    Err(e) => serde_json::json!({ "error": e }).to_string(),
+                };
+                reply.send(body);
+            }
+            Message::TachibanaOrderApiResult { reply, result } => {
+                let body = match result {
+                    Ok(resp) => serde_json::json!({
+                        "order_number": resp.order_number,
+                        "eig_day": resp.eig_day,
+                        "delivery_amount": resp.delivery_amount,
+                        "commission": resp.commission,
+                        "consumption_tax": resp.consumption_tax,
+                        "order_datetime": resp.order_datetime,
+                        "warning_code": resp.warning_code,
+                        "warning_text": resp.warning_text,
+                    })
+                    .to_string(),
+                    Err(e) => serde_json::json!({ "error": e }).to_string(),
+                };
+                reply.send(body);
+            }
+            Message::FetchOrdersApiResult { reply, result } => {
+                let body = match result {
+                    Ok(orders) => serde_json::to_string(&serde_json::json!({ "orders": orders
+                        .iter()
+                        .map(|o| serde_json::json!({
+                            "order_num": o.order_num,
+                            "issue_code": o.issue_code,
+                            "order_qty": o.order_qty,
+                            "current_qty": o.current_qty,
+                            "order_price": o.order_price,
+                            "order_datetime": o.order_datetime,
+                            "status_text": o.status_text,
+                            "executed_qty": o.executed_qty,
+                            "executed_price": o.executed_price,
+                            "eig_day": o.eig_day,
+                        }))
+                        .collect::<Vec<_>>()
+                    }))
+                    .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string()),
+                    Err(e) => serde_json::json!({ "error": e }).to_string(),
+                };
+                reply.send(body);
+            }
+            Message::FetchOrderDetailApiResult { reply, result } => {
+                let body = match result {
+                    Ok(executions) => {
+                        serde_json::to_string(&serde_json::json!({ "executions": executions
+                            .iter()
+                            .map(|e| serde_json::json!({
+                                "exec_qty": e.exec_qty,
+                                "exec_price": e.exec_price,
+                                "exec_datetime": e.exec_datetime,
+                            }))
+                            .collect::<Vec<_>>()
+                        }))
+                        .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string())
+                    }
+                    Err(e) => serde_json::json!({ "error": e }).to_string(),
+                };
+                reply.send(body);
+            }
+            Message::ModifyOrderApiResult { reply, result } => {
+                let body = match result {
+                    Ok(resp) => serde_json::json!({
+                        "order_number": resp.order_number,
+                        "eig_day": resp.eig_day,
+                        "order_datetime": resp.order_datetime,
+                    })
+                    .to_string(),
+                    Err(e) => serde_json::json!({ "error": e }).to_string(),
+                };
+                reply.send(body);
             }
             Message::MarketWsEvent(event) => {
                 let main_window_id = self.main_window.id;
@@ -1025,13 +1139,15 @@ impl Flowsurface {
                     None => {}
                 }
 
-                if is_metadata_update && self.replay.is_auto_play_pending() {
+                if is_metadata_update {
                     let main_window_id = self.main_window.id;
                     self.active_dashboard_mut()
                         .refresh_waiting_panes(main_window_id);
-                    log::info!(
-                        "[auto-play] metadata updated — refreshed waiting panes for stream resolution"
-                    );
+                    if self.replay.is_auto_play_pending() {
+                        log::info!(
+                            "[auto-play] metadata updated — refreshed waiting panes for stream resolution"
+                        );
+                    }
                 }
 
                 return task.map(Message::Sidebar);
@@ -1239,6 +1355,60 @@ impl Flowsurface {
                         let body = self.handle_auth_api(cmd);
                         reply_tx.send(body);
                     }
+                    ApiCommand::FetchBuyingPower => {
+                        return Task::perform(
+                            connector::order::fetch_buying_power(),
+                            move |result| Message::BuyingPowerApiResult {
+                                reply: reply_tx,
+                                result,
+                            },
+                        );
+                    }
+                    ApiCommand::TachibanaNewOrder { req } => {
+                        return Task::perform(
+                            connector::order::submit_new_order(*req),
+                            move |result| Message::TachibanaOrderApiResult {
+                                reply: reply_tx,
+                                result,
+                            },
+                        );
+                    }
+                    ApiCommand::FetchTachibanaOrders { eig_day } => {
+                        return Task::perform(
+                            connector::order::fetch_orders(eig_day),
+                            move |result| Message::FetchOrdersApiResult {
+                                reply: reply_tx,
+                                result,
+                            },
+                        );
+                    }
+                    ApiCommand::FetchTachibanaOrderDetail { order_num, eig_day } => {
+                        return Task::perform(
+                            connector::order::fetch_order_detail(order_num, eig_day),
+                            move |result| Message::FetchOrderDetailApiResult {
+                                reply: reply_tx,
+                                result,
+                            },
+                        );
+                    }
+                    ApiCommand::TachibanaCorrectOrder { req } => {
+                        return Task::perform(
+                            connector::order::submit_correct_order(*req),
+                            move |result| Message::ModifyOrderApiResult {
+                                reply: reply_tx,
+                                result,
+                            },
+                        );
+                    }
+                    ApiCommand::TachibanaOrderCancel { req } => {
+                        return Task::perform(
+                            connector::order::submit_cancel_order(*req),
+                            move |result| Message::ModifyOrderApiResult {
+                                reply: reply_tx,
+                                result,
+                            },
+                        );
+                    }
                     ApiCommand::VirtualExchange(cmd) => {
                         use replay::virtual_exchange::{
                             PositionSide, VirtualOrder, VirtualOrderStatus, VirtualOrderType,
@@ -1319,7 +1489,7 @@ impl Flowsurface {
                                                 high: k.high.to_f64(),
                                                 low: k.low.to_f64(),
                                                 close: k.close.to_f64(),
-                                                volume: k.volume.total().to_f32_lossy() as f64,
+                                                volume: k.volume.total().to_f64(),
                                             })
                                         })
                                         .collect();
@@ -1331,7 +1501,7 @@ impl Flowsurface {
                                                 stream: stream.clone(),
                                                 time: t.time,
                                                 price: t.price.to_f64(),
-                                                qty: t.qty.to_f32_lossy() as f64,
+                                                qty: t.qty.to_f64(),
                                                 is_sell: t.is_sell,
                                             })
                                         })
@@ -1343,6 +1513,12 @@ impl Flowsurface {
                                             "trades": trades,
                                         })
                                         .to_string(),
+                                    );
+                                } else if self.replay.is_loading() {
+                                    reply_tx.send_status(
+                                        503,
+                                        r#"{"error":"replay is loading, try again shortly"}"#
+                                            .to_string(),
                                     );
                                 } else {
                                     reply_tx.send_status(
@@ -2421,15 +2597,45 @@ impl Flowsurface {
 
         self.main_window = window::Window::new(main_window_id);
 
-        let active_layout_id = self.layout_manager.active_layout_id().unwrap_or(
-            &self
-                .layout_manager
-                .layouts
-                .first()
-                .expect("No layouts available")
-                .id,
-        );
-        let load_layout = self.load_layout(active_layout_id.unique, main_window_id);
+        let active_layout_uid = self
+            .layout_manager
+            .active_layout_id()
+            .map(|id| id.unique)
+            .unwrap_or_else(|| {
+                self.layout_manager
+                    .layouts
+                    .first()
+                    .expect("No layouts available")
+                    .id
+                    .unique
+            });
+        let initial_buying_power = self
+            .layout_manager
+            .get(active_layout_uid)
+            .map(|layout| {
+                layout
+                    .dashboard
+                    .initial_buying_power_fetch(main_window_id)
+                    .map(|msg| Message::Dashboard {
+                        layout_id: None,
+                        event: msg,
+                    })
+            })
+            .unwrap_or_else(Task::none);
+        let initial_order_list = self
+            .layout_manager
+            .get(active_layout_uid)
+            .map(|layout| {
+                layout
+                    .dashboard
+                    .initial_order_list_fetch(main_window_id)
+                    .map(|msg| Message::Dashboard {
+                        layout_id: None,
+                        event: msg,
+                    })
+            })
+            .unwrap_or_else(Task::none);
+        let load_layout = self.load_layout(active_layout_uid, main_window_id);
 
         let close_login = login_win
             .map(window::close::<Message>)
@@ -2439,9 +2645,12 @@ impl Flowsurface {
             .chain(open_main.discard())
             .chain(iced::window::maximize(main_window_id, true))
             .chain(load_layout)
+            .chain(initial_buying_power)
+            .chain(initial_order_list)
     }
 
     /// 銘柄マスタをバックグラウンドでダウンロードし、完了後に TickersTable へ反映する。
+    /// ネットワークエラー時は最大3回・30秒間隔でリトライする。
     fn start_master_download(
         session: exchange::adapter::tachibana::TachibanaSession,
     ) -> Task<Message> {
@@ -2449,9 +2658,36 @@ impl Flowsurface {
 
         Task::perform(
             async move {
+                let cache_path = data::data_path(Some("market_data/tachibana_master_cache.json"));
                 let client = reqwest::Client::new();
-                exchange::adapter::tachibana::init_issue_master(&client, &session).await?;
-                Ok(exchange::adapter::tachibana::cached_ticker_metadata().await)
+                const MAX_RETRIES: u32 = 3;
+                let mut last_err = None;
+                for attempt in 0..MAX_RETRIES {
+                    if attempt > 0 {
+                        log::info!(
+                            "Tachibana master download retry {attempt}/{} (previous: {:?})",
+                            MAX_RETRIES - 1,
+                            last_err
+                        );
+                        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    }
+                    match exchange::adapter::tachibana::init_issue_master(
+                        &client,
+                        &session,
+                        Some(&cache_path),
+                    )
+                    .await
+                    {
+                        Ok(()) => {
+                            return Ok(exchange::adapter::tachibana::cached_ticker_metadata().await);
+                        }
+                        Err(e) => {
+                            log::warn!("Tachibana master download attempt {attempt} failed: {e}");
+                            last_err = Some(e);
+                        }
+                    }
+                }
+                Err(last_err.unwrap())
             },
             |result: Result<_, exchange::adapter::tachibana::TachibanaError>| {
                 let venue = Venue::Tachibana;
@@ -2460,7 +2696,7 @@ impl Flowsurface {
                         dashboard::tickers_table::Message::UpdateMetadata(venue, metadata),
                     )),
                     Err(e) => {
-                        log::error!("Tachibana master download failed: {e}");
+                        log::error!("Tachibana master download failed after retries: {e}");
                         Message::Sidebar(dashboard::sidebar::Message::TickersTable(
                             dashboard::tickers_table::Message::MetadataFetchFailed(
                                 venue,
@@ -2471,6 +2707,23 @@ impl Flowsurface {
                 }
             },
         )
+    }
+
+    /// ディスクキャッシュから銘柄マスタを読み込み、TickersTable へ即座に反映する Task を返す。
+    /// キャッシュが存在しない場合は `Task::none()` を返す。
+    fn make_disk_cache_task() -> Task<Message> {
+        let path = data::data_path(Some("market_data/tachibana_master_cache.json"));
+        match exchange::adapter::tachibana::load_master_from_disk(&path) {
+            Some(metadata) => {
+                Task::done(Message::Sidebar(dashboard::sidebar::Message::TickersTable(
+                    dashboard::tickers_table::Message::UpdateMetadata(
+                        exchange::adapter::Venue::Tachibana,
+                        metadata,
+                    ),
+                )))
+            }
+            None => Task::none(),
+        }
     }
 
     fn load_layout(&mut self, layout_uid: uuid::Uuid, main_window: window::Id) -> Task<Message> {

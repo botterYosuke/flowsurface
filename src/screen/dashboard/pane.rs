@@ -679,6 +679,34 @@ impl State {
             top_left_buttons = top_left_buttons.push(tickers_list_btn);
         }
 
+        match &self.content {
+            Content::OrderEntry(_) => {
+                top_left_buttons = top_left_buttons.push(
+                    text("注文入力")
+                        .size(13)
+                        .align_y(Alignment::Center)
+                        .line_height(1.4),
+                );
+            }
+            Content::OrderList(_) => {
+                top_left_buttons = top_left_buttons.push(
+                    text("注文一覧")
+                        .size(13)
+                        .align_y(Alignment::Center)
+                        .line_height(1.4),
+                );
+            }
+            Content::BuyingPower(_) => {
+                top_left_buttons = top_left_buttons.push(
+                    text("買付余力")
+                        .size(13)
+                        .align_y(Alignment::Center)
+                        .line_height(1.4),
+                );
+            }
+            _ => {}
+        }
+
         let modifier: Option<modal::stream::Modifier> = self.modal.clone().and_then(|m| {
             if let Modal::StreamModifier(modifier) = m {
                 Some(modifier)
@@ -1294,6 +1322,10 @@ impl State {
                     if let Some(effect) = self.show_modal_with_focus(modal) {
                         return Some(effect);
                     }
+                }
+
+                if kind == ContentKind::BuyingPower {
+                    return Some(Effect::FetchBuyingPower);
                 }
             }
             Event::ChartInteraction(msg) => match &mut self.content {
@@ -2751,7 +2783,10 @@ mod tests {
     fn content_selected_buying_power_does_not_open_ticker_modal() {
         let mut state = State::new();
         let effect = state.update(Event::ContentSelected(ContentKind::BuyingPower));
-        assert!(effect.is_none());
+        assert!(
+            matches!(effect, Some(Effect::FetchBuyingPower)),
+            "BuyingPower selection should return FetchBuyingPower effect"
+        );
         assert!(state.modal.is_none());
     }
 
