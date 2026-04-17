@@ -1655,10 +1655,7 @@ impl Flowsurface {
         }
     }
 
-    fn handle_pane_api(
-        &mut self,
-        cmd: replay_api::PaneCommand,
-    ) -> (u16, String, Task<Message>) {
+    fn handle_pane_api(&mut self, cmd: replay_api::PaneCommand) -> (u16, String, Task<Message>) {
         use replay_api::PaneCommand;
 
         match cmd {
@@ -2237,7 +2234,11 @@ impl Flowsurface {
             Some(s) => match Self::parse_content_kind(s) {
                 Some(k) => Some(k),
                 None => {
-                    return (400, format!(r#"{{"error":"invalid kind: {s}"}}"#), Task::none());
+                    return (
+                        400,
+                        format!(r#"{{"error":"invalid kind: {s}"}}"#),
+                        Task::none(),
+                    );
                 }
             },
             None => None,

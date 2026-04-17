@@ -112,7 +112,7 @@ loader::load_klines()  → 新銘柄データをフェッチ
 
 ## 実装ファイル
 
-- テストスクリプト: `tests/e2e_scripts/s32_toyota_candlestick_add.sh`
+- テストスクリプト: `tests/s32_toyota_candlestick_add.sh`
 
 ---
 
@@ -133,5 +133,5 @@ loader::load_klines()  → 新銘柄データをフェッチ
 ## 進捗
 
 - ✅ 計画書作成
-- ✅ テストスクリプト作成 (`tests/e2e_scripts/s32_toyota_candlestick_add.sh`)
+- ✅ テストスクリプト作成 (`tests/s32_toyota_candlestick_add.sh`)
 - ✅ テスト実行・結果確認（11 PASS / 0 FAIL）

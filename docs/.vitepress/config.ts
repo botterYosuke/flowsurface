@@ -6,9 +6,8 @@ export default defineConfig({
   description: 'Rust 製デスクトップチャートアプリ — 操作ガイド',
   base: '/flowsurface/',
 
-  // wiki/ と index.md のみをビルド対象にする
-  // plan/ spec/ は開発者向け内部ドキュメントのため除外
-  srcExclude: ['plan/**', 'spec/**'],
+  // plan/ は開発者向け作業ドキュメントのため除外
+  srcExclude: ['plan/**', 'spec/tachibana/**'],
 
   lastUpdated: true,
 
@@ -17,22 +16,34 @@ export default defineConfig({
 
     nav: [
       { text: 'ガイド', link: '/wiki/' },
+      { text: '仕様書', link: '/spec/replay' },
       { text: 'GitHub', link: 'https://github.com/flowsurface-rs/flowsurface' },
     ],
 
-    sidebar: [
-      {
-        text: '操作ガイド',
-        items: [
-          { text: '概要', link: '/wiki/' },
-          { text: '基本的な使い方', link: '/wiki/getting-started' },
-          { text: 'チャート', link: '/wiki/charts' },
-          { text: 'リプレイ', link: '/wiki/replay' },
-          { text: '注文（立花証券）', link: '/wiki/orders' },
-          { text: '設定・カスタマイズ', link: '/wiki/settings' },
-        ],
-      },
-    ],
+    sidebar: {
+      '/wiki/': [
+        {
+          text: '操作ガイド',
+          items: [
+            { text: '概要', link: '/wiki/' },
+            { text: '基本的な使い方', link: '/wiki/getting-started' },
+            { text: 'チャート', link: '/wiki/charts' },
+            { text: 'リプレイ', link: '/wiki/replay' },
+            { text: '注文（立花証券）', link: '/wiki/orders' },
+            { text: '設定・カスタマイズ', link: '/wiki/settings' },
+          ],
+        },
+      ],
+      '/spec/': [
+        {
+          text: '開発者向け仕様書',
+          items: [
+            { text: 'リプレイ機能', link: '/spec/replay' },
+            { text: '立花証券 API 統合', link: '/spec/tachibana' },
+          ],
+        },
+      ],
+    },
 
     socialLinks: [
       { icon: 'github', link: 'https://github.com/flowsurface-rs/flowsurface' },

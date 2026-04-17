@@ -4,8 +4,8 @@
 
 set -e
 
-# リポジトリルートを動的に解決（tests/e2e_scripts/../../ = repo root）
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# リポジトリルートを動的に解決（tests/../ = repo root）
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 DATA_DIR="$APPDATA/flowsurface"
 API="http://127.0.0.1:9876/api"

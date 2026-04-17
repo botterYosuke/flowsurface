@@ -134,10 +134,10 @@ replay モードで
   - `src/main.rs` の dispatch 追加
   - `replay_api.rs` 内ユニットテスト追加（`route_get_replay_orders`, `route_post_replay_orders_not_found`）
   - `virtual_exchange/mod.rs` 内ユニットテスト追加（初期空・place 後・複数・reset 後）
-- ✅ **S37** スクリプト作成（`tests/e2e_scripts/s37_order_panels_integrated.sh`）
+- ✅ **S37** スクリプト作成（`tests/s37_order_panels_integrated.sh`）
 - [ ] **S37** 実行・パス確認
 - [ ] **S38** スクリプト作成・実行（エンドポイント実装後）
-- ✅ **S39** スクリプト作成（`tests/e2e_scripts/s39_buying_power_portfolio.sh`）
+- ✅ **S39** スクリプト作成（`tests/s39_buying_power_portfolio.sh`）
 - [ ] **S39** 実行・パス確認
 - [ ] 全スクリプト CI 統合（既存 e2e スイートに追加）
 

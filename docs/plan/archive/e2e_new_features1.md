@@ -89,5 +89,5 @@ HTTP API (`127.0.0.1:9876`) 経由で操作し、各シナリオの `status` を
 - ✅ `dispatcher.rs` 修正
 - ✅ `controller.rs` 修正
 - ✅ `cargo check` 通過
-- ✅ E2E テスト実装 (`tests/e2e_scripts/s23_mid_replay_ticker_change.sh`)
+- ✅ E2E テスト実装 (`tests/s23_mid_replay_ticker_change.sh`)
 - ✅ コードレビュー

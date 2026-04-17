@@ -10,6 +10,9 @@ hero:
       text: 使い方を見る
       link: /wiki/
     - theme: alt
+      text: 仕様書
+      link: /spec/replay
+    - theme: alt
       text: GitHub
       link: https://github.com/flowsurface-rs/flowsurface
 

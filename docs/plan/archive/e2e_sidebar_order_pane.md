@@ -9,7 +9,7 @@ HTTP API 経由で E2E テストできるようにする。
 - `POST /api/sidebar/open-order-pane` — フォーカスペインを Horizontal Split し、指定種別の注文ペインを新ペインに表示する
 
 **新規 E2E スクリプト:**
-- `tests/e2e_scripts/s36_sidebar_order_pane.sh`
+- `tests/s36_sidebar_order_pane.sh`
 
 ---
 
@@ -19,7 +19,7 @@ HTTP API 経由で E2E テストできるようにする。
 |---|---|---|
 | `src/replay_api.rs` | 修正 | `PaneCommand::OpenOrderPane` 追加・ルート追加・パーサー追加・unit tests |
 | `src/main.rs` | 修正 | `parse_content_kind` に OrderEntry/OrderList/BuyingPower 追加・`handle_pane_api` アーム追加・`pane_api_open_order_pane` 実装 |
-| `tests/e2e_scripts/s36_sidebar_order_pane.sh` | 新規 | TC-A〜E の E2E テスト |
+| `tests/s36_sidebar_order_pane.sh` | 新規 | TC-A〜E の E2E テスト |
 | `docs/plan/e2e_sidebar_order_pane.md` | 新規 | 本計画書 |
 
 ---
@@ -131,6 +131,6 @@ fn pane_api_open_order_pane(&mut self, kind_str: &str) -> (String, Task<Message>
 - ✅ `docs/plan/e2e_sidebar_order_pane.md` 作成
 - ✅ `src/replay_api.rs` — PaneCommand::OpenOrderPane + route + parser + unit tests
 - ✅ `src/main.rs` — parse_content_kind 拡張 + handle_pane_api + pane_api_open_order_pane
-- ✅ `tests/e2e_scripts/s36_sidebar_order_pane.sh` 作成
+- ✅ `tests/s36_sidebar_order_pane.sh` 作成
 - ✅ `cargo clippy -- -D warnings` — 警告なし
 - ✅ `cargo test` — 全パス

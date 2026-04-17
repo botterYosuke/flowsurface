@@ -7,7 +7,7 @@
 
 ## 背景
 
-`docs/replay_header.md` に記載されたユーザー操作のうち、`tests/e2e_scripts/` でカバーされていない操作が以下の通り判明した。
+`docs/replay_header.md` に記載されたユーザー操作のうち、`tests/` でカバーされていない操作が以下の通り判明した。
 
 | # | 未カバー操作 | 仕様箇所 | 備考 |
 |---|---|---|---|
@@ -54,6 +54,6 @@
 ## 進捗
 
 - ✅ 計画書作成
-- ✅ `tests/e2e_scripts/s24_sidebar_select_ticker.sh` 作成
-- ✅ `tests/e2e_scripts/s25_screenshot_and_auth.sh` 作成
+- ✅ `tests/s24_sidebar_select_ticker.sh` 作成
+- ✅ `tests/s25_screenshot_and_auth.sh` 作成
 - ✅ 計画書に完了マークを付ける
