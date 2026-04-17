@@ -1,12 +1,6 @@
 import { defineConfig } from 'vitepress'
 
 export default defineConfig({
-  vite: {
-    ssr: {
-      noExternal: ['vue'],
-    },
-  },
-
   lang: 'ja',
   title: 'flowsurface',
   description: 'Rust 製デスクトップチャートアプリ — 操作ガイド',
