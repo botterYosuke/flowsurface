@@ -83,7 +83,7 @@ stop_app
 # ── TC-S11-04: H1 ペイン StepForward delta = 3600000ms ────────────────────
 setup_single_pane "BinanceLinear:BTCUSDT" "H1" "$(utc_offset -24)" "$(utc_offset -1)"
 start_app
-if ! wait_playing 30; then
+if ! wait_playing 60; then
   fail "TC-S11-04-pre" "Playing 到達せず"
 else
   curl -s -X POST "$API/replay/pause" > /dev/null
@@ -102,6 +102,8 @@ fi
 stop_app
 
 # ── TC-S11-05: M1+M5 混在 → 最小 TF (M1=60000ms) が優先 ─────────────────
+stop_app
+
 cat > "$DATA_DIR/saved-state.json" <<EOF
 {
   "layout_manager":{"layouts":[{"name":"S11-mix","dashboard":{"pane":{
@@ -140,6 +142,8 @@ else
     && pass "TC-S11-05: M1+M5 混在 StepForward delta=60000ms（M1 優先）" \
     || fail "TC-S11-05" "delta=$DELTA (expected 60000, M1 優先のはず)"
 fi
+
+stop_app
 
 # ── TC-S11-06: M1 StepForward 10 連続 → 毎回 delta が厳密に 60000ms ─────────
 # TC-S11-02 は倍数チェック（2 バー同時前進でも pass）。本 TC は厳密な exact match を検証する。

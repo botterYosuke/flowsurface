@@ -76,7 +76,7 @@ mod tests {
     use exchange::unit::MinTicksize;
     use exchange::unit::price::Price;
     use exchange::unit::qty::Qty;
-    use exchange::{Timeframe, Trade, Volume};
+    use exchange::{Trade, Volume};
 
     fn dummy_trades(n: usize, start_ms: u64, step_ms: u64) -> Vec<Trade> {
         (0..n)

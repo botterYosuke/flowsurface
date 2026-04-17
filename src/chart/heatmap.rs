@@ -280,11 +280,10 @@ impl HeatmapChart {
         match self.chart.basis {
             Basis::Time(interval) => {
                 let aggregate_time: u64 = interval.into();
-                if aggregate_time == 0 {
-                    update_t
-                } else {
-                    (update_t / aggregate_time) * aggregate_time
-                }
+                update_t
+                    .checked_div(aggregate_time)
+                    .map(|q| q * aggregate_time)
+                    .unwrap_or(update_t)
             }
             Basis::Tick(_) => update_t,
         }
