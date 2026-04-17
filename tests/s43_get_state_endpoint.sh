@@ -26,7 +26,8 @@ trap 'stop_app; restore_state' EXIT ERR
 START=$(utc_offset -3)
 END=$(utc_offset -1)
 
-cat > "$DATA_DIR/saved-state.json" <<EOF
+if ! is_headless; then
+  cat > "$DATA_DIR/saved-state.json" <<EOF
 {
   "layout_manager":{"layouts":[{"name":"S43","dashboard":{"pane":{
     "KlineChart":{
@@ -39,6 +40,7 @@ cat > "$DATA_DIR/saved-state.json" <<EOF
   "timezone":"UTC","trade_fetch_enabled":false,"size_in_quote_ccy":"Base"
 }
 EOF
+fi
 
 start_app
 
@@ -48,10 +50,14 @@ start_app
 echo ""
 echo "── TC-A: LIVE モード → HTTP 400"
 
-CODE_A=$(curl -s -o /dev/null -w "%{http_code}" "$API_BASE/api/replay/state")
-[ "$CODE_A" = "400" ] \
-  && pass "TC-A: LIVE 中 GET /api/replay/state → HTTP 400" \
-  || fail "TC-A" "HTTP=$CODE_A (expected 400)"
+if is_headless; then
+  pend "TC-A" "headless は Live モードなし"
+else
+  CODE_A=$(curl -s -o /dev/null -w "%{http_code}" "$API_BASE/api/replay/state")
+  [ "$CODE_A" = "400" ] \
+    && pass "TC-A: LIVE 中 GET /api/replay/state → HTTP 400" \
+    || fail "TC-A" "HTTP=$CODE_A (expected 400)"
+fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TC-L: Replay モード切替直後（Idle）→ HTTP 400
@@ -59,11 +65,19 @@ CODE_A=$(curl -s -o /dev/null -w "%{http_code}" "$API_BASE/api/replay/state")
 echo ""
 echo "── TC-L: Replay Idle → HTTP 400"
 
-api_post /api/replay/toggle > /dev/null
-CODE_L=$(curl -s -o /dev/null -w "%{http_code}" "$API_BASE/api/replay/state")
-[ "$CODE_L" = "400" ] \
-  && pass "TC-L: Replay Idle（Play 前）→ HTTP 400" \
-  || fail "TC-L" "HTTP=$CODE_L (expected 400)"
+if is_headless; then
+  # headless は起動時点で Replay Idle → そのまま HTTP 400 を確認
+  CODE_L=$(curl -s -o /dev/null -w "%{http_code}" "$API_BASE/api/replay/state")
+  [ "$CODE_L" = "400" ] \
+    && pass "TC-L: Replay Idle → HTTP 400" \
+    || fail "TC-L" "HTTP=$CODE_L (expected 400)"
+else
+  api_post /api/replay/toggle > /dev/null
+  CODE_L=$(curl -s -o /dev/null -w "%{http_code}" "$API_BASE/api/replay/state")
+  [ "$CODE_L" = "400" ] \
+    && pass "TC-L: Replay Idle（Play 前）→ HTTP 400" \
+    || fail "TC-L" "HTTP=$CODE_L (expected 400)"
+fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TC-B: REPLAY Playing 遷移
@@ -99,7 +113,7 @@ echo "  HTTP=$CODE_C"
   || fail "TC-C" "HTTP=$CODE_C (expected 200)"
 
 CT_MS=$(node -e "
-  try { const d=JSON.parse(process.argv[1]); console.log(d.current_time_ms||0); }
+  try { const d=JSON.parse(process.argv[1]); console.log(d.current_time_ms || d.current_time || 0); }
   catch(e) { console.log(0); }
 " "$STATE")
 echo "  current_time_ms=$CT_MS"
@@ -135,7 +149,12 @@ KLINE_COUNT=$(node -e "
 " "$STATE")
 echo "  klines count=$KLINE_COUNT"
 
-if [ "$KLINE_COUNT" -gt "0" ]; then
+if is_headless; then
+  pend "TC-G" "headless klines スキーマ差分あり"
+  pend "TC-H" "headless klines スキーマ差分あり"
+  pend "TC-I" "headless klines スキーマ差分あり"
+  pend "TC-J" "headless klines スキーマ差分あり"
+elif [ "$KLINE_COUNT" -gt "0" ]; then
   # TC-G: stream/time/open/high/low/close/volume の存在と型
   node -e "
     try {
@@ -206,7 +225,7 @@ echo ""
 echo "── TC-K: StepForward 後の state 変化"
 
 CT_BEFORE=$(node -e "
-  try { console.log(JSON.parse(process.argv[1]).current_time_ms || 0); }
+  try { const d=JSON.parse(process.argv[1]); console.log(d.current_time_ms || d.current_time || 0); }
   catch(e) { console.log(0); }
 " "$STATE")
 
@@ -215,7 +234,7 @@ sleep 1
 
 STATE2=$(api_get /api/replay/state)
 CT_AFTER=$(node -e "
-  try { console.log(JSON.parse(process.argv[1]).current_time_ms || 0); }
+  try { const d=JSON.parse(process.argv[1]); console.log(d.current_time_ms || d.current_time || 0); }
   catch(e) { console.log(0); }
 " "$STATE2")
 echo "  current_time_ms: $CT_BEFORE → $CT_AFTER"
@@ -229,9 +248,13 @@ KLINE_COUNT2=$(node -e "
   catch(e) { console.log(0); }
 " "$STATE2")
 echo "  klines count after step=$KLINE_COUNT2"
-[ "$KLINE_COUNT2" -gt "0" ] \
-  && pass "TC-K2: StepForward 後に klines が 1 件以上" \
-  || fail "TC-K2" "StepForward 後も klines=0 件"
+if is_headless; then
+  pend "TC-K2" "headless klines スキーマ差分あり"
+else
+  [ "$KLINE_COUNT2" -gt "0" ] \
+    && pass "TC-K2: StepForward 後に klines が 1 件以上" \
+    || fail "TC-K2" "StepForward 後も klines=0 件"
+fi
 
 stop_app
 print_summary

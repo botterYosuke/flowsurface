@@ -22,6 +22,7 @@ START=$(utc_offset -3)
 END=$(utc_offset -1)
 setup_single_pane "BinanceLinear:BTCUSDT" "M1" "$START" "$END"
 start_app
+headless_play
 
 if ! wait_playing 30; then
   fail "TC-S12-precond" "Playing 到達せず"
@@ -38,28 +39,36 @@ START_MS=$(jqn "$(curl -s "$API/replay/status")" "d.start_time")
 echo "  start_time=$START_MS"
 
 # TC-S12-01: 1 回 StepBackward → current_time >= start_time
-curl -s -X POST "$API/replay/step-backward" > /dev/null
-sleep 1
-wait_status Paused 10 || true
-CT=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
-if [ "$(bigt_ge "$CT" "$START_MS")" = "true" ]; then
-  pass "TC-S12-01: StepBackward 後 current_time($CT) >= start_time($START_MS)"
+if is_headless; then
+  pend "TC-S12-01" "StepBackward headless 未実装"
 else
-  fail "TC-S12-01" "current_time=$CT < start_time=$START_MS"
-fi
-
-# TC-S12-02: StepBackward 連打（5 回）でも start_time クランプ
-for i in $(seq 1 5); do
   curl -s -X POST "$API/replay/step-backward" > /dev/null
-  sleep 0.5
+  sleep 1
   wait_status Paused 10 || true
   CT=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
   if [ "$(bigt_ge "$CT" "$START_MS")" = "true" ]; then
-    pass "TC-S12-02-$i: StepBackward #$i current_time($CT) >= start_time($START_MS)"
+    pass "TC-S12-01: StepBackward 後 current_time($CT) >= start_time($START_MS)"
   else
-    fail "TC-S12-02-$i" "current_time=$CT < start_time=$START_MS"
+    fail "TC-S12-01" "current_time=$CT < start_time=$START_MS"
   fi
-done
+fi
+
+# TC-S12-02: StepBackward 連打（5 回）でも start_time クランプ
+if is_headless; then
+  pend "TC-S12-02" "StepBackward headless 未実装"
+else
+  for i in $(seq 1 5); do
+    curl -s -X POST "$API/replay/step-backward" > /dev/null
+    sleep 0.5
+    wait_status Paused 10 || true
+    CT=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
+    if [ "$(bigt_ge "$CT" "$START_MS")" = "true" ]; then
+      pass "TC-S12-02-$i: StepBackward #$i current_time($CT) >= start_time($START_MS)"
+    else
+      fail "TC-S12-02-$i" "current_time=$CT < start_time=$START_MS"
+    fi
+  done
+fi
 
 # TC-S12-03: resume 後に current_time が正常前進（10x でポーリング）
 curl -s -X POST "$API/replay/resume" > /dev/null

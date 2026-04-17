@@ -70,6 +70,22 @@ jobs:
           IS_HEADLESS: "true"
         run: bash tests/s1_basic_lifecycle.sh
 
+      - name: "S3 Headless auto-play (HyperliquidLinear:BTC)"
+        shell: bash
+        env:
+          FLOWSURFACE_EXE: ${{ github.workspace }}/target/debug/flowsurface.exe
+          E2E_TICKER: HyperliquidLinear:BTC
+          IS_HEADLESS: "true"
+        run: bash tests/s3_autoplay.sh
+
+      - name: "S27 Headless CycleSpeed (HyperliquidLinear:BTC)"
+        shell: bash
+        env:
+          FLOWSURFACE_EXE: ${{ github.workspace }}/target/debug/flowsurface.exe
+          E2E_TICKER: HyperliquidLinear:BTC
+          IS_HEADLESS: "true"
+        run: bash tests/s27_cyclespeed_reset.sh
+
       - name: Upload debug logs on failure
         if: failure()
         uses: actions/upload-artifact@v4

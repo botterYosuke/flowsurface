@@ -126,12 +126,19 @@ reward = portfolio["unrealized_pnl"] + portfolio["realized_pnl"]  # 簡易実装
 
 ## 実装ステータス
 
+### Rust / Python 実装
 - ✅ `src/headless.rs` — HeadlessArgs + HeadlessEngine + run()（22 ユニットテスト）
 - ✅ `src/replay_api.rs` — `pub async fn start_server()` を追加
 - ✅ `src/main.rs` — `--headless` フラグによる分岐
 - ✅ `python/flowsurface_sdk/env.py` — FlowsurfaceEnv
 - ✅ `python/tests/test_env.py` — 単体テスト
-- [ ] `tests/s50_headless_mode.sh` — E2E テスト（次フェーズ）
+
+### E2E テスト（IS_HEADLESS パターン）
+独立スクリプト（s50）を新設するのではなく、既存テストを `IS_HEADLESS=true/false` で両対応化した。
+
+- ✅ `tests/common_helpers.sh` — `headless_play()` / `ensure_replay_mode()` / `pend_if_headless()` / `order_symbol()` / `setup_single_pane()` headless 対応
+- ✅ 18 本のテストスクリプトを headless/GUI 両対応に改修（詳細は `docs/plan/phase3_headless_e2e.md`）
+- ✅ `.github/workflows/e2e.yml` — S1 / S3 / S27 headless CI ステップ追加
 
 ---
 

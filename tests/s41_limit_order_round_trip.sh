@@ -22,35 +22,27 @@ trap 'stop_app; restore_state' EXIT ERR
 START=$(utc_offset -3)
 END=$(utc_offset -1)
 
-cat > "$DATA_DIR/saved-state.json" <<EOF
-{
-  "layout_manager":{"layouts":[{"name":"S41","dashboard":{"pane":{
-    "KlineChart":{
-      "layout":{"splits":[0.78],"autoscale":"FitToVisible"},"kind":"Candles",
-      "stream_type":[{"Kline":{"ticker":"BinanceLinear:BTCUSDT","timeframe":"M1"}}],
-      "settings":{"tick_multiply":null,"visual_config":null,"selected_basis":{"Time":"M1"}},
-      "indicators":[],"link_group":"A"
-    }
-  },"popout":[]}}],"active_layout":"S41"},
-  "timezone":"UTC","trade_fetch_enabled":false,"size_in_quote_ccy":"Base",
-  "replay":{"mode":"replay","range_start":"$START","range_end":"$END"}
-}
-EOF
+setup_single_pane "$E2E_TICKER" "M1" "$START" "$END"
 
-if [ -z "${DEV_USER_ID:-}" ] || [ -z "${DEV_PASSWORD:-}" ]; then
-  echo "  SKIP: DEV_USER_ID / DEV_PASSWORD が未設定 — 自動ログインが無効です"
-  exit 0
+if ! is_headless; then
+  if [ -z "${DEV_USER_ID:-}" ] || [ -z "${DEV_PASSWORD:-}" ]; then
+    echo "  SKIP: DEV_USER_ID / DEV_PASSWORD が未設定 — 自動ログインが無効です"
+    exit 0
+  fi
 fi
 
 start_app
+headless_play
 
-echo "  Tachibana セッション確立待ち（最大 60 秒）..."
-if ! wait_tachibana_session 60; then
-  diagnose_playing_failure
-  fail "precond" "Tachibana セッションが確立されなかった（DEV_USER_ID でのログインに失敗）"
-  print_summary; exit 1
+if ! is_headless; then
+  echo "  Tachibana セッション確立待ち（最大 60 秒）..."
+  if ! wait_tachibana_session 60; then
+    diagnose_playing_failure
+    fail "precond" "Tachibana セッションが確立されなかった（DEV_USER_ID でのログインに失敗）"
+    print_summary; exit 1
+  fi
+  echo "  Tachibana セッション確立"
 fi
-echo "  Tachibana セッション確立"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TC-A: REPLAY Playing 到達
@@ -85,7 +77,7 @@ echo ""
 echo "── TC-C〜H: 指値ラウンドトリップ（必ず約定するトリック価格）"
 
 BUY_RESP=$(api_post /api/replay/order \
-  '{"ticker":"BTCUSDT","side":"buy","qty":1.0,"order_type":{"limit":9999999.0}}')
+  "{\"ticker\":\"$(order_symbol)\",\"side\":\"buy\",\"qty\":1.0,\"order_type\":{\"limit\":9999999.0}}")
 echo "  limit buy response: $BUY_RESP"
 BUY_ID=$(jqn "$BUY_RESP" "d.order_id")
 [ "$BUY_ID" != "null" ] && [ -n "$BUY_ID" ] \
@@ -112,7 +104,7 @@ node -e "process.exit(parseFloat('$CASH') < 1000000 ? 0 : 1)" 2>/dev/null \
   || fail "TC-E" "cash=$CASH (expected < 1000000)"
 
 SELL_RESP=$(api_post /api/replay/order \
-  '{"ticker":"BTCUSDT","side":"sell","qty":1.0,"order_type":{"limit":1.0}}')
+  "{\"ticker\":\"$(order_symbol)\",\"side\":\"sell\",\"qty\":1.0,\"order_type\":{\"limit\":1.0}}")
 echo "  limit sell response: $SELL_RESP"
 SELL_ID=$(jqn "$SELL_RESP" "d.order_id")
 [ "$SELL_ID" != "null" ] && [ -n "$SELL_ID" ] \
@@ -149,7 +141,7 @@ echo ""
 echo "── TC-I〜K: 未達指値（buy @1）→ pending 維持"
 
 UNMATCHED_RESP=$(api_post /api/replay/order \
-  '{"ticker":"BTCUSDT","side":"buy","qty":0.1,"order_type":{"limit":1.0}}')
+  "{\"ticker\":\"$(order_symbol)\",\"side\":\"buy\",\"qty\":0.1,\"order_type\":{\"limit\":1.0}}")
 echo "  unmatched limit buy response: $UNMATCHED_RESP"
 UNMATCHED_ID=$(jqn "$UNMATCHED_RESP" "d.order_id")
 [ "$UNMATCHED_ID" != "null" ] && [ -n "$UNMATCHED_ID" ] \

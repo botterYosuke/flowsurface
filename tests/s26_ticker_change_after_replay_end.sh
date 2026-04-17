@@ -41,22 +41,10 @@ END_MS=$(node -e "console.log(new Date('${END}:00Z').getTime())")
 
 echo "  range: $START → $END (${START_MS} → ${END_MS})"
 
-cat > "$DATA_DIR/saved-state.json" <<EOF
-{
-  "layout_manager":{"layouts":[{"name":"S26","dashboard":{"pane":{
-    "KlineChart":{
-      "layout":{"splits":[0.78],"autoscale":"FitToVisible"},"kind":"Candles",
-      "stream_type":[{"Kline":{"ticker":"BinanceLinear:BTCUSDT","timeframe":"M1"}}],
-      "settings":{"tick_multiply":null,"visual_config":null,"selected_basis":{"Time":"M1"}},
-      "indicators":["Volume"],"link_group":"A"
-    }
-  },"popout":[]}}],"active_layout":"S26"},
-  "timezone":"UTC","trade_fetch_enabled":false,"size_in_quote_ccy":"Base",
-  "replay":{"mode":"replay","range_start":"$START","range_end":"$END"}
-}
-EOF
+setup_single_pane "$E2E_TICKER" "M1" "$START" "$END"
 
 start_app
+headless_play
 
 # Playing 到達待機（最大 60 秒）
 if ! wait_status "Playing" 60; then
@@ -66,6 +54,15 @@ if ! wait_status "Playing" 60; then
   exit 1
 fi
 echo "  Playing 到達"
+
+if is_headless; then
+  pend "TC-A" "headless は pane API 非対応（501）"
+  pend "TC-B" "headless は pane API 非対応（501）"
+  pend "TC-C" "headless は pane API 非対応（501）"
+  stop_app
+  print_summary
+  exit 0
+fi
 
 # ── 10x 加速して終端まで再生 ─────────────────────────────────────────────────
 speed_to_10x

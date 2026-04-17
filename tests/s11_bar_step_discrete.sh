@@ -22,6 +22,7 @@ trap 'stop_app; restore_state' EXIT ERR
 # ── TC-S11-01: M1 10x 再生中 delta が 60000ms の倍数 ──────────────────────
 setup_single_pane "BinanceLinear:BTCUSDT" "M1" "$(utc_offset -3)" "$(utc_offset -1)"
 start_app
+headless_play
 if ! wait_playing 30; then
   fail "TC-S11-01-pre" "Playing 到達せず"
   exit 1
@@ -62,6 +63,7 @@ stop_app
 # ── TC-S11-03: M5 ペイン StepForward delta = 300000ms ─────────────────────
 setup_single_pane "BinanceLinear:BTCUSDT" "M5" "$(utc_offset -6)" "$(utc_offset -1)"
 start_app
+headless_play
 if ! wait_playing 30; then
   fail "TC-S11-03-pre" "Playing 到達せず"
 else
@@ -83,6 +85,7 @@ stop_app
 # ── TC-S11-04: H1 ペイン StepForward delta = 3600000ms ────────────────────
 setup_single_pane "BinanceLinear:BTCUSDT" "H1" "$(utc_offset -24)" "$(utc_offset -1)"
 start_app
+headless_play
 if ! wait_playing 60; then
   fail "TC-S11-04-pre" "Playing 到達せず"
 else
@@ -102,9 +105,12 @@ fi
 stop_app
 
 # ── TC-S11-05: M1+M5 混在 → 最小 TF (M1=60000ms) が優先 ─────────────────
-stop_app
+if is_headless; then
+  pend "TC-S11-05" "headless はペイン分割非対応（pane API 501）"
+else
+  stop_app
 
-cat > "$DATA_DIR/saved-state.json" <<EOF
+  cat > "$DATA_DIR/saved-state.json" <<EOF
 {
   "layout_manager":{"layouts":[{"name":"S11-mix","dashboard":{"pane":{
     "Split":{"axis":"Vertical","ratio":0.5,
@@ -126,29 +132,31 @@ cat > "$DATA_DIR/saved-state.json" <<EOF
   "replay":{"mode":"replay","range_start":"$(utc_offset -3)","range_end":"$(utc_offset -1)"}
 }
 EOF
-start_app
-if ! wait_playing 30; then
-  fail "TC-S11-05-pre" "Playing 到達せず"
-else
-  curl -s -X POST "$API/replay/pause" > /dev/null
-  wait_status Paused 10 || true
-  TB=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
-  curl -s -X POST "$API/replay/step-forward" > /dev/null
-  sleep 1
-  wait_status Paused 10 || true
-  TA=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
-  DELTA=$(node -e "console.log(String(BigInt('$TA') - BigInt('$TB')))")
-  [ "$DELTA" = "60000" ] \
-    && pass "TC-S11-05: M1+M5 混在 StepForward delta=60000ms（M1 優先）" \
-    || fail "TC-S11-05" "delta=$DELTA (expected 60000, M1 優先のはず)"
-fi
+  start_app
+  if ! wait_playing 30; then
+    fail "TC-S11-05-pre" "Playing 到達せず"
+  else
+    curl -s -X POST "$API/replay/pause" > /dev/null
+    wait_status Paused 10 || true
+    TB=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
+    curl -s -X POST "$API/replay/step-forward" > /dev/null
+    sleep 1
+    wait_status Paused 10 || true
+    TA=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
+    DELTA=$(node -e "console.log(String(BigInt('$TA') - BigInt('$TB')))")
+    [ "$DELTA" = "60000" ] \
+      && pass "TC-S11-05: M1+M5 混在 StepForward delta=60000ms（M1 優先）" \
+      || fail "TC-S11-05" "delta=$DELTA (expected 60000, M1 優先のはず)"
+  fi
 
-stop_app
+  stop_app
+fi
 
 # ── TC-S11-06: M1 StepForward 10 連続 → 毎回 delta が厳密に 60000ms ─────────
 # TC-S11-02 は倍数チェック（2 バー同時前進でも pass）。本 TC は厳密な exact match を検証する。
 setup_single_pane "BinanceLinear:BTCUSDT" "M1" "$(utc_offset -3)" "$(utc_offset -1)"
 start_app
+headless_play
 if ! wait_playing 30; then
   fail "TC-S11-06-pre" "Playing 到達せず"
 else

@@ -26,6 +26,7 @@ START=$(utc_offset -3)
 END=$(utc_offset -1)
 setup_single_pane "BinanceLinear:BTCUSDT" "M1" "$START" "$END"
 start_app
+headless_play
 
 if ! wait_playing 30; then
   diagnose_playing_failure
@@ -70,6 +71,7 @@ echo "  range: $MIDNIGHT_MINUS_1 → $MIDNIGHT_PLUS_1"
 
 setup_single_pane "BinanceLinear:BTCUSDT" "M1" "$MIDNIGHT_MINUS_1" "$MIDNIGHT_PLUS_1"
 start_app
+headless_play
 
 if ! wait_playing 30; then
   fail "TC-S16-02-pre" "Playing 到達せず（日付境界 range）"
@@ -115,12 +117,16 @@ else
       || fail "TC-S16-02a" "delta=$DELTA (expected 60000)"
 
     # StepBackward → crash なし
-    curl -s -X POST "$API/replay/step-backward" > /dev/null
-    wait_status Paused 10
-    STATUS=$(jqn "$(curl -s "$API/replay/status")" "d.status")
-    [ "$STATUS" = "Paused" ] \
-      && pass "TC-S16-02b: UTC 0:00 越え後 StepBackward → status=Paused" \
-      || fail "TC-S16-02b" "status=$STATUS"
+    if is_headless; then
+      pend "TC-S16-02b" "StepBackward headless 未実装"
+    else
+      curl -s -X POST "$API/replay/step-backward" > /dev/null
+      wait_status Paused 10
+      STATUS=$(jqn "$(curl -s "$API/replay/status")" "d.status")
+      [ "$STATUS" = "Paused" ] \
+        && pass "TC-S16-02b: UTC 0:00 越え後 StepBackward → status=Paused" \
+        || fail "TC-S16-02b" "status=$STATUS"
+    fi
   else
     pend "TC-S16-02" "UTC 0:00 境界を超えられなかった（データ不足 or 速度不足）"
   fi
@@ -131,86 +137,101 @@ fi
 # ── TC-S16-03: Live ↔ Replay 高速切替 ──────────────────────────────────
 # toggle を 10 回連続 → 最終状態が安定している
 echo "  [TC-S16-03] Live ↔ Replay 高速切替..."
-setup_single_pane "BinanceLinear:BTCUSDT" "M1" "$(utc_offset -3)" "$(utc_offset -1)"
-start_app
+if is_headless; then
+  pend "TC-S16-03" "headless は Live/Replay toggle 非対応"
+  stop_app
+else
+  setup_single_pane "BinanceLinear:BTCUSDT" "M1" "$(utc_offset -3)" "$(utc_offset -1)"
+  start_app
 
-if ! wait_playing 30; then
-  fail "TC-S16-03-pre" "Playing 到達せず"
-  exit 1
+  if ! wait_playing 30; then
+    fail "TC-S16-03-pre" "Playing 到達せず"
+    exit 1
+  fi
+
+  for i in $(seq 1 10); do
+    curl -s -X POST "$API/replay/toggle" > /dev/null
+    sleep 0.3
+  done
+
+  # 最終状態が安定しているか（アプリが応答する）
+  sleep 2
+  ALIVE=$(curl -s "$API/replay/status" > /dev/null 2>&1 && echo "true" || echo "false")
+  FINAL=$(jqn "$(curl -s "$API/replay/status")" "d.status")
+  [ "$ALIVE" = "true" ] \
+    && pass "TC-S16-03: toggle 10 連打後もアプリ応答あり (final_status=$FINAL)" \
+    || fail "TC-S16-03" "toggle 連打後にアプリが応答しなくなった"
+
+  stop_app
 fi
-
-for i in $(seq 1 10); do
-  curl -s -X POST "$API/replay/toggle" > /dev/null
-  sleep 0.3
-done
-
-# 最終状態が安定しているか（アプリが応答する）
-sleep 2
-ALIVE=$(curl -s "$API/replay/status" > /dev/null 2>&1 && echo "true" || echo "false")
-FINAL=$(jqn "$(curl -s "$API/replay/status")" "d.status")
-[ "$ALIVE" = "true" ] \
-  && pass "TC-S16-03: toggle 10 連打後もアプリ応答あり (final_status=$FINAL)" \
-  || fail "TC-S16-03" "toggle 連打後にアプリが応答しなくなった"
-
-stop_app
 
 # ── TC-S16-04: Playing 中の toggle ─────────────────────────────────────
 echo "  [TC-S16-04] Playing 中の toggle..."
-setup_single_pane "BinanceLinear:BTCUSDT" "M1" "$(utc_offset -3)" "$(utc_offset -1)"
-start_app
+if is_headless; then
+  pend "TC-S16-04" "headless は Live/Replay toggle 非対応"
+  stop_app
+else
+  setup_single_pane "BinanceLinear:BTCUSDT" "M1" "$(utc_offset -3)" "$(utc_offset -1)"
+  start_app
 
-if ! wait_playing 30; then
-  fail "TC-S16-04-pre" "Playing 到達せず"
-  exit 1
+  if ! wait_playing 30; then
+    fail "TC-S16-04-pre" "Playing 到達せず"
+    exit 1
+  fi
+
+  # Playing 中に toggle（Live へ切替 or 停止）
+  curl -s -X POST "$API/replay/toggle" > /dev/null
+  sleep 2
+  STATUS_AFTER=$(jqn "$(curl -s "$API/replay/status")" "d.status")
+  ALIVE=$(curl -s "$API/replay/status" > /dev/null 2>&1 && echo "true" || echo "false")
+  # アプリが生存し、状態が確定していれば OK
+  [ "$ALIVE" = "true" ] \
+    && pass "TC-S16-04: Playing 中の toggle → アプリ生存 (status=$STATUS_AFTER)" \
+    || fail "TC-S16-04" "toggle 後にアプリが応答しなくなった"
+
+  stop_app
 fi
-
-# Playing 中に toggle（Live へ切替 or 停止）
-curl -s -X POST "$API/replay/toggle" > /dev/null
-sleep 2
-STATUS_AFTER=$(jqn "$(curl -s "$API/replay/status")" "d.status")
-ALIVE=$(curl -s "$API/replay/status" > /dev/null 2>&1 && echo "true" || echo "false")
-# アプリが生存し、状態が確定していれば OK
-[ "$ALIVE" = "true" ] \
-  && pass "TC-S16-04: Playing 中の toggle → アプリ生存 (status=$STATUS_AFTER)" \
-  || fail "TC-S16-04" "toggle 後にアプリが応答しなくなった"
-
-stop_app
 
 # ── TC-S16-05: Paused 中の toggle → Live → 再び Replay → Playing ──────
 echo "  [TC-S16-05] Paused 中の toggle..."
-setup_single_pane "BinanceLinear:BTCUSDT" "M1" "$(utc_offset -3)" "$(utc_offset -1)"
-start_app
+if is_headless; then
+  pend "TC-S16-05a" "headless は Live/Replay toggle 非対応"
+  pend "TC-S16-05b" "headless は Live/Replay toggle 非対応"
+else
+  setup_single_pane "BinanceLinear:BTCUSDT" "M1" "$(utc_offset -3)" "$(utc_offset -1)"
+  start_app
 
-if ! wait_playing 30; then
-  fail "TC-S16-05-pre" "Playing 到達せず"
-  exit 1
+  if ! wait_playing 30; then
+    fail "TC-S16-05-pre" "Playing 到達せず"
+    exit 1
+  fi
+
+  # Pause 状態にする
+  curl -s -X POST "$API/replay/pause" > /dev/null
+  if ! wait_status Paused 10; then
+    fail "TC-S16-05-pre" "Paused に遷移せず"
+    exit 1
+  fi
+
+  # toggle → Live へ
+  curl -s -X POST "$API/replay/toggle" > /dev/null
+  sleep 2
+  STATUS_LIVE=$(jqn "$(curl -s "$API/replay/status")" "d.status")
+  ALIVE=$(curl -s "$API/replay/status" > /dev/null 2>&1 && echo "true" || echo "false")
+  [ "$ALIVE" = "true" ] \
+    && pass "TC-S16-05a: Paused → toggle → アプリ生存 (status=$STATUS_LIVE)" \
+    || fail "TC-S16-05a" "toggle 後にアプリが応答しなくなった"
+
+  # toggle → Replay に戻る
+  curl -s -X POST "$API/replay/toggle" > /dev/null
+  sleep 3
+  # アプリが応答していれば OK（Live モード継続/Replay 切替どちらも許容）
+  ALIVE2=$(curl -s "$API/replay/status" > /dev/null 2>&1 && echo "true" || echo "false")
+  STATUS_BACK=$(jqn "$(curl -s "$API/replay/status")" "d.status")
+  [ "$ALIVE2" = "true" ] \
+    && pass "TC-S16-05b: 2 回目 toggle 後もアプリ生存 (status=$STATUS_BACK)" \
+    || fail "TC-S16-05b" "2 回目 toggle 後にアプリが応答しなくなった"
 fi
-
-# Pause 状態にする
-curl -s -X POST "$API/replay/pause" > /dev/null
-if ! wait_status Paused 10; then
-  fail "TC-S16-05-pre" "Paused に遷移せず"
-  exit 1
-fi
-
-# toggle → Live へ
-curl -s -X POST "$API/replay/toggle" > /dev/null
-sleep 2
-STATUS_LIVE=$(jqn "$(curl -s "$API/replay/status")" "d.status")
-ALIVE=$(curl -s "$API/replay/status" > /dev/null 2>&1 && echo "true" || echo "false")
-[ "$ALIVE" = "true" ] \
-  && pass "TC-S16-05a: Paused → toggle → アプリ生存 (status=$STATUS_LIVE)" \
-  || fail "TC-S16-05a" "toggle 後にアプリが応答しなくなった"
-
-# toggle → Replay に戻る
-curl -s -X POST "$API/replay/toggle" > /dev/null
-sleep 3
-# アプリが応答していれば OK（Live モード継続/Replay 切替どちらも許容）
-ALIVE2=$(curl -s "$API/replay/status" > /dev/null 2>&1 && echo "true" || echo "false")
-STATUS_BACK=$(jqn "$(curl -s "$API/replay/status")" "d.status")
-[ "$ALIVE2" = "true" ] \
-  && pass "TC-S16-05b: 2 回目 toggle 後もアプリ生存 (status=$STATUS_BACK)" \
-  || fail "TC-S16-05b" "2 回目 toggle 後にアプリが応答しなくなった"
 
 print_summary
 [ $FAIL -eq 0 ]
