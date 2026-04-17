@@ -4118,4 +4118,149 @@ mod tests {
             "CorrectOrder に sTatebiType は不要: {json}"
         );
     }
+
+    // ── Phase 4: エラー系 ──────────────────────────────────────────────────────
+
+    fn test_session(url: &str) -> TachibanaSession {
+        TachibanaSession {
+            url_request: format!("{url}/"),
+            url_master: format!("{url}/"),
+            url_price: format!("{url}/"),
+            url_event: format!("{url}/"),
+            url_event_ws: format!("{url}/ws"),
+        }
+    }
+
+    /// Phase 4-2: 発注パスワード誤りのとき ApiError が返る（sResultCode 非ゼロ）
+    #[tokio::test]
+    async fn submit_new_order_returns_error_on_wrong_password_response() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("POST", mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                    "p_errno": "0",
+                    "p_err": "",
+                    "sResultCode": "91001",
+                    "sResultText": "発注パスワードが誤っています"
+                }"#,
+            )
+            .create_async()
+            .await;
+
+        let client = reqwest::Client::new();
+        let session = test_session(&server.url());
+        let req = NewOrderRequest {
+            account_type: "1".to_string(),
+            issue_code: "7203".to_string(),
+            market_code: "00".to_string(),
+            side: "3".to_string(),
+            condition: "0".to_string(),
+            price: "0".to_string(),
+            qty: "100".to_string(),
+            cash_margin: "0".to_string(),
+            expire_day: "0".to_string(),
+            second_password: "wrongpassword".to_string(),
+        };
+        let result = submit_new_order(&client, &session, &req).await;
+        assert!(
+            matches!(result, Err(TachibanaError::ApiError { ref code, .. }) if code == "91001"),
+            "発注パスワード誤り: ApiError が返るべき: {:?}",
+            result
+        );
+        let err_str = result.unwrap_err().to_string();
+        assert!(
+            err_str.contains("code="),
+            "エラー文字列に code= が含まれるべき（E2E スクリプトが解析できる形式）: {err_str}"
+        );
+    }
+
+    /// Phase 4-3: 市場時間外エラーのとき ApiError が返る（sResultCode 非ゼロ）
+    #[tokio::test]
+    async fn submit_new_order_returns_error_on_market_closed_response() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("POST", mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                    "p_errno": "0",
+                    "p_err": "",
+                    "sResultCode": "-62",
+                    "sResultText": "稼働時間外です"
+                }"#,
+            )
+            .create_async()
+            .await;
+
+        let client = reqwest::Client::new();
+        let session = test_session(&server.url());
+        let req = NewOrderRequest {
+            account_type: "1".to_string(),
+            issue_code: "7203".to_string(),
+            market_code: "00".to_string(),
+            side: "3".to_string(),
+            condition: "0".to_string(),
+            price: "0".to_string(),
+            qty: "100".to_string(),
+            cash_margin: "0".to_string(),
+            expire_day: "0".to_string(),
+            second_password: "pass".to_string(),
+        };
+        let result = submit_new_order(&client, &session, &req).await;
+        assert!(
+            matches!(result, Err(TachibanaError::ApiError { ref code, .. }) if code == "-62"),
+            "市場時間外: ApiError(-62) が返るべき: {:?}",
+            result
+        );
+    }
+
+    /// Phase 4-4: 存在しない銘柄コードのとき ApiError が返る（sResultCode 非ゼロ）
+    #[tokio::test]
+    async fn submit_new_order_returns_error_on_invalid_issue_code_response() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("POST", mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                    "p_errno": "0",
+                    "p_err": "",
+                    "sResultCode": "11001",
+                    "sResultText": "銘柄コードが不正です"
+                }"#,
+            )
+            .create_async()
+            .await;
+
+        let client = reqwest::Client::new();
+        let session = test_session(&server.url());
+        let req = NewOrderRequest {
+            account_type: "1".to_string(),
+            issue_code: "0000".to_string(),
+            market_code: "00".to_string(),
+            side: "3".to_string(),
+            condition: "0".to_string(),
+            price: "0".to_string(),
+            qty: "100".to_string(),
+            cash_margin: "0".to_string(),
+            expire_day: "0".to_string(),
+            second_password: "pass".to_string(),
+        };
+        let result = submit_new_order(&client, &session, &req).await;
+        assert!(
+            result.is_err(),
+            "存在しない銘柄コード: エラーが返るべき: {:?}",
+            result
+        );
+        let err_str = result.unwrap_err().to_string();
+        assert!(
+            err_str.contains("code="),
+            "エラー文字列に code= が含まれるべき（E2E スクリプトが解析できる形式）: {err_str}"
+        );
+    }
 }

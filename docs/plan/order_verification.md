@@ -100,9 +100,9 @@ src/replay_api.rs                   # HTTP API (POST /api/tachibana/order 等)
 | # | シナリオ | E2E テスト | 状態 | 備考 |
 |---|---|---|---|---|
 | 4-1 | 残高不足時の発注 | 未作成 | ⬜ | エラーコード・メッセージ確認 |
-| 4-2 | 発注パスワード誤り | 未作成 | ⬜ | `sSecondPassword` に誤値 |
-| 4-3 | 市場時間外の成行注文 | 未作成 | ⬜ | エラーハンドリング確認 |
-| 4-4 | 存在しない銘柄コード | 未作成 | ⬜ | |
+| 4-2 | 発注パスワード誤り | `s46_wrong_password.sh` | ✅ Unit テスト・E2E スクリプト作成済み | `sSecondPassword` に誤値 |
+| 4-3 | 市場時間外の成行注文 | `s47_outside_hours.sh` | ✅ Unit テスト・E2E スクリプト作成済み | エラーコード自動ログ機能付き |
+| 4-4 | 存在しない銘柄コード | `s48_invalid_issue.sh` | ✅ Unit テスト・E2E スクリプト作成済み | issue_code="0000" |
 
 ### 5. UI 操作検証（手動 or E2E）
 
@@ -172,9 +172,20 @@ src/replay_api.rs                   # HTTP API (POST /api/tachibana/order 等)
 - `s44_order_list.sh` — 注文一覧・明細取得の疎通確認
 - `s45_order_correct_cancel.sh` — 指値買い→訂正→取消の round-trip
 
-### Phase 4: エラー系・UI 検証
-1. 各エラーシナリオの E2E テスト
-2. UI 操作検証（スクリーンショット確認）
+### Phase 4: エラー系・UI 検証 ✅ 4-2/4-3/4-4 完了（2026-04-17）
+
+**Unit テスト（TDD RED→GREEN）** ✅
+- `submit_new_order_returns_error_on_wrong_password_response`（mockito、91001 プレースホルダー）
+- `submit_new_order_returns_error_on_market_closed_response`（mockito、-62）
+- `submit_new_order_returns_error_on_invalid_issue_code_response`（mockito、11001 プレースホルダー）
+
+**E2E スクリプト** ✅
+- `s46_wrong_password.sh` — 誤パスワードで order_number が返らないことを検証・エラーコードをログ
+- `s47_outside_hours.sh` — 成行注文を送り、時間内/時間外ともに対応。エラーコードをログ
+- `s48_invalid_issue.sh` — 銘柄コード "0000" で注文、エラーレスポンス・クラッシュなしを検証
+
+1. ⬜ 4-1（残高不足）: デモ環境では再現困難、後回し
+2. ⬜ UI 操作検証（スクリーンショット確認）
 
 ---
 
@@ -258,6 +269,19 @@ src/replay_api.rs                   # HTTP API (POST /api/tachibana/order 等)
 - `CLMKabuCorrectOrder` / `CLMKabuCancelOrder` に空文字の `eig_day` を渡すと `code=12002`（営業日エラー）が返る
 - 正しい運用：注文一覧 (`GET /api/tachibana/orders`) で注文の `eig_day` を取得してから訂正・取消に使用する
 - **E2E の round-trip テストでは、新規注文後に `GET /api/tachibana/orders` を呼んで `eig_day` を取得するステップが必須**
+
+### Phase 4 Unit テスト設計ノート（2026-04-17）
+
+**エラーコードのプレースホルダーについて**
+- `submit_new_order_returns_error_on_wrong_password_response`: `sResultCode="91001"` はプレースホルダー
+- `submit_new_order_returns_error_on_invalid_issue_code_response`: `sResultCode="11001"` はプレースホルダー
+- 実際のエラーコードは E2E スクリプト（s46/s47/s48）実行時にログに出力されるので、実行後にこのドキュメントを更新すること
+- `-62` (市場時間外) はログイン API の `api_response_check_returns_error_on_result_code` テストと一致するため採用
+
+**E2E スクリプトの設計方針**
+- `s46`: 意図的に `DEV_SECOND_PASSWORD` を使わず固定の誤パスワードを使用（セキュリティ検証の意味がなくなるため）
+- `s47`: 市場時間内/外を問わず実行できる設計（どちらでも PASS）。エラーコードはログに記録
+- `s48`: `issue_code="0000"` は日本株として存在しない（4桁の "0000" は銘柄コードとして不正）
 
 **Phase 4 への引き継ぎ**
 - `content_selected_buying_power_does_not_open_ticker_modal` テストは Phase 3 着手前から失敗していた既存バグ（`src/screen/dashboard.rs:1215` の collapsible if 問題と連動）→ Phase 4 エラー系の前に修正推奨
