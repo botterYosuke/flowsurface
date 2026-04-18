@@ -448,14 +448,14 @@ Bug 6 修正完了後、計画書で「headless 両対応済み ✅」だが CI 
 
 | スクリプト | 主な PEND TC | 追加後の期待挙動 |
 | :--- | :--- | :--- |
-| `s10_range_end.sh` | TC-S10-03/04（StepBackward） | PEND として skip、残 TC は pass |
+| `s10_range_end.sh` | ~~TC-S10-03/04（StepBackward）~~ → PEND 解除（StepBackward 実装済み） | 全 TC pass |
 | `s11_bar_step_discrete.sh` | TC-S11-05（pane split） | PEND として skip、残 TC は pass |
-| `s12_pre_start_history.sh` | TC-S12-01/02（StepBackward） | PEND として skip、残 TC は pass |
-| `s13_step_backward_quality.sh` | TC-S13-01/02/04 | PEND として skip、残 TC は pass |
-| `s16_replay_resilience.sh` | TC-S16-02b/03/04/05 | PEND として skip、残 TC は pass |
-| `s18_endurance.sh` | TC-S18-02-bwd/03 | PEND として skip、残 TC は pass |
+| `s12_pre_start_history.sh` | ~~TC-S12-01/02（StepBackward）~~ → PEND 解除（StepBackward 実装済み）、TC-S12-04（chart-snapshot） | PEND として skip、残 TC は pass |
+| `s13_step_backward_quality.sh` | TC-S13-02（pane/list API 501）、TC-S13-04 headless PEND 解除済み | PEND として skip、残 TC は pass |
+| `s16_replay_resilience.sh` | TC-S16-03/04/05（Live/Replay toggle 非対応）、TC-S16-02b PEND 解除済み | PEND として skip、残 TC は pass |
+| `s18_endurance.sh` | TC-S18-03（pane API 501）、TC-S18-02-bwd PEND 解除済み | PEND として skip、残 TC は pass |
 | `s26_ticker_change_after_replay_end.sh` | TC-A/B/C（pane API） | PEND として skip、残 TC は pass |
-| `x2_buttons.sh` | TC-X2-02/03/08 | PEND として skip、残 TC は pass |
+| `x2_buttons.sh` | TC-X2-08（Live モードなし）、TC-X2-02/03 PEND 解除済み | PEND として skip、残 TC は pass |
 
 ### e2e.yml 変更内容
 
@@ -650,13 +650,24 @@ Tachibana 実認証を必要とするテストも CI で実行可能。
 ### 実装ステータス
 
 - ✅ 5-A: test-headless に 11 本追加（`e2e.yml` 変更）
-- ✅ 5-B: test-gui に 19 本追加（`e2e.yml` 変更）— s14/s20/s21/s29/s30/s31/s32/s44〜s49/s1b/s1c/s1d
+- ✅ 5-B: test-gui matrix に 16 本追加（`e2e.yml` 変更）— s14/s20/s21/s29/s30/s31/s32/s44〜s49/s1b/s1c/s1d
 - ✅ 5-B: s22 専用ジョブ追加（timeout-minutes: 40）
 - ✅ 5-C: s8 修正（streams_ready 待機 + TC-S8-08〜11 を `is_headless` 分岐で囲む） → test-headless 追加
 - ✅ 5-C: s14 修正（冒頭に is_headless 全 TC PEND 分岐追加） → test-gui 追加（dev_is_demo: ""）
 - ✅ 5-D: s4/s6 ticker ハードコード調査 → **追加不可**（BinanceLinear ハードコード + CI の US IP Binance ブロック）
 - ✅ 5-D: s30/s31/s32 inject-session 依存調査 → **test-gui 追加済み**（DEV_USER_ID 必須・inject-session 不要）
+- ✅ pane API headless 実装（S11-TC-S11-05 / S18-TC-S18-03 / S26-TC-A/B/C の PEND 解消）
+  - `HeadlessPane` + `panes: Vec<HeadlessPane>` を `HeadlessEngine` に追加
+  - `list_panes / split_pane / close_pane / set_pane_ticker / set_pane_timeframe` を実装
+  - `min_step_ms()` でペインレジストリの最小 TF を使うよう `step_forward/backward` を修正
+  - s11 TC-S11-05 headless ブランチ追加、s18 TC-S18-03 `is_headless` ガード削除、s26 early-exit 削除
 - ❌ CI 緑確認
+
+---
+
+### TC-S8-11 期待値変更の根拠（2026-04-18 確認）
+
+`main.rs:2371` の `pane_api_set_timeframe()` が不正な timeframe 文字列（例: `"M999"`）を受け取ると `(400, error_json, Task::none())` を返す。旧コメント「app 層 → HTTP 200 + error」は誤りだった。`s8_error_boundary.sh` TC-S8-11a の期待値を 200 → 400 に修正済み（GUI 動作と一致）。
 
 ---
 

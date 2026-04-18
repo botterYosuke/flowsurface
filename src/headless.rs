@@ -124,6 +124,13 @@ enum LoadResult {
     Err(String),
 }
 
+/// headless モードのインメモリペイン。GUI ペインツリーの代替として ticker/timeframe を保持する。
+struct HeadlessPane {
+    id: uuid::Uuid,
+    ticker: String,
+    timeframe: Timeframe,
+}
+
 /// headless モード専用リプレイエンジン。
 /// iced への依存を持たず、tokio 非同期タスクで動作する。
 struct HeadlessEngine {
@@ -133,6 +140,7 @@ struct HeadlessEngine {
     ticker_str: String,
     timeframe: Timeframe,
     load_tx: tokio::sync::mpsc::Sender<LoadResult>,
+    panes: Vec<HeadlessPane>,
 }
 
 impl HeadlessEngine {
@@ -146,6 +154,11 @@ impl HeadlessEngine {
             ..Default::default()
         };
         let ticker_str = ticker.to_string();
+        let initial_pane = HeadlessPane {
+            id: uuid::Uuid::new_v4(),
+            ticker: ticker_str.clone(),
+            timeframe,
+        };
         Self {
             state,
             virtual_engine: VirtualExchangeEngine::new(1_000_000.0),
@@ -153,6 +166,7 @@ impl HeadlessEngine {
             ticker_str,
             timeframe,
             load_tx,
+            panes: vec![initial_pane],
         }
     }
 
@@ -323,20 +337,16 @@ impl HeadlessEngine {
             return serde_json::json!({"ok": true}).to_string();
         }
 
+        let pane_step = self.min_step_ms();
         let step_ms = match &self.state.session {
-            ReplaySession::Active {
-                clock,
-                active_streams,
-                ..
-            } => {
-                let step = crate::replay::min_timeframe_ms(active_streams);
+            ReplaySession::Active { clock, .. } => {
                 let current = clock.now_ms();
                 let end = clock.full_range().end;
-                if current + step > end {
+                if current + pane_step > end {
                     return serde_json::json!({"ok": false, "error": "at end of range"})
                         .to_string();
                 }
-                step
+                pane_step
             }
             _ => return serde_json::json!({"ok": false, "error": "not active"}).to_string(),
         };
@@ -403,6 +413,7 @@ impl HeadlessEngine {
             return serde_json::json!({"ok": true}).to_string();
         }
 
+        let pane_step = self.min_step_ms();
         let (prev_time, start_ms, step_ms, current_time) = match &self.state.session {
             ReplaySession::Active {
                 clock,
@@ -415,7 +426,6 @@ impl HeadlessEngine {
                     return serde_json::json!({"ok": false, "error": "at start of range"})
                         .to_string();
                 }
-                let step = crate::replay::min_timeframe_ms(active_streams);
                 let prev = active_streams
                     .iter()
                     .filter(|s| matches!(s, StreamKind::Kline { .. }))
@@ -428,7 +438,7 @@ impl HeadlessEngine {
                             .map(|k| k.time)
                     })
                     .max();
-                (prev, start, step, current)
+                (prev, start, pane_step, current)
             }
             _ => return serde_json::json!({"ok": false, "error": "not active"}).to_string(),
         };
@@ -637,6 +647,93 @@ impl HeadlessEngine {
         None
     }
 
+    /// 全ペインの最小タイムフレーム（ms）を返す。step forward/backward のステップ幅に使う。
+    fn min_step_ms(&self) -> u64 {
+        self.panes
+            .iter()
+            .map(|p| p.timeframe.to_milliseconds())
+            .min()
+            .unwrap_or(60_000)
+    }
+
+    fn list_panes_json(&self) -> String {
+        let panes: Vec<serde_json::Value> = self
+            .panes
+            .iter()
+            .map(|p| {
+                serde_json::json!({
+                    "id": p.id.to_string(),
+                    "ticker": p.ticker,
+                    "timeframe": format!("{}", p.timeframe),
+                    "streams_ready": true,
+                })
+            })
+            .collect();
+        serde_json::json!({ "panes": panes }).to_string()
+    }
+
+    fn split_pane(&mut self, pane_id: uuid::Uuid) -> String {
+        let source = self.panes.iter().find(|p| p.id == pane_id);
+        let (ticker, timeframe) = match source {
+            Some(p) => (p.ticker.clone(), p.timeframe),
+            None => (self.ticker_str.clone(), self.timeframe),
+        };
+        let new_pane = HeadlessPane {
+            id: uuid::Uuid::new_v4(),
+            ticker,
+            timeframe,
+        };
+        let new_id = new_pane.id;
+        self.panes.push(new_pane);
+        serde_json::json!({ "ok": true, "new_pane_id": new_id.to_string() }).to_string()
+    }
+
+    fn close_pane(&mut self, pane_id: uuid::Uuid) -> String {
+        if self.panes.len() <= 1 {
+            return serde_json::json!({ "ok": false, "error": "cannot close the last pane" })
+                .to_string();
+        }
+        let before = self.panes.len();
+        self.panes.retain(|p| p.id != pane_id);
+        if self.panes.len() < before {
+            serde_json::json!({ "ok": true }).to_string()
+        } else {
+            serde_json::json!({ "ok": false, "error": "pane not found" }).to_string()
+        }
+    }
+
+    fn set_pane_ticker(&mut self, pane_id: uuid::Uuid, ticker: String) -> String {
+        let found = self.panes.iter_mut().find(|p| p.id == pane_id);
+        if found.is_none() {
+            return serde_json::json!({ "ok": false, "error": "pane not found" }).to_string();
+        }
+        found.unwrap().ticker = ticker;
+
+        // Seek to start of range and pause so current_time resets to start_time (S26 requirement).
+        if let crate::replay::ReplaySession::Active { clock, .. } = &mut self.state.session {
+            let start = clock.full_range().start;
+            clock.pause();
+            clock.seek(start);
+        }
+        self.virtual_engine.reset();
+        serde_json::json!({ "ok": true }).to_string()
+    }
+
+    fn set_pane_timeframe(&mut self, pane_id: uuid::Uuid, timeframe_str: &str) -> String {
+        let tf = match parse_timeframe_str(timeframe_str) {
+            Ok(t) => t,
+            Err(e) => {
+                return serde_json::json!({ "ok": false, "error": e }).to_string();
+            }
+        };
+        let found = self.panes.iter_mut().find(|p| p.id == pane_id);
+        if found.is_none() {
+            return serde_json::json!({ "ok": false, "error": "pane not found" }).to_string();
+        }
+        found.unwrap().timeframe = tf;
+        serde_json::json!({ "ok": true }).to_string()
+    }
+
     /// API コマンドを処理し、ReplySender でレスポンスを返す。
     fn handle_command(&mut self, cmd: ApiCommand, reply: crate::replay_api::ReplySender) {
         use crate::replay::ReplayCommand;
@@ -695,6 +792,24 @@ impl HeadlessEngine {
                 limit_price,
             }) => {
                 reply.send(self.place_order_json(&ticker, &side, qty, &order_type, limit_price));
+            }
+            ApiCommand::Pane(crate::replay_api::PaneCommand::ListPanes) => {
+                reply.send(self.list_panes_json());
+            }
+            ApiCommand::Pane(crate::replay_api::PaneCommand::Split { pane_id, .. }) => {
+                reply.send(self.split_pane(pane_id));
+            }
+            ApiCommand::Pane(crate::replay_api::PaneCommand::Close { pane_id }) => {
+                reply.send(self.close_pane(pane_id));
+            }
+            ApiCommand::Pane(crate::replay_api::PaneCommand::SetTicker { pane_id, ticker }) => {
+                reply.send(self.set_pane_ticker(pane_id, ticker));
+            }
+            ApiCommand::Pane(crate::replay_api::PaneCommand::SetTimeframe {
+                pane_id,
+                timeframe,
+            }) => {
+                reply.send(self.set_pane_timeframe(pane_id, &timeframe));
             }
             // headless で未対応のコマンドは 501 を返す
             ApiCommand::Pane(_)

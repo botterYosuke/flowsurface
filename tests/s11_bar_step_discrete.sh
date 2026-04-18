@@ -106,7 +106,47 @@ stop_app
 
 # ── TC-S11-05: M1+M5 混在 → 最小 TF (M1=60000ms) が優先 ─────────────────
 if is_headless; then
-  pend "TC-S11-05" "headless はペイン分割非対応（pane API 501）"
+  # headless: pane/split + pane/set-timeframe で M1+M5 混在を再現してステップ幅を検証
+  setup_single_pane "BinanceLinear:BTCUSDT" "M1" "$(utc_offset -3)" "$(utc_offset -1)"
+  start_app
+  headless_play
+  if ! wait_playing 30; then
+    fail "TC-S11-05-pre" "Playing 到達せず"
+  else
+    curl -s -X POST "$API/replay/pause" > /dev/null
+    wait_status Paused 10 || true
+
+    PANES=$(curl -s "$API/pane/list")
+    PANE0=$(node -e "const ps=(JSON.parse(process.argv[1]).panes||[]); console.log(ps[0]?ps[0].id:'');" "$PANES")
+
+    # pane0 を分割して pane1 を作成し M5 に変更
+    curl -s -X POST "$API/pane/split" \
+      -H "Content-Type: application/json" \
+      -d "{\"pane_id\":\"$PANE0\",\"axis\":\"Vertical\"}" > /dev/null
+    sleep 0.3
+
+    PANES=$(curl -s "$API/pane/list")
+    PANE1=$(node -e "
+      const ps=(JSON.parse(process.argv[1]).panes||[]);
+      const p=ps.find(x=>x.id!=='$PANE0');
+      console.log(p?p.id:'');
+    " "$PANES")
+
+    curl -s -X POST "$API/pane/set-timeframe" \
+      -H "Content-Type: application/json" \
+      -d "{\"pane_id\":\"$PANE1\",\"timeframe\":\"M5\"}" > /dev/null
+
+    TB=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
+    curl -s -X POST "$API/replay/step-forward" > /dev/null
+    sleep 1
+    wait_status Paused 10 || true
+    TA=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
+    DELTA=$(node -e "console.log(String(BigInt('$TA') - BigInt('$TB')))")
+    [ "$DELTA" = "60000" ] \
+      && pass "TC-S11-05: M1+M5 混在 StepForward delta=60000ms（M1 優先）" \
+      || fail "TC-S11-05" "delta=$DELTA (expected 60000, M1 優先のはず)"
+  fi
+  stop_app
 else
   stop_app
 

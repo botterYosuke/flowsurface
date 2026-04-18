@@ -55,15 +55,6 @@ if ! wait_status "Playing" 60; then
 fi
 echo "  Playing 到達"
 
-if is_headless; then
-  pend "TC-A" "headless は pane API 非対応（501）"
-  pend "TC-B" "headless は pane API 非対応（501）"
-  pend "TC-C" "headless は pane API 非対応（501）"
-  stop_app
-  print_summary
-  exit 0
-fi
-
 # ── 10x 加速して終端まで再生 ─────────────────────────────────────────────────
 speed_to_10x
 echo "  10x 加速完了、終端まで待機..."

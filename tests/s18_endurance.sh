@@ -122,80 +122,76 @@ stop_app
 # 1x 再生で M1 は約 10 bar/秒。20 サイクル × 1.5 秒 ≈ 30 秒の間に
 # 2h range (120 bars) が終端到達するため、6h range (360 bars) を使用する。
 echo "  [TC-S18-03] Playing 中 split→close × 20 サイクル..."
-if is_headless; then
-  pend "TC-S18-03" "headless は pane API 非対応（501）"
-else
-  setup_single_pane "BinanceLinear:BTCUSDT" "M1" "$(utc_offset -7)" "$(utc_offset -1)"
-  start_app
-  headless_play
+setup_single_pane "BinanceLinear:BTCUSDT" "M1" "$(utc_offset -7)" "$(utc_offset -1)"
+start_app
+headless_play
 
-  if ! wait_playing 30; then
-    fail "TC-S18-03-pre" "Playing 到達せず"
-    exit 1
+if ! wait_playing 30; then
+  fail "TC-S18-03-pre" "Playing 到達せず"
+  exit 1
+fi
+
+CRUD_FAIL=false
+for i in $(seq 1 20); do
+  # 初期ペイン ID 取得
+  PANES=$(curl -s "$API/pane/list")
+  PANE0=$(node -e "const ps=(JSON.parse(process.argv[1]).panes||[]); console.log(ps[0]?ps[0].id:'');" "$PANES")
+  if [ -z "$PANE0" ]; then
+    fail "TC-S18-03-$i" "ペイン ID 取得失敗"
+    CRUD_FAIL=true
+    break
   fi
 
-  CRUD_FAIL=false
-  for i in $(seq 1 20); do
-    # 初期ペイン ID 取得
-    PANES=$(curl -s "$API/pane/list")
-    PANE0=$(node -e "const ps=(JSON.parse(process.argv[1]).panes||[]); console.log(ps[0]?ps[0].id:'');" "$PANES")
-    if [ -z "$PANE0" ]; then
-      fail "TC-S18-03-$i" "ペイン ID 取得失敗"
-      CRUD_FAIL=true
-      break
-    fi
+  # split
+  curl -s -X POST "$API/pane/split" \
+    -H "Content-Type: application/json" \
+    -d "{\"pane_id\":\"$PANE0\",\"axis\":\"Vertical\"}" > /dev/null
+  if ! wait_for_pane_count 2 10; then
+    fail "TC-S18-03-$i" "split 後ペイン数が 2 にならなかった"
+    CRUD_FAIL=true
+    break
+  fi
 
-    # split
-    curl -s -X POST "$API/pane/split" \
-      -H "Content-Type: application/json" \
-      -d "{\"pane_id\":\"$PANE0\",\"axis\":\"Vertical\"}" > /dev/null
-    if ! wait_for_pane_count 2 10; then
-      fail "TC-S18-03-$i" "split 後ペイン数が 2 にならなかった"
-      CRUD_FAIL=true
-      break
-    fi
+  # 新ペイン ID 取得
+  PANES=$(curl -s "$API/pane/list")
+  NEW_PANE=$(node -e "
+    const ps=(JSON.parse(process.argv[1]).panes||[]);
+    const p=ps.find(x=>x.id!=='$PANE0');
+    console.log(p?p.id:'');
+  " "$PANES")
+  if [ -z "$NEW_PANE" ]; then
+    fail "TC-S18-03-$i" "新ペイン ID 取得失敗"
+    CRUD_FAIL=true
+    break
+  fi
 
-    # 新ペイン ID 取得
-    PANES=$(curl -s "$API/pane/list")
-    NEW_PANE=$(node -e "
-      const ps=(JSON.parse(process.argv[1]).panes||[]);
-      const p=ps.find(x=>x.id!=='$PANE0');
-      console.log(p?p.id:'');
-    " "$PANES")
-    if [ -z "$NEW_PANE" ]; then
-      fail "TC-S18-03-$i" "新ペイン ID 取得失敗"
-      CRUD_FAIL=true
-      break
-    fi
+  # close
+  curl -s -X POST "$API/pane/close" \
+    -H "Content-Type: application/json" \
+    -d "{\"pane_id\":\"$NEW_PANE\"}" > /dev/null
+  if ! wait_for_pane_count 1 10; then
+    fail "TC-S18-03-$i" "close 後ペイン数が 1 にならなかった"
+    CRUD_FAIL=true
+    break
+  fi
 
-    # close
-    curl -s -X POST "$API/pane/close" \
-      -H "Content-Type: application/json" \
-      -d "{\"pane_id\":\"$NEW_PANE\"}" > /dev/null
-    if ! wait_for_pane_count 1 10; then
-      fail "TC-S18-03-$i" "close 後ペイン数が 1 にならなかった"
-      CRUD_FAIL=true
-      break
-    fi
-
-    # Playing 維持確認（5 サイクルごと）
-    if [ $((i % 5)) -eq 0 ]; then
-      STATUS=$(jqn "$(curl -s "$API/replay/status")" "d.status")
-      if [ "$STATUS" != "Playing" ]; then
-        fail "TC-S18-03-$i" "CRUD サイクル $i 回後 status=$STATUS (Playing 期待)"
-        CRUD_FAIL=true
-        break
-      fi
-      echo "    cycle $i/20: status=Playing OK"
-    fi
-  done
-
-  if ! $CRUD_FAIL; then
+  # Playing 維持確認（5 サイクルごと）
+  if [ $((i % 5)) -eq 0 ]; then
     STATUS=$(jqn "$(curl -s "$API/replay/status")" "d.status")
-    [ "$STATUS" = "Playing" ] \
-      && pass "TC-S18-03: CRUD 20 サイクル完了 → status=Playing 維持" \
-      || fail "TC-S18-03" "20 サイクル後 status=$STATUS (Playing 期待)"
+    if [ "$STATUS" != "Playing" ]; then
+      fail "TC-S18-03-$i" "CRUD サイクル $i 回後 status=$STATUS (Playing 期待)"
+      CRUD_FAIL=true
+      break
+    fi
+    echo "    cycle $i/20: status=Playing OK"
   fi
+done
+
+if ! $CRUD_FAIL; then
+  STATUS=$(jqn "$(curl -s "$API/replay/status")" "d.status")
+  [ "$STATUS" = "Playing" ] \
+    && pass "TC-S18-03: CRUD 20 サイクル完了 → status=Playing 維持" \
+    || fail "TC-S18-03" "20 サイクル後 status=$STATUS (Playing 期待)"
 fi
 
 print_summary
