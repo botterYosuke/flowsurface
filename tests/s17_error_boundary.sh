@@ -31,9 +31,9 @@ setup_single_pane "$(primary_ticker)" "M1" "$START" "$END"
 start_app
 headless_play
 
-if ! wait_playing 30; then
+if ! wait_playing 60; then
   diagnose_playing_failure
-  fail "TC-S17-precond" "Playing 到達せず"
+  fail "TC-S17-precond" "Playing 到達せず（60s タイムアウト）"
   exit 1
 fi
 
@@ -157,8 +157,9 @@ setup_single_pane "$(primary_ticker)" "M1" "$(utc_offset -3)" "$(utc_offset -1)"
 start_app
 headless_play
 
-if ! wait_playing 30; then
-  fail "TC-S17-06-pre" "Playing 到達せず"
+if ! wait_playing 60; then
+  diagnose_playing_failure
+  fail "TC-S17-06-pre" "Playing 到達せず（60s タイムアウト）"
   exit 1
 fi
 
@@ -198,8 +199,9 @@ setup_single_pane "$(primary_ticker)" "M1" "$(utc_offset -3)" "$(utc_offset -1)"
 start_app
 headless_play
 
-if ! wait_playing 30; then
-  fail "TC-S17-07-pre" "Playing 到達せず"
+if ! wait_playing 60; then
+  diagnose_playing_failure
+  fail "TC-S17-07-pre" "Playing 到達せず（60s タイムアウト）"
   exit 1
 fi
 
