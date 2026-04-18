@@ -135,6 +135,9 @@ pub struct ReplayState {
     /// 一度発火したら false に戻す。永続化しない。
     /// NOTE: `session` の一部にしない — Play は UI イベント経由で処理するため。
     pub(crate) pending_auto_play: bool,
+    /// Loading 中に Resume が呼ばれたとき true にセットし、Active 遷移時に自動再開する。
+    /// ticker/timeframe 変更後にユーザーが Resume を呼んだが、まだデータロード中の場合に使う。
+    pub(crate) resume_pending: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -194,6 +197,7 @@ impl Default for ReplayState {
             range_input: ReplayRangeInput::default(),
             session: ReplaySession::Idle,
             pending_auto_play: false,
+            resume_pending: false,
         }
     }
 }
@@ -210,6 +214,7 @@ impl ReplayState {
                 self.mode = ReplayMode::Live;
                 self.session = ReplaySession::Idle;
                 self.pending_auto_play = false;
+                self.resume_pending = false;
             }
         }
     }
@@ -255,9 +260,10 @@ impl ReplayState {
         self.pending_auto_play = false;
     }
 
-    /// セッションが利用不可のとき、pending_auto_play フラグをクリアする。
+    /// セッションが利用不可のとき、pending_auto_play / resume_pending フラグをクリアする。
     pub fn on_session_unavailable(&mut self) {
         self.pending_auto_play = false;
+        self.resume_pending = false;
     }
 
     /// 速度を次の段階にサイクルする (1x → 2x → 5x → 10x → 1x)。

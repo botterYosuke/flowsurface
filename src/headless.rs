@@ -713,13 +713,17 @@ impl HeadlessEngine {
         }
         found.unwrap().ticker = ticker;
 
-        // Seek to start of range and pause so current_time resets to start_time (S26 requirement).
-        if let crate::replay::ReplaySession::Active { clock, .. } = &mut self.state.session {
-            let start = clock.full_range().start;
-            clock.pause();
-            clock.seek(start);
+        // Only reset the clock for the primary (first) pane. Secondary panes added via split
+        // are label-only in headless mode; changing their ticker must not interrupt playback.
+        let is_primary = self.panes.first().map(|p| p.id == pane_id).unwrap_or(false);
+        if is_primary {
+            if let crate::replay::ReplaySession::Active { clock, .. } = &mut self.state.session {
+                let start = clock.full_range().start;
+                clock.pause();
+                clock.seek(start);
+            }
+            self.virtual_engine.reset();
         }
-        self.virtual_engine.reset();
         serde_json::json!({ "ok": true }).to_string()
     }
 
@@ -735,6 +739,11 @@ impl HeadlessEngine {
             return serde_json::json!({ "ok": false, "error": "pane not found" }).to_string();
         }
         found.unwrap().timeframe = tf;
+        if let crate::replay::ReplaySession::Active { clock, .. } = &mut self.state.session {
+            let start = clock.full_range().start;
+            clock.pause();
+            clock.seek(start);
+        }
         serde_json::json!({ "ok": true }).to_string()
     }
 

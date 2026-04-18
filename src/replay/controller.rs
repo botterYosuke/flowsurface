@@ -61,6 +61,7 @@ impl ReplayController {
                 },
                 session: ReplaySession::Idle,
                 pending_auto_play,
+                resume_pending: false,
             },
         }
     }
@@ -363,6 +364,7 @@ impl ReplayController {
 
             ReplayUserMessage::Play => {
                 self.state.on_manual_play_requested();
+                self.state.resume_pending = false;
 
                 let (start_ms, end_ms) = match parse_replay_range(
                     &self.state.range_input.start,
@@ -490,11 +492,19 @@ impl ReplayController {
             ReplayUserMessage::Resume => {
                 use super::clock::ClockStatus;
                 let now = Instant::now();
-                if let ReplaySession::Active { clock, .. } = &mut self.state.session
-                    && clock.status() == ClockStatus::Paused
-                {
-                    clock.play(now);
-                    // Playing: 既に再生中 — no-op
+                match &mut self.state.session {
+                    ReplaySession::Active { clock, .. }
+                        if clock.status() == ClockStatus::Paused =>
+                    {
+                        clock.play(now);
+                    }
+                    ReplaySession::Loading { .. } => {
+                        // データロード完了後に自動再開するようフラグを立てる。
+                        // ticker/timeframe 変更直後にユーザーが Resume を呼んだが、
+                        // まだ klines が届いていない場合に有効。
+                        self.state.resume_pending = true;
+                    }
+                    _ => {}
                 }
                 (Task::none(), None)
             }
@@ -503,6 +513,7 @@ impl ReplayController {
                 if let ReplaySession::Active { clock, .. } = &mut self.state.session {
                     clock.pause();
                 }
+                self.state.resume_pending = false;
                 (Task::none(), None)
             }
 
@@ -662,6 +673,17 @@ impl ReplayController {
                             store,
                             active_streams,
                         };
+                    }
+
+                    // Loading 中に Resume が呼ばれていた場合、Active 遷移後に再開する。
+                    if self.state.resume_pending {
+                        self.state.resume_pending = false;
+                        if let ReplaySession::Active { clock, .. } = &mut self.state.session {
+                            use super::clock::ClockStatus;
+                            if clock.status() == ClockStatus::Paused {
+                                clock.play(Instant::now());
+                            }
+                        }
                     }
                 }
 
@@ -896,6 +918,7 @@ impl ReplayController {
     /// `DataLoadFailed` 時に呼ぶことで次回 Play 時に残留状態が混入しないようにする。
     fn reset_session(&mut self) {
         self.state.session = ReplaySession::Idle;
+        self.state.resume_pending = false;
     }
 
     /// `0..=target_ms` の klines を全 active_streams からチャートに注入する。

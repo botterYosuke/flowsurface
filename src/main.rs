@@ -309,12 +309,12 @@ impl Flowsurface {
             is_headless: std::env::var("CI").is_ok() || std::env::args().any(|a| a == "--headless"),
         };
 
-        if let Some(err) = audio_init_err {
-            if !state.is_headless {
-                state
-                    .notifications
-                    .push(Toast::error(format!("Audio disabled: {err}")));
-            }
+        if let Some(err) = audio_init_err
+            && !state.is_headless
+        {
+            state
+                .notifications
+                .push(Toast::error(format!("Audio disabled: {err}")));
         }
 
         // 起動時にまずセッション復元を試行する（ウィンドウはまだ開かない）
@@ -533,7 +533,9 @@ impl Flowsurface {
                                 event: msg,
                             });
 
-                        if let Some(msg) = self.audio_stream.try_play_sound(&stream, &buffer) {
+                        if let Some(msg) = self.audio_stream.try_play_sound(&stream, &buffer)
+                            && !self.is_headless
+                        {
                             self.notifications.push(Toast::error(msg));
                         }
 
@@ -977,18 +979,18 @@ impl Flowsurface {
                 }
             }
             Message::AudioStream(message) => {
-                if let Some(event) = self.audio_stream.update(message) {
-                    if !self.is_headless {
-                        match event {
-                            modal::audio::UpdateEvent::RetryFailed(err) => {
-                                self.notifications
-                                    .push(Toast::error(format!("Audio still unavailable: {err}")));
-                            }
-                            modal::audio::UpdateEvent::RetrySucceeded => {
-                                self.notifications.push(Toast::info(
-                                    "Audio output re-initialized successfully".to_string(),
-                                ));
-                            }
+                if let Some(event) = self.audio_stream.update(message)
+                    && !self.is_headless
+                {
+                    match event {
+                        modal::audio::UpdateEvent::RetryFailed(err) => {
+                            self.notifications
+                                .push(Toast::error(format!("Audio still unavailable: {err}")));
+                        }
+                        modal::audio::UpdateEvent::RetrySucceeded => {
+                            self.notifications.push(Toast::info(
+                                "Audio output re-initialized successfully".to_string(),
+                            ));
                         }
                     }
                 }
