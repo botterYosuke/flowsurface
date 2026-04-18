@@ -674,7 +674,13 @@ impl HeadlessEngine {
         let source = self.panes.iter().find(|p| p.id == pane_id);
         let (ticker, timeframe) = match source {
             Some(p) => (p.ticker.clone(), p.timeframe),
-            None => (self.ticker_str.clone(), self.timeframe),
+            None => {
+                return serde_json::json!({
+                    "ok": false,
+                    "error": format!("pane not found: {pane_id}")
+                })
+                .to_string();
+            }
         };
         let new_pane = HeadlessPane {
             id: uuid::Uuid::new_v4(),

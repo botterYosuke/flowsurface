@@ -310,9 +310,11 @@ impl Flowsurface {
         };
 
         if let Some(err) = audio_init_err {
-            state
-                .notifications
-                .push(Toast::error(format!("Audio disabled: {err}")));
+            if !state.is_headless {
+                state
+                    .notifications
+                    .push(Toast::error(format!("Audio disabled: {err}")));
+            }
         }
 
         // 起動時にまずセッション復元を試行する（ウィンドウはまだ開かない）
@@ -976,15 +978,17 @@ impl Flowsurface {
             }
             Message::AudioStream(message) => {
                 if let Some(event) = self.audio_stream.update(message) {
-                    match event {
-                        modal::audio::UpdateEvent::RetryFailed(err) => {
-                            self.notifications
-                                .push(Toast::error(format!("Audio still unavailable: {err}")));
-                        }
-                        modal::audio::UpdateEvent::RetrySucceeded => {
-                            self.notifications.push(Toast::info(
-                                "Audio output re-initialized successfully".to_string(),
-                            ));
+                    if !self.is_headless {
+                        match event {
+                            modal::audio::UpdateEvent::RetryFailed(err) => {
+                                self.notifications
+                                    .push(Toast::error(format!("Audio still unavailable: {err}")));
+                            }
+                            modal::audio::UpdateEvent::RetrySucceeded => {
+                                self.notifications.push(Toast::info(
+                                    "Audio output re-initialized successfully".to_string(),
+                                ));
+                            }
                         }
                     }
                 }
@@ -2425,6 +2429,7 @@ impl Flowsurface {
 
         // settings.selected_basis を書き換えてから init_focused_pane を呼ぶ。
         // これは BasisSelected 経路と同等の effect (stream 再構築 + refresh_streams) を得るための近道。
+        let is_replay = self.replay.is_replay();
         let dashboard = self.active_dashboard_mut();
         let prev_focus = dashboard.focus;
         dashboard.focus = Some((window_id, pg_pane));
@@ -2438,14 +2443,15 @@ impl Flowsurface {
         }
 
         // リプレイ中は ReloadKlineStream で clock を Paused に遷移させる。
-        let replay_task = if let Some(old) = old_kline_stream_for_replay {
+        // old_kline が None（Depth/Trades のみのペイン等）でも is_replay なら必ず Pause する。
+        let replay_task = if is_replay {
             let new_stream = exchange::adapter::StreamKind::Kline {
                 ticker_info,
                 timeframe: tf,
             };
             Task::done(Message::Replay(ReplayMessage::System(
                 ReplaySystemEvent::ReloadKlineStream {
-                    old_stream: Some(old),
+                    old_stream: old_kline_stream_for_replay,
                     new_stream,
                 },
             )))
