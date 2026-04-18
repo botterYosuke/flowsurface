@@ -411,7 +411,7 @@ fn step_forward(&mut self) -> String {
 - ✅ Bug 3: `src/headless.rs` — step_forward の合成トレード生成で on_tick を正しく呼ぶ
 - ✅ Bug 4: `src/headless.rs` — GetState Idle 時 400 返却修正
 - ✅ Bug 5: `src/headless.rs` — `get_orders_json()` を `{"orders":[...]}` 形式に修正（TC-K 対応）
-- ❌ Bug 6: `src/headless.rs` — Playing 中 StepForward が End にシークしない（TC-S9-03b）
+- ✅ Bug 6: `src/headless.rs` — Playing 中 StepForward が End にシークしない（TC-S9-03b）
 
 ---
 
@@ -463,6 +463,6 @@ Bug 6 修正完了後、計画書で「headless 両対応済み ✅」だが CI 
 
 ### 実装ステータス
 
-- ❌ Bug 6 修正
-- ❌ `e2e.yml` test-headless ジョブに 8 スクリプト追加
+- ✅ Bug 6 修正
+- ✅ `e2e.yml` test-headless ジョブに 8 スクリプト追加
 - ❌ CI 緑確認

@@ -383,6 +383,73 @@ impl HeadlessEngine {
         serde_json::json!({"ok": true, "current_time": new_time}).to_string()
     }
 
+    /// `POST /api/replay/step-backward` を処理する。Playing 中は先に自動 pause して start にシークする。
+    fn step_backward(&mut self) -> String {
+        let was_playing = self.state.is_playing();
+        if was_playing {
+            let _ = self.pause();
+        }
+        if !self.state.is_paused() {
+            return serde_json::json!({"ok": false, "error": "not paused"}).to_string();
+        }
+
+        // Playing 中に呼ばれた場合は start にシークしてリセット（GUI 仕様に合わせる）
+        if was_playing {
+            if let ReplaySession::Active { clock, .. } = &mut self.state.session {
+                let start = clock.full_range().start;
+                clock.seek(start);
+            }
+            self.virtual_engine.reset();
+            return serde_json::json!({"ok": true}).to_string();
+        }
+
+        let (prev_time, start_ms, step_ms, current_time) = match &self.state.session {
+            ReplaySession::Active {
+                clock,
+                store,
+                active_streams,
+            } => {
+                let current = clock.now_ms();
+                let start = clock.full_range().start;
+                if current <= start {
+                    return serde_json::json!({"ok": false, "error": "at start of range"})
+                        .to_string();
+                }
+                let step = crate::replay::min_timeframe_ms(active_streams);
+                let prev = active_streams
+                    .iter()
+                    .filter(|s| matches!(s, StreamKind::Kline { .. }))
+                    .filter_map(|stream| {
+                        store
+                            .klines_in(stream, 0..current)
+                            .iter()
+                            .rev()
+                            .find(|k| k.time < current)
+                            .map(|k| k.time)
+                    })
+                    .max();
+                (prev, start, step, current)
+            }
+            _ => return serde_json::json!({"ok": false, "error": "not active"}).to_string(),
+        };
+
+        let new_time = crate::replay::compute_step_backward_target(
+            prev_time,
+            current_time,
+            start_ms,
+            step_ms,
+        );
+
+        if let ReplaySession::Active { clock, .. } = &mut self.state.session {
+            clock.seek(new_time);
+        }
+
+        // 時刻が後退したため仮想エンジンをリセット
+        self.virtual_engine.reset();
+
+        serde_json::json!({"ok": true, "current_time": new_time}).to_string()
+    }
+
     fn pause(&mut self) -> String {
         if let ReplaySession::Active { clock, .. } = &mut self.state.session {
             clock.pause();
@@ -606,11 +673,7 @@ impl HeadlessEngine {
                 reply.send(self.get_status_json());
             }
             ApiCommand::Replay(ReplayCommand::StepBackward) => {
-                // headless では StepBackward は未実装
-                reply.send_status(
-                    501,
-                    r#"{"error":"StepBackward not implemented in headless mode"}"#.to_string(),
-                );
+                reply.send(self.step_backward());
             }
             ApiCommand::Replay(ReplayCommand::SaveState) => {
                 // headless では保存不要
@@ -937,6 +1000,117 @@ mod tests {
         let mut engine = HeadlessEngine::new(ticker, Timeframe::M1, tx);
         let json = engine.step_forward();
         assert!(json.contains("not paused") || json.contains("not active"));
+    }
+
+    #[test]
+    fn step_backward_returns_error_when_not_active() {
+        let ticker = parse_ticker_str("HyperliquidLinear:BTC").unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let mut engine = HeadlessEngine::new(ticker, Timeframe::M1, tx);
+        let json = engine.step_backward();
+        assert!(json.contains("not active") || json.contains("not paused"));
+    }
+
+    fn make_active_engine_with_klines(
+        start_ms: u64,
+        end_ms: u64,
+        step_ms: u64,
+        initial_time: u64,
+    ) -> HeadlessEngine {
+        use exchange::{Volume, unit::MinTicksize};
+
+        let ticker = parse_ticker_str("HyperliquidLinear:BTC").unwrap();
+        let timeframe = Timeframe::M1;
+        let ticker_info = TickerInfo::new(ticker, 0.01, 0.001, None);
+        let stream = StreamKind::Kline { ticker_info, timeframe };
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let mut engine = HeadlessEngine::new(ticker, timeframe, tx);
+
+        // Active セッションを手動で構築する
+        let mut clock = StepClock::new(start_ms, end_ms, step_ms);
+        clock.pause();
+        clock.seek(initial_time);
+
+        let mut store = EventStore::new();
+        // start, start+step の 2 本の kline を挿入する
+        let mk = |t: u64| {
+            exchange::Kline::new(
+                t,
+                100.0,
+                101.0,
+                99.0,
+                100.5,
+                Volume::empty_total(),
+                MinTicksize::from(0.01),
+            )
+        };
+        let mut t = start_ms;
+        while t <= end_ms {
+            store.ingest_loaded(
+                stream,
+                start_ms..end_ms + 1,
+                crate::replay::store::LoadedData {
+                    klines: vec![mk(t)],
+                    trades: vec![],
+                },
+            );
+            t += step_ms;
+        }
+
+        let mut active_streams = HashSet::new();
+        active_streams.insert(stream);
+
+        engine.state.session = ReplaySession::Active { clock, store, active_streams };
+        engine
+    }
+
+    #[test]
+    fn step_backward_returns_error_when_at_start() {
+        let start_ms = 1_000_000u64;
+        let step_ms = 60_000u64;
+        let mut engine = make_active_engine_with_klines(start_ms, start_ms + step_ms * 2, step_ms, start_ms);
+        let json = engine.step_backward();
+        assert!(json.contains("at start"), "expected 'at start' error, got: {json}");
+    }
+
+    #[test]
+    fn step_backward_moves_back_one_step_when_paused() {
+        let start_ms = 1_000_000u64;
+        let step_ms = 60_000u64;
+        let initial_time = start_ms + step_ms; // 2 本目の位置
+        let mut engine = make_active_engine_with_klines(start_ms, start_ms + step_ms * 2, step_ms, initial_time);
+        let before = engine.state.current_time();
+        let json = engine.step_backward();
+        assert!(json.contains("\"ok\":true"), "expected ok, got: {json}");
+        let after = engine.state.current_time();
+        assert!(after < before, "time should decrease: before={before}, after={after}");
+        assert_eq!(after, start_ms);
+    }
+
+    #[test]
+    fn step_backward_resets_virtual_engine() {
+        use crate::replay::virtual_exchange::{PositionSide, VirtualOrder, VirtualOrderStatus};
+
+        let start_ms = 1_000_000u64;
+        let step_ms = 60_000u64;
+        let initial_time = start_ms + step_ms;
+        let mut engine = make_active_engine_with_klines(start_ms, start_ms + step_ms * 2, step_ms, initial_time);
+
+        // 注文を追加してから後退 → リセットされるはず
+        engine.virtual_engine.place_order(VirtualOrder {
+            order_id: "test-order".to_string(),
+            ticker: "BTC".to_string(),
+            side: PositionSide::Long,
+            qty: 0.1,
+            order_type: VirtualOrderType::Market,
+            placed_time_ms: initial_time,
+            status: VirtualOrderStatus::Pending,
+        });
+        assert_eq!(engine.virtual_engine.get_orders().len(), 1);
+
+        let _ = engine.step_backward();
+        assert_eq!(engine.virtual_engine.get_orders().len(), 0, "virtual engine should be reset after step_backward");
     }
 
     #[test]

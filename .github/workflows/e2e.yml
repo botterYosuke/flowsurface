@@ -150,6 +150,22 @@ jobs:
             script: s43_get_state_endpoint.sh
           - name: X4 Virtual order Live guard
             script: x4_virtual_order_live_guard.sh
+          - name: S10 Range end
+            script: s10_range_end.sh
+          - name: S11 Bar step discrete
+            script: s11_bar_step_discrete.sh
+          - name: S12 Pre-start history
+            script: s12_pre_start_history.sh
+          - name: S13 Step backward quality
+            script: s13_step_backward_quality.sh
+          - name: S16 Replay resilience
+            script: s16_replay_resilience.sh
+          - name: S18 Endurance
+            script: s18_endurance.sh
+          - name: S26 Ticker change after replay end
+            script: s26_ticker_change_after_replay_end.sh
+          - name: X2 Buttons
+            script: x2_buttons.sh
 
     steps:
       - uses: actions/checkout@v4
