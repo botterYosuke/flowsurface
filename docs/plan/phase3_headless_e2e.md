@@ -466,3 +466,175 @@ Bug 6 修正完了後、計画書で「headless 両対応済み ✅」だが CI 
 - ✅ Bug 6 修正
 - ✅ `e2e.yml` test-headless ジョブに 8 スクリプト追加
 - ❌ CI 緑確認
+
+---
+
+## Phase 5：残存 CI 未登録テストの全追加
+
+### 前提
+
+GitHub Secrets に `DEV_USER_ID` / `DEV_PASSWORD` / `DEV_SECOND_PASSWORD` が登録済みであるため、
+Tachibana 実認証を必要とするテストも CI で実行可能。
+
+### スクリプト分類（全調査結果）
+
+| スクリプト | is_headless | Tachibana 認証 | GUI 専用機能 | 追加先 |
+| :--- | :---: | :---: | :---: | :--- |
+| s7_mid_replay_pane.sh | ✅ | ✗ | ✗ | test-headless |
+| s8_error_boundary.sh | ❌ 未実装 | ✗ | ✗ | **要修正** → test-headless |
+| s17_error_boundary.sh | ✅ | ✗ | ✗ | test-headless |
+| s23_mid_replay_ticker_change.sh | ✅ | ✗ | ✗ | test-headless |
+| s24_sidebar_select_ticker.sh | ✅ | ✗ | ✗ | test-headless |
+| s28_ticker_change_while_loading.sh | ✅ | ✗ | ✗ | test-headless |
+| s33_sidebar_split_pane.sh | ✅ | ✗ | ✗ | test-headless |
+| s34_virtual_order_basic.sh | ✅ | ✗ | ✗ | test-headless |
+| s36_sidebar_order_pane.sh | ✅ | ✗ | ✗ | test-headless |
+| s37_order_panels_integrated.sh | ✅ | ✗ | ✗ | test-headless |
+| s39_buying_power_portfolio.sh | ✅ | ✗ | ✗ | test-headless |
+| x1_current_time.sh | ✅ | ✗ | ✗ | test-headless |
+| s4_multi_pane_binance.sh | ✅ | ✗ | ✗ | **要調査**（ticker ハードコード確認） |
+| s6_mixed_timeframes.sh | ✅ | ✗ | ✗ | **要調査**（ticker ハードコード確認） |
+| s32_toyota_candlestick_add.sh | ✅ | inject-session | ✗ | **要調査**（inject-session 依存確認） |
+| s14_autoplay_event_driven.sh | ❌ 未実装 | ✅ 必須 | ✗ | **要修正** → test-gui (DEV_IS_DEMO="") |
+| s20_tachibana_replay_resilience.sh | ✅ | ✅ 必須 | ✗ | test-gui (DEV_IS_DEMO="") |
+| s21_tachibana_error_boundary.sh | ✅ | ✅ 必須 | ✗ | test-gui (DEV_IS_DEMO="") |
+| s22_tachibana_endurance.sh | ✅ | ✅ 必須 | ✗ | test-gui ⚠️ 15-30 分（timeout-minutes: 40 必要） |
+| s29_tachibana_holiday_skip.sh | ✅ | ✅ 必須 | ✗ | test-gui ⚠️ 固定日付（2025-01-07〜15） |
+| s44_order_list.sh | ✅ | ✅ 必須 | ✗ | test-gui (DEV_IS_DEMO="") |
+| s45_order_correct_cancel.sh | ✅ | ✅ + DEV_SECOND_PASSWORD | ✗ | test-gui (DEV_IS_DEMO="") |
+| s46_wrong_password.sh | ✅ | ✅ 必須 | ✗ | test-gui (DEV_IS_DEMO="") |
+| s47_outside_hours.sh | ✅ | ✅ + DEV_SECOND_PASSWORD | ✗ | test-gui (DEV_IS_DEMO="") |
+| s48_invalid_issue.sh | ✅ | ✅ + DEV_SECOND_PASSWORD | ✗ | test-gui (DEV_IS_DEMO="") |
+| s49_account_info.sh | ✅ | ✅ 必須 | ✗ | test-gui (DEV_IS_DEMO="") |
+| s1b_limit_buy.sh | ✅ | ✅ + DEV_SECOND_PASSWORD | ✗ | test-gui (DEV_IS_DEMO="") |
+| s1c_market_sell.sh | ✅ | ✅ + DEV_SECOND_PASSWORD | ✗ | test-gui (DEV_IS_DEMO="") |
+| s1d_limit_sell.sh | ✅ | ✅ + DEV_SECOND_PASSWORD | ✗ | test-gui (DEV_IS_DEMO="") |
+| s30_mixed_sample_loading.sh | ✅ | inject-session + DEV_USER_ID | ✗ | **要調査**（inject-session 依存確認） |
+| s31_replay_end_restart.sh | ✅ | inject-session + DEV_USER_ID | ✗ | **要調査**（inject-session 依存確認） |
+| s15_chart_snapshot.sh | ✅ | ✗ | ✅ chart-snapshot | **追加不可**（GUI 描画依存） |
+| s19_tachibana_chart_snapshot.sh | ✅ | ✅ 必須 | ✅ chart-snapshot | **追加不可**（GUI 描画依存） |
+| x3_chart_update.sh | ✅ | ✗ | ✅ chart-snapshot | **追加不可**（GUI 描画依存） |
+| s25_screenshot_and_auth.sh | ❌ 未実装 | ✗ | ✅ screenshot | **追加不可**（GUI 描画依存） |
+
+---
+
+### 5-A：Headless ジョブ追加（即時追加可能 12 本）
+
+`test-headless` の `matrix.include` に追加する：
+
+```yaml
+          - name: S7 Mid-replay pane
+            script: s7_mid_replay_pane.sh
+          - name: S17 Error boundary
+            script: s17_error_boundary.sh
+          - name: S23 Mid-replay ticker change
+            script: s23_mid_replay_ticker_change.sh
+          - name: S24 Sidebar select ticker
+            script: s24_sidebar_select_ticker.sh
+          - name: S28 Ticker change while loading
+            script: s28_ticker_change_while_loading.sh
+          - name: S33 Sidebar split pane
+            script: s33_sidebar_split_pane.sh
+          - name: S34 Virtual order basic
+            script: s34_virtual_order_basic.sh
+          - name: S36 Sidebar order pane
+            script: s36_sidebar_order_pane.sh
+          - name: S37 Order panels integrated
+            script: s37_order_panels_integrated.sh
+          - name: S39 Buying power portfolio
+            script: s39_buying_power_portfolio.sh
+          - name: X1 Current time
+            script: x1_current_time.sh
+```
+
+---
+
+### 5-B：GUI ジョブ追加（Tachibana 認証あり 10 本）
+
+`test-gui` の `matrix.include` に追加する：
+
+```yaml
+          - name: S20 Tachibana replay resilience
+            script: s20_tachibana_replay_resilience.sh
+            dev_is_demo: ""
+          - name: S21 Tachibana error boundary
+            script: s21_tachibana_error_boundary.sh
+            dev_is_demo: ""
+          - name: S29 Tachibana holiday skip
+            script: s29_tachibana_holiday_skip.sh
+            dev_is_demo: ""
+          - name: S44 Order list
+            script: s44_order_list.sh
+            dev_is_demo: ""
+          - name: S45 Order correct cancel
+            script: s45_order_correct_cancel.sh
+            dev_is_demo: ""
+          - name: S46 Wrong password
+            script: s46_wrong_password.sh
+            dev_is_demo: ""
+          - name: S47 Outside hours
+            script: s47_outside_hours.sh
+            dev_is_demo: ""
+          - name: S48 Invalid issue
+            script: s48_invalid_issue.sh
+            dev_is_demo: ""
+          - name: S49 Account info
+            script: s49_account_info.sh
+            dev_is_demo: ""
+          - name: S1b Limit buy
+            script: s1b_limit_buy.sh
+            dev_is_demo: ""
+          - name: S1c Market sell
+            script: s1c_market_sell.sh
+            dev_is_demo: ""
+          - name: S1d Limit sell
+            script: s1d_limit_sell.sh
+            dev_is_demo: ""
+```
+
+⚠️ `s22_tachibana_endurance.sh` は実行時間 15〜30 分のため、専用ジョブで `timeout-minutes: 40` を設定して追加する。
+
+---
+
+### 5-C：要修正スクリプト（修正後に追加）
+
+| スクリプト | 修正内容 | 追加先 |
+| :--- | :--- | :--- |
+| s8_error_boundary.sh | `is_headless` 分岐を追加（pane/list は headless で 501 返却） | test-headless |
+| s14_autoplay_event_driven.sh | `is_headless` 分岐を追加（headless ではスキップ or PEND） | test-gui |
+
+---
+
+### 5-D：要調査スクリプト（ticker / inject-session 確認後に判断）
+
+| スクリプト | 調査内容 |
+| :--- | :--- |
+| s4_multi_pane_binance.sh | BinanceLinear がハードコードされているか確認。`E2E_TICKER` 変数経由なら HyperliquidLinear:BTC で CI 実行可能 |
+| s6_mixed_timeframes.sh | 同上 |
+| s32_toyota_candlestick_add.sh | `inject-session` エンドポイントを使用しているか確認。debug ビルドが必要な場合は追加不可 |
+| s30_mixed_sample_loading.sh | 同上 |
+| s31_replay_end_restart.sh | 同上 |
+
+---
+
+### 5-E：追加不可（GUI 描画依存）
+
+| スクリプト | 理由 |
+| :--- | :--- |
+| s15_chart_snapshot.sh | `chart-snapshot` API が GUI 描画に依存 |
+| s19_tachibana_chart_snapshot.sh | 同上 + Tachibana 認証 |
+| x3_chart_update.sh | 同上 |
+| s25_screenshot_and_auth.sh | `app/screenshot` API が GUI 描画に依存 |
+
+---
+
+### 実装ステータス
+
+- ❌ 5-A: test-headless に 11 本追加（`e2e.yml` 変更）
+- ❌ 5-B: test-gui に 12 本追加（`e2e.yml` 変更）
+- ❌ 5-B: s22 専用ジョブ追加（timeout-minutes: 40）
+- ❌ 5-C: s8 修正（`is_headless` 分岐追加）
+- ❌ 5-C: s14 修正（`is_headless` 分岐追加）
+- ❌ 5-D: s4/s6 ticker ハードコード調査
+- ❌ 5-D: s30/s31/s32 inject-session 依存調査
+- ❌ CI 緑確認

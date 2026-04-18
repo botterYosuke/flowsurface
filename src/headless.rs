@@ -433,12 +433,8 @@ impl HeadlessEngine {
             _ => return serde_json::json!({"ok": false, "error": "not active"}).to_string(),
         };
 
-        let new_time = crate::replay::compute_step_backward_target(
-            prev_time,
-            current_time,
-            start_ms,
-            step_ms,
-        );
+        let new_time =
+            crate::replay::compute_step_backward_target(prev_time, current_time, start_ms, step_ms);
 
         if let ReplaySession::Active { clock, .. } = &mut self.state.session {
             clock.seek(new_time);
@@ -1022,7 +1018,10 @@ mod tests {
         let ticker = parse_ticker_str("HyperliquidLinear:BTC").unwrap();
         let timeframe = Timeframe::M1;
         let ticker_info = TickerInfo::new(ticker, 0.01, 0.001, None);
-        let stream = StreamKind::Kline { ticker_info, timeframe };
+        let stream = StreamKind::Kline {
+            ticker_info,
+            timeframe,
+        };
 
         let (tx, _rx) = tokio::sync::mpsc::channel(4);
         let mut engine = HeadlessEngine::new(ticker, timeframe, tx);
@@ -1061,7 +1060,11 @@ mod tests {
         let mut active_streams = HashSet::new();
         active_streams.insert(stream);
 
-        engine.state.session = ReplaySession::Active { clock, store, active_streams };
+        engine.state.session = ReplaySession::Active {
+            clock,
+            store,
+            active_streams,
+        };
         engine
     }
 
@@ -1069,9 +1072,13 @@ mod tests {
     fn step_backward_returns_error_when_at_start() {
         let start_ms = 1_000_000u64;
         let step_ms = 60_000u64;
-        let mut engine = make_active_engine_with_klines(start_ms, start_ms + step_ms * 2, step_ms, start_ms);
+        let mut engine =
+            make_active_engine_with_klines(start_ms, start_ms + step_ms * 2, step_ms, start_ms);
         let json = engine.step_backward();
-        assert!(json.contains("at start"), "expected 'at start' error, got: {json}");
+        assert!(
+            json.contains("at start"),
+            "expected 'at start' error, got: {json}"
+        );
     }
 
     #[test]
@@ -1079,12 +1086,16 @@ mod tests {
         let start_ms = 1_000_000u64;
         let step_ms = 60_000u64;
         let initial_time = start_ms + step_ms; // 2 本目の位置
-        let mut engine = make_active_engine_with_klines(start_ms, start_ms + step_ms * 2, step_ms, initial_time);
+        let mut engine =
+            make_active_engine_with_klines(start_ms, start_ms + step_ms * 2, step_ms, initial_time);
         let before = engine.state.current_time();
         let json = engine.step_backward();
         assert!(json.contains("\"ok\":true"), "expected ok, got: {json}");
         let after = engine.state.current_time();
-        assert!(after < before, "time should decrease: before={before}, after={after}");
+        assert!(
+            after < before,
+            "time should decrease: before={before}, after={after}"
+        );
         assert_eq!(after, start_ms);
     }
 
@@ -1095,7 +1106,8 @@ mod tests {
         let start_ms = 1_000_000u64;
         let step_ms = 60_000u64;
         let initial_time = start_ms + step_ms;
-        let mut engine = make_active_engine_with_klines(start_ms, start_ms + step_ms * 2, step_ms, initial_time);
+        let mut engine =
+            make_active_engine_with_klines(start_ms, start_ms + step_ms * 2, step_ms, initial_time);
 
         // 注文を追加してから後退 → リセットされるはず
         engine.virtual_engine.place_order(VirtualOrder {
@@ -1110,7 +1122,11 @@ mod tests {
         assert_eq!(engine.virtual_engine.get_orders().len(), 1);
 
         let _ = engine.step_backward();
-        assert_eq!(engine.virtual_engine.get_orders().len(), 0, "virtual engine should be reset after step_backward");
+        assert_eq!(
+            engine.virtual_engine.get_orders().len(),
+            0,
+            "virtual engine should be reset after step_backward"
+        );
     }
 
     #[test]
