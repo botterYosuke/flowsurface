@@ -142,7 +142,7 @@ echo "── TC-S32-03: 新ペインに set-ticker TachibanaSpot:7203"
 SET_TICKER_CODE="000"
 _end_tc03=$((SECONDS + 30))
 while [ $SECONDS -lt $_end_tc03 ]; do
-  SET_TICKER_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+  SET_TICKER_CODE=$(curl -s --max-time 5 -o /dev/null -w "%{http_code}" \
     -X POST "$API/pane/set-ticker" \
     -H "Content-Type: application/json" \
     -d "{\"pane_id\":\"$NEW_PANE\",\"ticker\":\"TachibanaSpot:7203\"}")

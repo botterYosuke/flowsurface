@@ -2221,6 +2221,14 @@ impl Flowsurface {
         Ok(ticker)
     }
 
+    fn resolve_ticker_info(&self, ticker: &exchange::Ticker) -> Option<exchange::TickerInfo> {
+        self.sidebar
+            .tickers_info()
+            .get(ticker)
+            .and_then(|opt| *opt)
+            .or_else(|| exchange::adapter::tachibana::get_ticker_info_sync(ticker))
+    }
+
     fn pane_api_set_ticker(
         &mut self,
         pane_id: uuid::Uuid,
@@ -2237,12 +2245,7 @@ impl Flowsurface {
             }
         };
 
-        let ticker_info = self
-            .sidebar
-            .tickers_info()
-            .get(&ticker)
-            .and_then(|opt| *opt)
-            .or_else(|| exchange::adapter::tachibana::get_ticker_info_sync(&ticker));
+        let ticker_info = self.resolve_ticker_info(&ticker);
         let Some(ticker_info) = ticker_info else {
             return (
                 404,
@@ -2530,12 +2533,7 @@ impl Flowsurface {
             }
         };
 
-        let ticker_info = self
-            .sidebar
-            .tickers_info()
-            .get(&ticker)
-            .and_then(|opt| *opt)
-            .or_else(|| exchange::adapter::tachibana::get_ticker_info_sync(&ticker));
+        let ticker_info = self.resolve_ticker_info(&ticker);
         let Some(ticker_info) = ticker_info else {
             return (
                 404,
