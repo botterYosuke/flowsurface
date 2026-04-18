@@ -50,6 +50,7 @@ loop {
 | `POST /api/replay/pause` | clock.pause() |
 | `POST /api/replay/resume` | clock.resume() |
 | `POST /api/replay/step-forward` | dispatch_tick() を 1 回実行 |
+| `POST /api/replay/step-backward` | clock を 1 step 後退・virtual_engine リセット |
 | `GET /api/replay/state` | controller.get_api_state() 相当 |
 | `POST /api/replay/order` | virtual_engine.place_order() |
 | `GET /api/replay/portfolio` | virtual_engine.portfolio_snapshot() |
@@ -138,7 +139,7 @@ reward = portfolio["unrealized_pnl"] + portfolio["realized_pnl"]  # 簡易実装
 
 - ✅ `tests/common_helpers.sh` — `headless_play()` / `ensure_replay_mode()` / `pend_if_headless()` / `order_symbol()` / `setup_single_pane()` headless 対応
 - ✅ 18 本のテストスクリプトを headless/GUI 両対応に改修（詳細は `docs/plan/phase3_headless_e2e.md`）
-- ✅ `.github/workflows/e2e.yml` — S1 / S3 / S27 headless CI ステップ追加
+- ✅ `.github/workflows/e2e.yml` — S1/S3/S9/S10/S11/S12/S13/S16/S18/S26/S27/S35/S40/S41/S42/S43/X2/X4 headless CI ステップ追加（18 本）
 
 ---
 

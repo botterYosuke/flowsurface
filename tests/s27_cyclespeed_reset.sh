@@ -23,7 +23,7 @@ backup_state
 trap 'stop_app; restore_state' EXIT ERR
 
 # ── フィクスチャ ──────────────────────────────────────────────────────────────
-START=$(utc_offset -3)
+START=$(utc_offset -9)
 END=$(utc_offset -1)
 START_MS=$(node -e "console.log(new Date('${START}:00Z').getTime())")
 

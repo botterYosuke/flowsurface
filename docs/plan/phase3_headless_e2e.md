@@ -112,7 +112,7 @@ fi
 ### テストスクリプト（headless/GUI 両対応済み）
 - ✅ `s1_basic_lifecycle.sh`
 - ✅ `s3_autoplay.sh` — TC-S3-05 は GUI 専用
-- ✅ `s9_speed_step.sh` — TC-S9-04 (StepBackward) は headless PEND
+- ✅ `s9_speed_step.sh` — TC-S9-04 (StepBackward) headless 実装済み（PEND 解除）
 - ✅ `s10_range_end.sh` — TC-S10-03/04 (StepBackward) は headless PEND
 - ✅ `s11_bar_step_discrete.sh` — TC-S11-05 (pane split) は headless PEND
 - ✅ `s12_pre_start_history.sh` — TC-S12-01/02 (StepBackward) は headless PEND
@@ -130,7 +130,7 @@ fi
 - ✅ `x4_virtual_order_live_guard.sh` — TC-01/02/03/06 は headless PEND
 
 ### CI 統合
-- ✅ `.github/workflows/e2e.yml` — S1/S3/S27 headless ステップ追加
+- ✅ `.github/workflows/e2e.yml` — S1/S3/S9/S10/S11/S12/S13/S16/S18/S26/S27/S35/S40/S41/S42/S43/X2/X4 headless ステップ追加（18 本）
 
 ---
 
@@ -422,8 +422,8 @@ Bug 6 修正完了後、計画書で「headless 両対応済み ✅」だが CI 
 
 ### 前提条件
 
-- ❌ Bug 6 修正済み（`src/headless.rs` `step_forward()` — Playing 中 End シーク）
-- s9_speed_step.sh（TC-S9-03b）が CI で緑になっていること
+- ✅ Bug 6 修正済み（`src/headless.rs` `step_forward()` — Playing 中 End シーク）
+- ❌ CI 緑確認（s9_speed_step.sh TC-S9-03b）
 
 ### 追加対象スクリプト
 
