@@ -155,7 +155,7 @@ jobs:
 
       - name: Prepare data directory
         shell: bash
-        run: mkdir -p "$APPDATA/flowsurface"
+        run: mkdir -p "$APPDATA/flowsurface/market_data"
 
       - name: Run ${{ matrix.name }}
         shell: bash
@@ -249,7 +249,7 @@ jobs:
 
       - name: Prepare data directory
         shell: bash
-        run: mkdir -p "$APPDATA/flowsurface"
+        run: mkdir -p "$APPDATA/flowsurface/market_data"
 
       - name: Run ${{ matrix.name }}
         shell: bash
@@ -302,7 +302,7 @@ jobs:
 
       - name: Prepare data directory
         shell: bash
-        run: mkdir -p "$APPDATA/flowsurface"
+        run: mkdir -p "$APPDATA/flowsurface/market_data"
 
       - name: Run ${{ matrix.name }}
         shell: bash
@@ -342,7 +342,7 @@ jobs:
 
       - name: Prepare data directory
         shell: bash
-        run: mkdir -p "$APPDATA/flowsurface"
+        run: mkdir -p "$APPDATA/flowsurface/market_data"
 
       - name: Run S22 Tachibana endurance
         shell: bash

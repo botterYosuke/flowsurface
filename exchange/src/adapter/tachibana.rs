@@ -865,8 +865,15 @@ pub async fn init_issue_master(
             );
         }
     }
-    if let Ok(mut guard) = ISSUE_MASTER_CACHE.write() {
-        *guard = Some(arc);
+    let record_count = arc.len();
+    match ISSUE_MASTER_CACHE.write() {
+        Ok(mut guard) => {
+            *guard = Some(arc);
+            log::info!("Tachibana master cache stored in memory ({record_count} records)");
+        }
+        Err(e) => {
+            log::error!("Tachibana master cache write failed (poisoned RwLock): {e}");
+        }
     }
     Ok(())
 }
@@ -903,23 +910,13 @@ pub fn load_master_from_disk(
             out.insert(ticker, Some(info));
         }
     }
-    if let Ok(mut guard) = ISSUE_MASTER_CACHE.write() {
-        *guard = Some(arc);
+    match ISSUE_MASTER_CACHE.write() {
+        Ok(mut guard) => *guard = Some(arc),
+        Err(e) => log::error!("Tachibana master cache write failed (poisoned RwLock): {e}"),
     }
     Some(out)
 }
 
-/// バックグラウンドで銘柄マスタをダウンロードしキャッシュに格納する。
-/// ログイン成功後に呼び出す。tokio::spawn でタスクを起動するため、
-/// 呼び出し元は完了を待つ必要がない。
-pub fn spawn_init_issue_master(session: TachibanaSession) {
-    tokio::spawn(async move {
-        let client = reqwest::Client::new();
-        if let Err(e) = init_issue_master(&client, &session, None).await {
-            log::error!("Tachibana master download failed: {e}");
-        }
-    });
-}
 
 /// 特定の Ticker に対応する TickerInfo をキャッシュから同期的に取得する。
 /// サイドバーのメタデータ更新が完了する前に set-ticker が呼ばれた場合のフォールバック用。
