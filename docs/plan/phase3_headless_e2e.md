@@ -338,10 +338,131 @@ ApiCommand::VirtualExchange(VirtualExchangeCommand::GetState) => {
 
 ---
 
+### Bug 6: Headless S9 TC-S9-03b — Playing 中 StepForward が End にシークしない
+
+**CI ログ（2026-04-18 実行）**
+
+```
+FAIL: TC-S9-03b — ct=1776470880000 not near end=1776473160000
+```
+
+`ct` と `end` の差: `2280000ms = 38分 = 38 bar` → 1 step (M1=60s) しか進んでいない。
+
+**仕様**（`s9_speed_step.sh` コメントより）
+
+> Playing 中の StepForward は **End まで一気に進んで** Paused になる
+
+**根本原因**
+
+Bug 2 の修正（auto-pause）は TC-S9-03a を通過させたが、TC-S9-03b のチェック
+（`ct >= end_time - 120000ms`）は依然失敗する。
+
+現在の `step_forward()` は Playing 中に呼ばれた場合：
+1. `pause()` → Paused 遷移 ✅
+2. `current_time + step_ms` へシーク（1 bar 前進）← **End まで一気にシークすべき**
+
+**修正箇所**: `src/headless.rs` `step_forward()` 関数
+
+**修正方法**: Playing 中だったフラグを保持し、pause 後は `clock.full_range().end` に
+直接シークして返す。通常の 1-step 処理は実行しない。
+
+```rust
+fn step_forward(&mut self) -> String {
+    let was_playing = self.state.is_playing();
+    if was_playing {
+        let _ = self.pause();
+    }
+    if !self.state.is_paused() {
+        return serde_json::json!({"ok": false, "error": "not paused"}).to_string();
+    }
+
+    // Playing 中に呼ばれた場合は End まで一気にシークして終了（GUI 仕様に合わせる）
+    if was_playing {
+        if let ReplaySession::Active { clock, .. } = &mut self.state.session {
+            let end = clock.full_range().end;
+            clock.seek(end);
+        }
+        return serde_json::json!({"ok": true}).to_string();
+    }
+
+    // 通常の 1-step 前進処理（Paused 状態から呼ばれた場合）
+    let step_ms = match &self.state.session {
+        ReplaySession::Active { clock, active_streams, .. } => {
+            let step = crate::replay::min_timeframe_ms(active_streams);
+            let current = clock.now_ms();
+            let end = clock.full_range().end;
+            if current + step > end {
+                return serde_json::json!({"ok": false, "error": "at end of range"})
+                    .to_string();
+            }
+            step
+        }
+        _ => return serde_json::json!({"ok": false, "error": "not active"}).to_string(),
+    };
+    // ... 以降の既存シーク処理は変更なし
+```
+
+---
+
 ## 修正実装ステータス
 
 - ✅ Bug 1: `exchange/src/adapter/tachibana.rs` — `current_p_sd_date()` を JST 固定オフセットに変更
-- ✅ Bug 2: `src/headless.rs` — Playing 中 StepForward 自動 pause 実装
+- ✅ Bug 2: `src/headless.rs` — Playing 中 StepForward 自動 pause 実装（TC-S9-03a）
 - ✅ Bug 3: `src/headless.rs` — step_forward の合成トレード生成で on_tick を正しく呼ぶ
 - ✅ Bug 4: `src/headless.rs` — GetState Idle 時 400 返却修正
 - ✅ Bug 5: `src/headless.rs` — `get_orders_json()` を `{"orders":[...]}` 形式に修正（TC-K 対応）
+- ❌ Bug 6: `src/headless.rs` — Playing 中 StepForward が End にシークしない（TC-S9-03b）
+
+---
+
+## Phase 4：CI headless テスト拡充
+
+Bug 6 修正完了後、計画書で「headless 両対応済み ✅」だが CI 未登録のスクリプト 8 本を
+`test-headless` ジョブに追加する。
+
+### 前提条件
+
+- ❌ Bug 6 修正済み（`src/headless.rs` `step_forward()` — Playing 中 End シーク）
+- s9_speed_step.sh（TC-S9-03b）が CI で緑になっていること
+
+### 追加対象スクリプト
+
+| スクリプト | 主な PEND TC | 追加後の期待挙動 |
+| :--- | :--- | :--- |
+| `s10_range_end.sh` | TC-S10-03/04（StepBackward） | PEND として skip、残 TC は pass |
+| `s11_bar_step_discrete.sh` | TC-S11-05（pane split） | PEND として skip、残 TC は pass |
+| `s12_pre_start_history.sh` | TC-S12-01/02（StepBackward） | PEND として skip、残 TC は pass |
+| `s13_step_backward_quality.sh` | TC-S13-01/02/04 | PEND として skip、残 TC は pass |
+| `s16_replay_resilience.sh` | TC-S16-02b/03/04/05 | PEND として skip、残 TC は pass |
+| `s18_endurance.sh` | TC-S18-02-bwd/03 | PEND として skip、残 TC は pass |
+| `s26_ticker_change_after_replay_end.sh` | TC-A/B/C（pane API） | PEND として skip、残 TC は pass |
+| `x2_buttons.sh` | TC-X2-02/03/08 | PEND として skip、残 TC は pass |
+
+### e2e.yml 変更内容
+
+`test-headless` ジョブの `matrix.include` に以下を追加する：
+
+```yaml
+          - name: S10 Range end
+            script: s10_range_end.sh
+          - name: S11 Bar step discrete
+            script: s11_bar_step_discrete.sh
+          - name: S12 Pre-start history
+            script: s12_pre_start_history.sh
+          - name: S13 Step backward quality
+            script: s13_step_backward_quality.sh
+          - name: S16 Replay resilience
+            script: s16_replay_resilience.sh
+          - name: S18 Endurance
+            script: s18_endurance.sh
+          - name: S26 Ticker change after replay end
+            script: s26_ticker_change_after_replay_end.sh
+          - name: X2 Buttons
+            script: x2_buttons.sh
+```
+
+### 実装ステータス
+
+- ❌ Bug 6 修正
+- ❌ `e2e.yml` test-headless ジョブに 8 スクリプト追加
+- ❌ CI 緑確認

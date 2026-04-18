@@ -306,12 +306,21 @@ impl HeadlessEngine {
 
     /// `POST /api/replay/step-forward` を処理する。Playing 中は先に自動 pause する。
     fn step_forward(&mut self) -> String {
-        // Playing 中は GUI と同様に自動 pause してからステップする
-        if self.state.is_playing() {
+        let was_playing = self.state.is_playing();
+        if was_playing {
             let _ = self.pause();
         }
         if !self.state.is_paused() {
             return serde_json::json!({"ok": false, "error": "not paused"}).to_string();
+        }
+
+        // Playing 中に呼ばれた場合は End まで一気にシークして返す（GUI 仕様に合わせる）
+        if was_playing {
+            if let ReplaySession::Active { clock, .. } = &mut self.state.session {
+                let end = clock.full_range().end;
+                clock.seek(end);
+            }
+            return serde_json::json!({"ok": true}).to_string();
         }
 
         let step_ms = match &self.state.session {
@@ -366,7 +375,8 @@ impl HeadlessEngine {
                 })
                 .collect();
             if !synthetic.is_empty() {
-                self.virtual_engine.on_tick(&ticker_str, &synthetic, new_time);
+                self.virtual_engine
+                    .on_tick(&ticker_str, &synthetic, new_time);
             }
         }
 
@@ -609,10 +619,7 @@ impl HeadlessEngine {
             ApiCommand::VirtualExchange(VirtualExchangeCommand::GetState) => {
                 match &self.state.session {
                     ReplaySession::Active { .. } => reply.send(self.get_state_json(200)),
-                    _ => reply.send_status(
-                        400,
-                        r#"{"error":"replay not active"}"#.to_string(),
-                    ),
+                    _ => reply.send_status(400, r#"{"error":"replay not active"}"#.to_string()),
                 }
             }
             ApiCommand::VirtualExchange(VirtualExchangeCommand::GetPortfolio) => {
