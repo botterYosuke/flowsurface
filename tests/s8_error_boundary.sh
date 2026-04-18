@@ -76,19 +76,29 @@ CODE=$(curl -s -o /dev/null -w "%{http_code}" "$API/replay/toggle")
 
 curl -s -X POST "$API/replay/toggle" > /dev/null  # Replay モードへ
 
-# --- TC-S8-05: start > end → 200 で受理されるが Toast 通知 + Playing にならない ---
+# --- TC-S8-05: start > end → GUI: 200 + Toast、headless: 400（いずれも Playing に遷移しない）---
 TMPBODY=$(mktemp /tmp/e2e_s8.XXXXXX)
 CODE=$(curl -s -o "$TMPBODY" -w "%{http_code}" -X POST "$API/replay/play" \
   -H "Content-Type: application/json" \
   -d '{"start":"2026-04-13 10:00","end":"2026-04-13 09:00"}')
 rm -f "$TMPBODY"
-[ "$CODE" = "200" ] && pass "TC-S8-05a: start>end → HTTP 200" || fail "TC-S8-05a" "code=$CODE"
+if is_headless; then
+  # headless は parse_replay_range で 400 を返す
+  [ "$CODE" = "400" ] && pass "TC-S8-05a: start>end → HTTP 400 (headless rejection)" || \
+    fail "TC-S8-05a" "code=$CODE (expected 400 in headless)"
+else
+  [ "$CODE" = "200" ] && pass "TC-S8-05a: start>end → HTTP 200" || fail "TC-S8-05a" "code=$CODE"
+fi
 ST_AFTER=$(jqn "$(curl -s "$API/replay/status")" "d.status")
 [[ "$ST_AFTER" = "null" || "$ST_AFTER" = "Paused" ]] && pass "TC-S8-05b: Playing に遷移しない" || \
   fail "TC-S8-05b" "status=$ST_AFTER"
-HAS_ERR=$(has_notification "Start time")
-[ "$HAS_ERR" = "true" ] && pass "TC-S8-05c: エラートーストが発火" || \
-  fail "TC-S8-05c" "start>end の toast が発火していない"
+if is_headless; then
+  pend "TC-S8-05c" "headless は Toast 通知なし（400 エラーで拒否）"
+else
+  HAS_ERR=$(has_notification "Start time")
+  [ "$HAS_ERR" = "true" ] && pass "TC-S8-05c: エラートーストが発火" || \
+    fail "TC-S8-05c" "start>end の toast が発火していない"
+fi
 
 # --- TC-S8-06: 未来日時 → 受理 → R4-6 以降: 空 klines でも Playing 開始 → クラッシュしない ---
 # R4-6 でも「空 klines = stream 登録済み」とみなすよう変更したため、

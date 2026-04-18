@@ -147,11 +147,13 @@ else
 
   for i in $(seq 1 10); do
     curl -s -X POST "$API/replay/toggle" > /dev/null
-    sleep 0.3
+    sleep 0.2
   done
 
   # 最終状態が安定しているか（アプリが応答する）
-  sleep 2
+  if ! wait_status "Live" 5 2>/dev/null && ! wait_status "Replay" 5 2>/dev/null; then
+    sleep 1
+  fi
   ALIVE=$(curl -s "$API/replay/status" > /dev/null 2>&1 && echo "true" || echo "false")
   FINAL=$(jqn "$(curl -s "$API/replay/status")" "d.status")
   [ "$ALIVE" = "true" ] \
@@ -177,8 +179,11 @@ else
 
   # Playing 中に toggle（Live へ切替 or 停止）
   curl -s -X POST "$API/replay/toggle" > /dev/null
-  sleep 2
-  STATUS_AFTER=$(jqn "$(curl -s "$API/replay/status")" "d.status")
+  for i in $(seq 1 10); do
+    STATUS_AFTER=$(jqn "$(curl -s "$API/replay/status")" "d.status")
+    [ "$STATUS_AFTER" != "null" ] && [ "$STATUS_AFTER" != "" ] && break
+    sleep 0.2
+  done
   ALIVE=$(curl -s "$API/replay/status" > /dev/null 2>&1 && echo "true" || echo "false")
   # アプリが生存し、状態が確定していれば OK
   [ "$ALIVE" = "true" ] \
@@ -211,8 +216,11 @@ else
 
   # toggle → Live へ
   curl -s -X POST "$API/replay/toggle" > /dev/null
-  sleep 2
-  STATUS_LIVE=$(jqn "$(curl -s "$API/replay/status")" "d.status")
+  for i in $(seq 1 10); do
+    STATUS_LIVE=$(jqn "$(curl -s "$API/replay/status")" "d.status")
+    [ "$STATUS_LIVE" != "null" ] && break
+    sleep 0.2
+  done
   ALIVE=$(curl -s "$API/replay/status" > /dev/null 2>&1 && echo "true" || echo "false")
   [ "$ALIVE" = "true" ] \
     && pass "TC-S16-05a: Paused → toggle → アプリ生存 (status=$STATUS_LIVE)" \
@@ -220,7 +228,10 @@ else
 
   # toggle → Replay に戻る
   curl -s -X POST "$API/replay/toggle" > /dev/null
-  sleep 3
+  for i in $(seq 1 10); do
+    curl -s "$API/replay/status" > /dev/null 2>&1 && break
+    sleep 0.2
+  done
   # アプリが応答していれば OK（Live モード継続/Replay 切替どちらも許容）
   ALIVE2=$(curl -s "$API/replay/status" > /dev/null 2>&1 && echo "true" || echo "false")
   STATUS_BACK=$(jqn "$(curl -s "$API/replay/status")" "d.status")

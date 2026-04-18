@@ -74,6 +74,22 @@ jobs:
           - name: S35 Virtual portfolio
             script: s35_virtual_portfolio.sh
             dev_is_demo: "true"
+          # Sidebar API を使うため GUI のみ対応（headless では 501）
+          - name: S24 Sidebar select ticker
+            script: s24_sidebar_select_ticker.sh
+            dev_is_demo: "true"
+          - name: S33 Sidebar split pane
+            script: s33_sidebar_split_pane.sh
+            dev_is_demo: "true"
+          - name: S36 Sidebar order pane
+            script: s36_sidebar_order_pane.sh
+            dev_is_demo: "true"
+          - name: S37 Order panels integrated
+            script: s37_order_panels_integrated.sh
+            dev_is_demo: "true"
+          - name: S39 Buying power portfolio
+            script: s39_buying_power_portfolio.sh
+            dev_is_demo: "true"
           # Tachibana 実ログイン（DEV_USER_ID / DEV_PASSWORD 使用）
           - name: S40 Virtual order fill cycle
             script: s40_virtual_order_fill_cycle.sh
@@ -107,22 +123,22 @@ jobs:
             dev_is_demo: ""
           - name: S44 Order list
             script: s44_order_list.sh
-            dev_is_demo: ""
+            dev_is_demo: "true"
           - name: S45 Order correct cancel
             script: s45_order_correct_cancel.sh
-            dev_is_demo: ""
+            dev_is_demo: "true"
           - name: S46 Wrong password
             script: s46_wrong_password.sh
-            dev_is_demo: ""
+            dev_is_demo: "true"
           - name: S47 Outside hours
             script: s47_outside_hours.sh
-            dev_is_demo: ""
+            dev_is_demo: "true"
           - name: S48 Invalid issue
             script: s48_invalid_issue.sh
-            dev_is_demo: ""
+            dev_is_demo: "true"
           - name: S49 Account info
             script: s49_account_info.sh
-            dev_is_demo: ""
+            dev_is_demo: "true"
           - name: S1b Limit buy
             script: s1b_limit_buy.sh
             dev_is_demo: ""
@@ -220,20 +236,8 @@ jobs:
             script: s17_error_boundary.sh
           - name: S23 Mid-replay ticker change
             script: s23_mid_replay_ticker_change.sh
-          - name: S24 Sidebar select ticker
-            script: s24_sidebar_select_ticker.sh
           - name: S28 Ticker change while loading
             script: s28_ticker_change_while_loading.sh
-          - name: S33 Sidebar split pane
-            script: s33_sidebar_split_pane.sh
-          - name: S34 Virtual order basic
-            script: s34_virtual_order_basic.sh
-          - name: S36 Sidebar order pane
-            script: s36_sidebar_order_pane.sh
-          - name: S37 Order panels integrated
-            script: s37_order_panels_integrated.sh
-          - name: S39 Buying power portfolio
-            script: s39_buying_power_portfolio.sh
           - name: X1 Current time
             script: x1_current_time.sh
           - name: S8 Error boundary

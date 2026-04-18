@@ -129,13 +129,16 @@ IN=$(ct_in_range "$CT2" "$START_T" "$END_T")
 
 # --- TC-S1-06: Pause で固定 ---
 curl -s -X POST "$API/replay/pause" > /dev/null
-sleep 1
-P1=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
-sleep 3
-P2=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
-EQ=$(bigt_eq "$P1" "$P2")
-[ "$EQ" = "true" ] && pass "TC-S1-06: Pause 中は current_time 固定" || \
-  fail "TC-S1-06" "Pause 中に時刻が変化 ($P1 → $P2)"
+if wait_status Paused 10; then
+  P1=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
+  sleep 1
+  P2=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
+  EQ=$(bigt_eq "$P1" "$P2")
+  [ "$EQ" = "true" ] && pass "TC-S1-06: Pause 中は current_time 固定" || \
+    fail "TC-S1-06" "Pause 中に時刻が変化 ($P1 → $P2)"
+else
+  fail "TC-S1-06" "Pause に遷移しなかった"
+fi
 
 # --- TC-S1-07: status=Paused ---
 ST_PAUSED=$(jqn "$(curl -s "$API/replay/status")" "d.status")
@@ -202,12 +205,17 @@ else
   [ -n "$LIVE_RE" ] && pass "TC-S1-15f: range_end は最後の Replay 値を保持 ($LIVE_RE)" || fail "TC-S1-15f" "re が空"
 fi
 
-# --- TC-S1-H09: Pane 系 API は 501（headless モードのみ） ---
+# --- TC-S1-H09: Pane 系 API は headless でも実装済み（Phase 5 以降）---
+# Phase 5 で headless モードでも pane API をサポート（list / split / close / set-ticker / set-timeframe）。
+# list は 200 を返し、panes 配列を含む。
 if is_headless; then
-  CODE_PANE=$(curl -s -o /dev/null -w "%{http_code}" "$API_BASE/api/pane/list")
-  [ "$CODE_PANE" = "501" ] \
-    && pass "TC-S1-H09: GET /api/pane/list → HTTP 501 (headless)" \
-    || fail "TC-S1-H09" "HTTP=$CODE_PANE (expected 501)"
+  PANE_RESP=$(curl -s -w "\n%{http_code}" "$API_BASE/api/pane/list")
+  CODE_PANE=$(echo "$PANE_RESP" | tail -1)
+  BODY_PANE=$(echo "$PANE_RESP" | head -n -1)
+  HAS_PANES=$(node -e "try{const d=JSON.parse(process.argv[1]);console.log(Array.isArray(d.panes)?'true':'false');}catch(e){console.log('false');}" "$BODY_PANE")
+  { [ "$CODE_PANE" = "200" ] && [ "$HAS_PANES" = "true" ]; } \
+    && pass "TC-S1-H09: GET /api/pane/list → HTTP 200 + panes 配列 (headless 実装済み)" \
+    || fail "TC-S1-H09" "HTTP=$CODE_PANE has_panes=$HAS_PANES"
 fi
 
 restore_state

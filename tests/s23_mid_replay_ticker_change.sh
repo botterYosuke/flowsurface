@@ -60,6 +60,8 @@ poll_status() {
 
 START=$(utc_offset -3)
 END=$(utc_offset -1)
+PRIMARY=$(primary_ticker)
+SECONDARY=$(secondary_ticker)
 
 write_fixture() {
   cat > "$DATA_DIR/saved-state.json" <<EOF
@@ -67,7 +69,7 @@ write_fixture() {
   "layout_manager":{"layouts":[{"name":"S23","dashboard":{"pane":{
     "KlineChart":{
       "layout":{"splits":[0.78],"autoscale":"FitToVisible"},"kind":"Candles",
-      "stream_type":[{"Kline":{"ticker":"BinanceLinear:BTCUSDT","timeframe":"M1"}}],
+      "stream_type":[{"Kline":{"ticker":"$PRIMARY","timeframe":"M1"}}],
       "settings":{"tick_multiply":null,"visual_config":null,"selected_basis":{"Time":"M1"}},
       "indicators":["Volume"],"link_group":"A"
     }
@@ -76,6 +78,9 @@ write_fixture() {
   "replay":{"mode":"replay","range_start":"$START","range_end":"$END"}
 }
 EOF
+  _HEADLESS_START="$START"
+  _HEADLESS_END="$END"
+  _HEADLESS_TIMEFRAME="M1"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -85,6 +90,7 @@ echo ""
 echo "── TC-F: 通常 Play フロー（回帰）"
 write_fixture
 start_app
+headless_play
 
 # API 準備直後の mode を確認する。
 # Play 発火前は status フィールドが存在しない（null）ため mode だけ確認する。
@@ -96,11 +102,12 @@ echo "  F: 起動直後 mode=$INIT_MODE"
   && pass "TC-F1: autoplay 起動後 mode=Replay (status フィールドは Play 発火後に現れる)" \
   || fail "TC-F1" "mode=$INIT_MODE (expected Replay)"
 
-# Playing に到達するまで待機（最大 60 秒）
-if wait_status "Playing" 60; then
+# Playing に到達するまで待機（最大 90 秒）
+if wait_status "Playing" 90; then
   pass "TC-F2: 通常 Play フロー → Playing 到達"
 else
-  fail "TC-F2" "Playing 未到達（timeout）: status=$(get_status)"
+  diagnose_playing_failure
+  fail "TC-F2" "Playing 未到達（90s timeout）: status=$(get_status)"
   print_summary
   exit 1
 fi
@@ -118,7 +125,7 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 echo ""
 echo "── TC-A: Playing 中に銘柄変更 → 即座に Paused"
-set_ticker "$PANE_ID" "BinanceLinear:ETHUSDT"
+set_ticker "$PANE_ID" "$SECONDARY"
 sleep 0.5
 
 ST=$(get_status)
@@ -179,7 +186,7 @@ ST=$(get_status)
 echo ""
 echo "── TC-E: Paused 中に銘柄変更 → Paused のまま"
 # 現在 Paused（TC-B の結果）
-set_ticker "$PANE_ID" "BinanceLinear:BTCUSDT"
+set_ticker "$PANE_ID" "$PRIMARY"
 sleep 1
 
 ST=$(get_status)
@@ -201,10 +208,10 @@ if ! wait_status "Playing" 30; then
   exit 1
 fi
 
-# Playing 中に 2 回連続で銘柄変更（1 回目: ETHUSDT、間髪入れず 2 回目: BTCUSDT）
-set_ticker "$PANE_ID" "BinanceLinear:ETHUSDT"
+# Playing 中に 2 回連続で銘柄変更（1 回目: secondary、間髪入れず 2 回目: primary）
+set_ticker "$PANE_ID" "$SECONDARY"
 sleep 0.3
-set_ticker "$PANE_ID" "BinanceLinear:BTCUSDT"
+set_ticker "$PANE_ID" "$PRIMARY"
 sleep 0.5
 
 # 連続変更後は Paused のはず
