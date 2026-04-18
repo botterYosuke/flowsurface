@@ -121,12 +121,6 @@ jobs:
           - name: S32 Toyota candlestick add
             script: s32_toyota_candlestick_add.sh
             dev_is_demo: ""
-          - name: S44 Order list
-            script: s44_order_list.sh
-            dev_is_demo: "true"
-          - name: S45 Order correct cancel
-            script: s45_order_correct_cancel.sh
-            dev_is_demo: "true"
           - name: S46 Wrong password
             script: s46_wrong_password.sh
             dev_is_demo: "true"
@@ -135,9 +129,6 @@ jobs:
             dev_is_demo: "true"
           - name: S48 Invalid issue
             script: s48_invalid_issue.sh
-            dev_is_demo: "true"
-          - name: S49 Account info
-            script: s49_account_info.sh
             dev_is_demo: "true"
           - name: S1b Limit buy
             script: s1b_limit_buy.sh
@@ -276,6 +267,61 @@ jobs:
           path: ${{ runner.temp }}/e2e_headless_debug.log
 
   # ── S22 Tachibana Endurance（専用・長時間）────────────────────────────────────
+  # ── Tachibana デモセッション（直列）─────────────────────────────────────────
+  # S44/S45/S49 は同じ DEV_USER_ID で Tachibana デモ認証を行う。
+  # Tachibana は同一アカウントの同時セッションを無効化するため max-parallel: 1 で直列実行する。
+  test-gui-tachibana-session:
+    name: "GUI Tachibana Session: ${{ matrix.name }}"
+    needs: build
+    runs-on: windows-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - name: S44 Order list
+            script: s44_order_list.sh
+          - name: S45 Order correct cancel
+            script: s45_order_correct_cancel.sh
+          - name: S49 Account info
+            script: s49_account_info.sh
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Download exe artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: flowsurface-exe
+          path: target/debug/
+
+      - name: Prepare data directory
+        shell: bash
+        run: mkdir -p "$APPDATA/flowsurface"
+
+      - name: Run ${{ matrix.name }}
+        shell: bash
+        env:
+          FLOWSURFACE_EXE: ${{ github.workspace }}/target/debug/flowsurface.exe
+          E2E_TICKER: HyperliquidLinear:BTC
+          DEV_IS_DEMO: "true"
+          DEV_USER_ID: ${{ secrets.DEV_USER_ID }}
+          DEV_PASSWORD: ${{ secrets.DEV_PASSWORD }}
+          DEV_SECOND_PASSWORD: ${{ secrets.DEV_SECOND_PASSWORD }}
+        run: bash tests/${{ matrix.script }}
+
+      - name: Upload debug log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: log-gui-${{ matrix.script }}
+          path: ${{ runner.temp }}/e2e_debug.log
+
   test-s22-endurance:
     name: "GUI: S22 Tachibana endurance"
     needs: build

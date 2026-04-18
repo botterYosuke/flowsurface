@@ -2226,7 +2226,13 @@ impl Flowsurface {
             .tickers_info()
             .get(ticker)
             .and_then(|opt| *opt)
-            .or_else(|| exchange::adapter::tachibana::get_ticker_info_sync(ticker))
+            .or_else(|| {
+                if ticker.exchange == exchange::adapter::Exchange::Tachibana {
+                    exchange::adapter::tachibana::get_ticker_info_sync(ticker)
+                } else {
+                    None
+                }
+            })
     }
 
     fn pane_api_set_ticker(

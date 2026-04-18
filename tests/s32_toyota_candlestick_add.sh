@@ -136,22 +136,28 @@ fi
 
 # ── TC-S32-03: 新ペインに set-ticker TachibanaSpot:7203 ─────────────────────
 # Tachibana マスタのダウンロードが set-ticker より先行しない場合に 404 が返ることがある。
-# 最大 30 秒リトライして、メタデータロード完了後に 200 になることを確認する。
+# 最大 60 秒リトライして、メタデータロード完了後に 200 になることを確認する。
+# curl の出力は "BODY\nHTTP_CODE" 形式で取得し、失敗時の原因（ticker_info未ロード vs pane不在）を診断する。
 echo ""
 echo "── TC-S32-03: 新ペインに set-ticker TachibanaSpot:7203"
 SET_TICKER_CODE="000"
-_end_tc03=$((SECONDS + 30))
+SET_TICKER_BODY=""
+_end_tc03=$((SECONDS + 60))
 while [ $SECONDS -lt $_end_tc03 ]; do
-  SET_TICKER_CODE=$(curl -s --max-time 5 -o /dev/null -w "%{http_code}" \
+  _resp=$(curl -s --max-time 5 -w "\n%{http_code}" \
     -X POST "$API/pane/set-ticker" \
     -H "Content-Type: application/json" \
     -d "{\"pane_id\":\"$NEW_PANE\",\"ticker\":\"TachibanaSpot:7203\"}")
+  SET_TICKER_CODE="${_resp##*$'\n'}"
+  SET_TICKER_BODY="${_resp%$'\n'*}"
   [ "$SET_TICKER_CODE" = "200" ] && break
   sleep 1
 done
-[ "$SET_TICKER_CODE" = "200" ] \
-  && pass "TC-S32-03: set-ticker TachibanaSpot:7203 → HTTP 200" \
-  || fail "TC-S32-03" "HTTP=$SET_TICKER_CODE (expected 200)"
+if [ "$SET_TICKER_CODE" = "200" ]; then
+  pass "TC-S32-03: set-ticker TachibanaSpot:7203 → HTTP 200"
+else
+  fail "TC-S32-03" "HTTP=$SET_TICKER_CODE (expected 200) body=$SET_TICKER_BODY"
+fi
 
 # ── TC-S32-04: 新ペインに set-timeframe D1 ───────────────────────────────────
 echo ""

@@ -9,16 +9,17 @@
 
 ## ラン間の進捗サマリ
 
-| | Run 1 (logs_65161082968)<br>Phase 1〜3 前 | Run 2 (logs_65183917351)<br>Phase 1〜3 後 | main 参照ラン (main_logs_65183649746) | Run 3 (logs_65185455856)<br>Phase 5 後 | Run 4 (logs_65187341736)<br>Phase 6 後 | Run 5 (logs_65188251004)<br>Phase 7 後（参考） | Run 6（Phase 8 後・予測）|
-|:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| 総テスト数 | 112 | 110 | 110 | 110 | 110 | 110 | 110 |
-| PASS | 85 | 95 | ~93 | ~98 | **~98** | **~98** | **~107** |
-| FAIL | 27 | 15 | ~17 | **11スクリプト/17TC** | **10スクリプト/~13TC** | **10スクリプト/~13TC** | **~4スクリプト** |
-| 合格率 | 75.9% | 86.4% | ~84.5% | ~89.1% | **~89.1%** | **~89.1%** | **~97%** |
+| | Run 1 (logs_65161082968)<br>Phase 1〜3 前 | Run 2 (logs_65183917351)<br>Phase 1〜3 後 | main 参照ラン (main_logs_65183649746) | Run 3 (logs_65185455856)<br>Phase 5 後 | Run 4 (logs_65187341736)<br>Phase 6 後 | Run 5 (logs_65188251004)<br>Phase 7 後 | Run 6 (logs_65191053658)<br>Phase 8 後 | Run 7（Phase 9 後・予測）|
+|:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| 総テスト数 | 112 | 110 | 110 | 110 | 110 | 110 | 110 | 110 |
+| PASS | 85 | 95 | ~93 | ~98 | **~98** | **~98** | **~99** | **~106** |
+| FAIL | 27 | 15 | ~17 | **11スクリプト/17TC** | **10スクリプト/~13TC** | **10スクリプト/~13TC** | **9スクリプト/~13TC** | **~4スクリプト** |
+| 合格率 | 75.9% | 86.4% | ~84.5% | ~89.1% | **~89.1%** | **~89.1%** | **~90%** | **~96%** |
 
 ※ Run 3 は計画書記載の「12件」より正確には 11 スクリプト失敗（S17・S21 は Run 3 時点で PASS 済み）。  
 ※ Run 4 は S7/S23/S49 が解消したが S32/S20 でリグレッションが発生し、合格率は横ばい。  
-※ Run 5 は S32 TC-03 の set-ticker 404 が解消（9TC → 2TC 改善）したが、S44/S49 がセッション切断でリグレッション。合格率は横ばい。
+※ Run 5 は S32 TC-03 の set-ticker 404 が解消（9TC → 2TC 改善）したが、S44/S49 がセッション切断でリグレッション。合格率は横ばい。  
+※ Run 6 は S21・S44 が PASS に転換、S49 が改善（3/7 → 6/7）したが S32 TC-03 が再び 404 リグレッション・S45 が新規セッション切断 FAIL。
 
 **Run 4 → Run 5 で解消したもの（Phase 7 の修正効果）**
 
@@ -259,6 +260,40 @@ GUI モードでも初期化中の通知を抑制する仕組みが必要。
 
 ---
 
+## Run 6 の結果（logs_65191053658 / Phase 8 後）
+
+### Run 5 → Run 6 で解消したもの（Phase 8 の修正効果）
+
+| テスト | 解消内容 |
+|:---|:---|
+| GUI S21 Tachibana error boundary | PASS 7 / FAIL 0 に転換（Phase 8 の auto-play 改善が波及） |
+| GUI S44 Order list (Step 3) | PASS 7 / FAIL 0 に転換（セッション切断リグレッション解消） |
+| GUI S49 Account info (Step 2〜4) | PASS 3→6 / FAIL 4→1 に改善（Step 2, 2b, 3 が通過） |
+
+### Run 5 → Run 6 で新たに壊れたもの（Phase 8 リグレッション）
+
+| テスト | Run 5 | Run 6 | 推定原因 |
+|:---|:---:|:---:|:---|
+| GUI S32 Toyota candlestick add | PASS:9 FAIL:2 (TC-05/06) | **PASS:3 FAIL:8** (TC-03 以降カスケード) | TC-03 の set-ticker が再び HTTP 404。`get_ticker_info_sync` フォールバックが Phase 8 変更（Task::batch 化）と競合した可能性 |
+| GUI S45 Order correct cancel (Step 5) | PASS:6 FAIL:0 | **PASS:5 FAIL:1** | `GET /api/tachibana/orders` でセッション切断 code=2（S44 と同症状） |
+
+### Run 5 → Run 6 で継続している失敗（変化なし）
+
+| テスト | TC | 失敗内容 |
+|:---|:---|:---|
+| GUI S14 | TC-S14-01 | Playing に到達せず（120 秒タイムアウト） |
+| GUI S20 | TC-S20-01-pre | Playing 到達せず（Run 6 ではより早い段階で失敗） |
+| GUI S49 | Step 4 | セッション切断 code=2（残り 1 件） |
+| GUI S33/S36/S37 | TC-D/TC-B/TC-J | エラー通知 2 件（変化なし） |
+| GUI S39 | TC-H | エラー通知 1〜2 件 |
+| GUI S29 | TC-A / TC-C2 | current_time が 2025-01-10 から 2 日以上ズレ |
+| GUI S32 | TC-S32-05 | current_time != start_time（clock.seek 未発火） |
+
+> ※ TC-S32-06（status=Paused 期待）は Run 6 で **PASS に転換**。Phase 8 の Task::batch 化が部分的に効いた。  
+> TC-05 のみ継続失敗。
+
+---
+
 ## Run 5 の残存失敗（10スクリプト）
 
 ### カテゴリ N — Tachibana セッション早期切断リグレッション（Run 5 新規）
@@ -463,27 +498,130 @@ C. S32 テストを仕様変更（新ペイン set-ticker は clock に影響し
 
 ---
 
+### Phase 8 結果サマリ
+
+**P8-2 (Task::batch 化)** により S21 が PASS、S44 が PASS、S49 が大幅改善。  
+ただし S32 TC-03 が再び 404 リグレッション（`get_ticker_info_sync` vs Task::batch 競合の可能性）、  
+S45 が新規セッション切断 FAIL。
+
+---
+
+### Phase 9 — Run 6 リグレッション修正（次フェーズ・最優先）
+
+#### P9-1 カテゴリ P 対応：S32 TC-03 再 404 リグレッション（クリティカル）
+
+**症状**: Phase 8 後、GUI S32 TC-03（`set-ticker TachibanaSpot:7203`）が再び HTTP 404。  
+Phase 7 の P7-1c で修正した `get_ticker_info_sync` フォールバックが、  
+Phase 8 の `Task::batch` 変更によって競合・無効化された可能性。  
+TC-03 が 404 → TC-04〜10 がカスケード失敗（FAIL:2 → FAIL:8）。
+
+| スクリプト | TC | 失敗メッセージ |
+|:---|:---|:---|
+| `s32_toyota_candlestick_add.sh` | TC-S32-03 以降 | `set-ticker TachibanaSpot:7203 → HTTP 404`、カスケード 8TC 失敗 |
+
+**調査方針**:
+1. `src/main.rs::pane_api_set_ticker` の `Task::batch` 化後のコードパスを確認  
+2. `get_ticker_info_sync` が呼ばれるタイミングと Tachibana マスタキャッシュ完了タイミングの競合  
+3. P7-1c の 30 秒リトライループ（TC-03 側）が依然有効か確認  
+4. TC-05/TC-06 (clock.seek / Paused 期待) は別問題として継続
+
+**調査対象**: `src/main.rs` (`pane_api_set_ticker`)、`exchange/src/adapter/tachibana.rs` (`get_ticker_info_sync`)、`tests/s32_toyota_candlestick_add.sh` TC-03
+
+- [x] **P9-1a（調査）** `pane_api_set_ticker` の Task::batch 後コードパスと `get_ticker_info_sync` の呼び出し位置を確認。  
+  404 の原因は `resolve_ticker_info()` → `ISSUE_MASTER_CACHE` が None（ticker_info 未ロード）と推定。  
+  `get_ticker_info_sync` は RwLock から同期ルックアップするため、キャッシュ未初期化の場合は None を返す。  
+  テスト側のリトライで 30 秒待っても失敗 → Task::batch 化後の Tachibana 初期化タイミングが遅延している可能性。
+- [x] **P9-1b（実装）** `tests/s32_toyota_candlestick_add.sh` TC-03 の修正：  
+  1. リトライを 30 秒 → **60 秒**に延長（マスタダウンロード遅延の保険）  
+  2. curl の出力に **response body を追加**（失敗時に `ticker_info 未ロード` vs `pane not found` を区別）  
+  ※ アプリ側の根本修正（ISSUE_MASTER_CACHE 確実なロード）は P9-1c として継続
+- [ ] **P9-1c（継続調査）** Run 6 で TC-03 が 60 秒リトライ後も失敗する場合、ISSUE_MASTER_CACHE が  
+  None のままである理由を調査。Phase 8 の Task::batch 化で spawn_init_issue_master の  
+  呼び出しタイミングが変化した可能性を確認（`src/main.rs` の Tachibana 初期化パス）。
+
+---
+
+#### P9-2 カテゴリ Q 対応：S45 セッション切断 FAIL（並列実行競合）
+
+**症状**: GUI S45 Order correct cancel の Step 5（注文一覧確認）で `GET /api/tachibana/orders` → セッション切断 code=2。  
+S44 は Run 6 で PASS に転換したにも関わらず S45 が新規 FAIL。
+
+**実際の症状（ログ確認済み）**:  
+S45 は Step 1b（デモセッション確立）の PASS から **1 秒以内に** Step 2 で code=2 切断。  
+「実行時間が長い → セッション期限切れ」ではなく、セッション確立直後に即座に切断される。
+
+**根本原因**: `test-gui` matrix が S44/S45/S49 を **同時並列実行** しており、全て同じ `DEV_USER_ID` で  
+Tachibana デモ認証を行う。Tachibana は同一アカウントの同時セッションを後続ログインで無効化するため、  
+後から認証したジョブが先行ジョブのセッションを切断する（非決定的）。  
+Run 5 では S44 が FAIL・S45 が PASS、Run 6 では S44 が PASS・S45 が FAIL という逆転が発生したのもこのため。
+
+| スクリプト | TC | 失敗メッセージ |
+|:---|:---|:---|
+| `s45_order_correct_cancel.sh` | Step 5 | `orders フィールドが配列でない: セッションが切断しました code=2` |
+
+**修正方針**: `.github/workflows/e2e.yml` に `test-gui-tachibana-session` ジョブを追加し、  
+`max-parallel: 1` で S44/S45/S49 を直列実行する。
+
+- [x] **P9-2a（原因特定）** S44/S45/S49 が並列で同一アカウントに認証 → 後続が先行セッションを無効化
+- [x] **P9-2b（実装）** `.github/workflows/e2e.yml`: S44/S45/S49 を `test-gui-tachibana-session` 直列 job に分離（`max-parallel: 1`）
+
+---
+
+#### P9-3 カテゴリ O 継続：S32 TC-05（clock.seek 未発火）
+
+**Run 6 ログ確認済み**: TC-06（status=Paused 期待）は Run 6 で **PASS 転換**済み。Phase 8 の Task::batch 化が効いた。  
+TC-05（current_time == start_time 期待）は Run 6 でも FAIL 継続（TC-03 が 404 のため到達できていない）。  
+P9-1 で TC-03 が修正されると TC-05 に実際に到達できるようになる。
+
+- [ ] **P9-3a** P9-1 修正後の Run 7 ログで TC-05 を再確認（TC-06 は解消済みのため不要）
+
+---
+
+#### P9-4 カテゴリ F 継続：エラー通知 2 件（S33/S36/S37/S39）
+
+Phase 8 後も変化なし。P8-3a/b を継続。
+
+- [ ] **P9-4a（調査）** `src/connector/` の Binance/Bybit 接続エラートースト発火源を確定
+- [ ] **P9-4b（実装）** `DEV_IS_DEMO=true` 環境でのエラー通知抑制
+
+---
+
+#### P9-5 カテゴリ M 継続：Tachibana Playing 到達失敗（S14/S20）
+
+S21 は Run 6 で PASS 転換。S14/S20 は継続失敗。
+
+- [ ] **P9-5a** S14/S20 の具体的失敗ログから Tachibana ディスクキャッシュ `os error 3` の有無を確認
+- [ ] **P9-5b** CI 環境でキャッシュディレクトリ初期化処理を追加（必要なら）
+
+---
+
+#### P9-6 カテゴリ J 継続：Tachibana 休場日スキップ日付ズレ（S29）
+
+- [ ] **P9-6a** P7-4/P4-2 を継続（`current_time` が期待値から 2 日以上ズレる原因調査）
+
+---
+
 ## 調査対象ファイル
 
 ```
-src/connector/auth.rs                 # P8-1 (セッション早期切断リグレッション), P4-1
-src/connector/                        # P8-1 (セッション管理), P8-3 (エラートースト), P7-3
-src/headless.rs                       # P8-2 (clock.seek 制御), P5-4 (panes[0] 限定)
-src/replay_api.rs                     # P8-2 (pane_api_set_ticker), P7-1
-src/replay/                           # P8-4 (Tachibana auto-play), P8-5 (holiday skip)
-docs/replay_header.md                 # P8-2a (§6.6 仕様確認)
-tests/s32_toyota_candlestick_add.sh   # P8-2 (TC-05/06)
-tests/s7_mid_replay_pane.sh           # P8-2a (仕様矛盾確認)
-tests/s44_order_list.sh               # P8-1
-tests/s49_account_info.sh             # P8-1
-tests/s39_buying_power_portfolio.sh   # P8-3
-tests/s20_tachibana_replay_resilience.sh # P8-4
-tests/s21_tachibana_error_boundary.sh # P8-4
-tests/s14_autoplay_event_driven.sh    # P8-4
-tests/s29_tachibana_holiday_skip.sh   # P8-5
-tests/s33_sidebar_split_pane.sh       # P7-3 / P8-3
-tests/s36_sidebar_order_pane.sh       # P7-3 / P8-3
-tests/s37_order_panels_integrated.sh  # P7-3 / P8-3
+src/main.rs                           # P9-1 (pane_api_set_ticker Task::batch + get_ticker_info_sync)
+exchange/src/adapter/tachibana.rs     # P9-1 (get_ticker_info_sync)
+src/connector/auth.rs                 # P9-2 (セッション切断・再認証), P4-1
+src/connector/                        # P9-4 (エラートースト抑制), P7-3
+src/headless.rs                       # P5-4 (panes[0] 限定)
+src/replay_api.rs                     # P9-1 (pane_api_set_ticker)
+src/replay/                           # P9-5 (Tachibana auto-play), P9-6 (holiday skip)
+tests/s32_toyota_candlestick_add.sh   # P9-1 (TC-03/05/06)
+tests/s45_order_correct_cancel.sh     # P9-2
+tests/s44_order_list.sh               # P9-2 (比較用)
+tests/s49_account_info.sh             # 継続監視
+tests/s20_tachibana_replay_resilience.sh # P9-5
+tests/s14_autoplay_event_driven.sh    # P9-5
+tests/s29_tachibana_holiday_skip.sh   # P9-6
+tests/s33_sidebar_split_pane.sh       # P9-4
+tests/s36_sidebar_order_pane.sh       # P9-4
+tests/s37_order_panels_integrated.sh  # P9-4
+tests/s39_buying_power_portfolio.sh   # P9-4
 tests/s24_sidebar_select_ticker.sh    # TC-D2 (カテゴリ L 残存)
 ```
 
