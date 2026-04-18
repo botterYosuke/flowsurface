@@ -135,12 +135,20 @@ if [ -z "$NEW_PANE" ]; then
 fi
 
 # ── TC-S32-03: 新ペインに set-ticker TachibanaSpot:7203 ─────────────────────
+# Tachibana マスタのダウンロードが set-ticker より先行しない場合に 404 が返ることがある。
+# 最大 30 秒リトライして、メタデータロード完了後に 200 になることを確認する。
 echo ""
 echo "── TC-S32-03: 新ペインに set-ticker TachibanaSpot:7203"
-SET_TICKER_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
-  -X POST "$API/pane/set-ticker" \
-  -H "Content-Type: application/json" \
-  -d "{\"pane_id\":\"$NEW_PANE\",\"ticker\":\"TachibanaSpot:7203\"}")
+SET_TICKER_CODE="000"
+_end_tc03=$((SECONDS + 30))
+while [ $SECONDS -lt $_end_tc03 ]; do
+  SET_TICKER_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+    -X POST "$API/pane/set-ticker" \
+    -H "Content-Type: application/json" \
+    -d "{\"pane_id\":\"$NEW_PANE\",\"ticker\":\"TachibanaSpot:7203\"}")
+  [ "$SET_TICKER_CODE" = "200" ] && break
+  sleep 1
+done
 [ "$SET_TICKER_CODE" = "200" ] \
   && pass "TC-S32-03: set-ticker TachibanaSpot:7203 → HTTP 200" \
   || fail "TC-S32-03" "HTTP=$SET_TICKER_CODE (expected 200)"

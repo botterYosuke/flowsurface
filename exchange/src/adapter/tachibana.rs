@@ -921,6 +921,20 @@ pub fn spawn_init_issue_master(session: TachibanaSession) {
     });
 }
 
+/// 特定の Ticker に対応する TickerInfo をキャッシュから同期的に取得する。
+/// サイドバーのメタデータ更新が完了する前に set-ticker が呼ばれた場合のフォールバック用。
+/// キャッシュ未初期化の場合は None を返す。
+pub fn get_ticker_info_sync(ticker: &Ticker) -> Option<TickerInfo> {
+    let symbol = ticker.to_full_symbol_and_type().0;
+    let guard = ISSUE_MASTER_CACHE.read().ok()?;
+    let records = guard.as_deref()?;
+    records
+        .iter()
+        .find(|r| r.issue_code == symbol)
+        .and_then(master_record_to_ticker_info)
+        .map(|(_, info)| info)
+}
+
 /// キャッシュから Ticker → TickerInfo の HashMap を構築する。
 ///
 /// ペイン設定は display_symbol なしで `TachibanaSpot:7203` と保存されるが、

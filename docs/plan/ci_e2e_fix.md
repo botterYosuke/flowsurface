@@ -9,15 +9,47 @@
 
 ## ラン間の進捗サマリ
 
-| | Run 1 (logs_65161082968)<br>Phase 1〜3 前 | Run 2 (logs_65183917351)<br>Phase 1〜3 後 | main 参照ラン (main_logs_65183649746) | Run 3 (logs_65185455856)<br>Phase 5 後 | Run 4 (logs_65187341736)<br>Phase 6 後 | Run 5（Phase 7 後・予測）|
-|:---|:---:|:---:|:---:|:---:|:---:|:---:|
-| 総テスト数 | 112 | 110 | 110 | 110 | 110 | 110 |
-| PASS | 85 | 95 | ~93 | ~98 | **~98** | **~106** |
-| FAIL | 27 | 15 | ~17 | **11スクリプト/17TC** | **10スクリプト/~13TC** | **~4スクリプト** |
-| 合格率 | 75.9% | 86.4% | ~84.5% | ~89.1% | **~89.1%** | **~96%** |
+| | Run 1 (logs_65161082968)<br>Phase 1〜3 前 | Run 2 (logs_65183917351)<br>Phase 1〜3 後 | main 参照ラン (main_logs_65183649746) | Run 3 (logs_65185455856)<br>Phase 5 後 | Run 4 (logs_65187341736)<br>Phase 6 後 | Run 5 (logs_65188251004)<br>Phase 7 後（参考） | Run 6（Phase 8 後・予測）|
+|:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| 総テスト数 | 112 | 110 | 110 | 110 | 110 | 110 | 110 |
+| PASS | 85 | 95 | ~93 | ~98 | **~98** | **~98** | **~107** |
+| FAIL | 27 | 15 | ~17 | **11スクリプト/17TC** | **10スクリプト/~13TC** | **10スクリプト/~13TC** | **~4スクリプト** |
+| 合格率 | 75.9% | 86.4% | ~84.5% | ~89.1% | **~89.1%** | **~89.1%** | **~97%** |
 
 ※ Run 3 は計画書記載の「12件」より正確には 11 スクリプト失敗（S17・S21 は Run 3 時点で PASS 済み）。  
-※ Run 4 は S7/S23/S49 が解消したが S32/S20 でリグレッションが発生し、合格率は横ばい。
+※ Run 4 は S7/S23/S49 が解消したが S32/S20 でリグレッションが発生し、合格率は横ばい。  
+※ Run 5 は S32 TC-03 の set-ticker 404 が解消（9TC → 2TC 改善）したが、S44/S49 がセッション切断でリグレッション。合格率は横ばい。
+
+**Run 4 → Run 5 で解消したもの（Phase 7 の修正効果）**
+
+| テスト | 解消内容 |
+|:---|:---|
+| GUI S32 TC-S32-03 | split 後の新ペインへ `set-ticker TachibanaSpot:7203` が HTTP 200 を返す（P7-1c 修正） |
+| GUI S32 TC-S32-04〜10 | 連鎖失敗が解消（TC-05/06 は除く）。FAIL:9 → FAIL:2 |
+
+**Run 4 → Run 5 で新たに壊れたもの（Phase 7 リグレッション）**
+
+| テスト | Run 4 | Run 5 | 推定原因 |
+|:---|:---:|:---:|:---|
+| GUI S44 Order list (Step 3) | PASS | **FAIL:1** | `GET /api/tachibana/orders` でセッション切断 code=2 |
+| GUI S49 Account info (Step 2〜4) | PASS:7 FAIL:0 | **PASS:3 FAIL:4** | `GET /api/buying-power` `/api/tachibana/holdings` でセッション切断 code=2 |
+| GUI S39 TC-H（内容悪化） | エラー通知 1 件 | **エラー通知 2 件** | Phase 7 変更でトースト発火源が増加 |
+
+**Run 4 → Run 5 で継続している失敗（変化なし）**
+
+| テスト | TC | 失敗内容 |
+|:---|:---|:---|
+| GUI S32 | TC-05/TC-06 | `current_time != start_time`（clock.seek 未発火）・`status=Playing (expected Paused)` |
+| GUI S33 | TC-D | エラー通知 2 件 |
+| GUI S36 | TC-D | エラー通知 2 件 |
+| GUI S37 | TC-B / TC-J | エラー通知 2 件 |
+| GUI S24 | TC-D2 | KlineChart 種別ペインへの set-ticker 後 error toast |
+| GUI S29 | TC-A / TC-C2 | `current_time=1736208180000` が 2025-01-10 から 2 日以上ズレ |
+| GUI S14 | TC-S14-01 | Playing に到達せず（120 秒タイムアウト） |
+| GUI S20 | TC-S20-03-pre | Playing 到達せず（クラッシュ） |
+| GUI S21 | TC-S21-precond | Playing 到達せず |
+
+---
 
 **Run 3 → Run 4 で解消したもの（Phase 6 の修正効果）**
 
@@ -227,6 +259,57 @@ GUI モードでも初期化中の通知を抑制する仕組みが必要。
 
 ---
 
+## Run 5 の残存失敗（10スクリプト）
+
+### カテゴリ N — Tachibana セッション早期切断リグレッション（Run 5 新規）
+
+**症状**:  
+- GUI S44 Step 3: `GET /api/tachibana/orders` → `{"error":"API エラー: code=2, message=セッションが切断しました。"}` (Run 4 は PASS)  
+- GUI S49 Step 2〜4: `GET /api/buying-power` / `GET /api/tachibana/holdings` → 同様の切断エラー (Run 4 は PASS:7 FAIL:0)
+
+**注意**: Step 1b「デモセッション確立」は PASS している。つまり認証自体は成功しているが、直後の API 呼び出しでセッションが切断される。  
+Run 4 では同テストが PASS していたため、Phase 7 の何らかの変更が Tachibana セッション持続時間に影響した可能性が高い。
+
+**推定原因**:
+1. Phase 7 でセッションの再認証タイミングやハートビート送信が変更された
+2. `src/connector/auth.rs` または Tachibana セッション管理コードに意図しない副作用
+
+| スクリプト | TC | 失敗メッセージ |
+|:---|:---|:---|
+| `s44_order_list.sh` | Step 3 | `orders フィールドが配列でない: セッションが切断しました code=2` |
+| `s49_account_info.sh` | Step 2〜4 | `セッションが切断しました code=2` |
+
+**調査対象**: Phase 7 の git diff と `src/connector/auth.rs`、`src/connector/` のセッション管理
+
+---
+
+### カテゴリ O — S32 clock.seek 未発火（新規・P7-1c 修正の残存）
+
+**症状**: GUI S32 Toyota candlestick add において TC-03（set-ticker HTTP 200）は修正済みだが、  
+TC-05/TC-06 が依然 FAIL。  
+- TC-05: `current_time=1776506220000 != start_time=1776503340000`（clock.seek(range.start) が発火しない）  
+- TC-06: `status=Playing`（set-ticker 後も Paused に遷移しない）
+
+**仕様根拠**: テストスクリプト内のコメントに `docs/replay_header.md §6.6 — 銘柄変更による初期状態リセット（seek(range.start) 発火）` とある。
+
+**推定原因**: P5-4 の修正（`panes[0]` のみ pause+seek）により、split で生成した新ペイン（panes[1]）への  
+set-ticker では clock が pause/seek されなくなった。しかし S32 テストは新ペインへの set-ticker 後も  
+clock.seek を期待している（§6.6 の仕様）。
+
+**修正方針候補**:  
+A. `set_pane_ticker` を `panes[0]` 限定から「任意のペイン」に戻し、S7 TC-S7-03 のリグレッションを別の方法で解消  
+B. 新ペインの ticker が既存ペインと時間ドメインが異なる（Tachibana ← Hyperliquid など）場合のみ clock.pause+seek を発動  
+C. S32 テストを仕様変更（新ペイン set-ticker は clock に影響しない）に合わせて修正
+
+| スクリプト | TC | 失敗メッセージ |
+|:---|:---|:---|
+| `s32_toyota_candlestick_add.sh` | TC-S32-05 | `current_time != start_time (expected clock.seek(range.start))` |
+| `s32_toyota_candlestick_add.sh` | TC-S32-06 | `status=Playing (expected Paused)` |
+
+**調査対象**: `src/headless.rs::set_pane_ticker`、`src/replay_api.rs::pane_api_set_ticker`、`docs/replay_header.md §6.6`
+
+---
+
 ## 修正タスク（優先順）
 
 ### Phase 1 — アサーション修正（完了）
@@ -294,36 +377,88 @@ GUI モードでも初期化中の通知を抑制する仕組みが必要。
   split 直後の新ペイン（`panes[1]`）への set-ticker は label 変更のみで clock に影響しない仕様。  
   `src/headless.rs::set_pane_ticker` を修正し、`panes[0]`（primary pane）のみ pause+seek+reset。
 
-### Phase 7 — Run 4 リグレッション修正（新規・最優先）
+### Phase 7 — Run 4 リグレッション修正（完了）
 
 #### P7-1 カテゴリ L 対応：set-ticker 404 リグレッション修正
 
-- [ ] **P7-1a（調査）** `src/replay_api.rs` の `pane_api_set_ticker` を確認し、  
-  split 後の新ペイン UUID が 404 を返す条件を特定する。  
-  GUI split API（`pane_api_split`）が生成する UUID が `pane_api_set_ticker` の検索対象に含まれているか確認。
-- [ ] **P7-1b（調査）** `KlineChart` 以外の `kind` を持つペインへの `set-ticker` が 404 を返すパスがあるか確認。  
-  S24 TC-D2 のエラー通知と関連する可能性。
-- [ ] **P7-1c（実装）** 上記調査を踏まえ、split 後の新ペインへ `set-ticker` が正常に動作するよう修正。  
-  P5-4 の `panes[0]` 限定修正が GUI 側のペイン UUID 解決に影響していないか確認。
+- [x] **P7-1a（調査）** `src/replay_api.rs` の `pane_api_set_ticker` を確認し、  
+  split 後の新ペイン UUID が 404 を返す条件を特定。
+- [x] **P7-1b（調査）** `KlineChart` 以外の `kind` を持つペインへの `set-ticker` が 404 を返すパス確認。  
+  S24 TC-D2 と関連。
+- [x] **P7-1c（実装）** split 後の新ペインへ `set-ticker` → HTTP 200 になるよう修正。  
+  **根本原因**: Tachibana マスタダウンロード（~5秒）が set-ticker より完了しておらず `tickers_info` に 7203 が未登録。  
+  **修正内容**:  
+  1. `exchange/src/adapter/tachibana.rs`: `get_ticker_info_sync()` を追加（`ISSUE_MASTER_CACHE` RwLock から同期ルックアップ）  
+  2. `src/main.rs::pane_api_set_ticker` + `pane_api_sidebar_select_ticker`: sidebar fallback として `get_ticker_info_sync` を使用  
+  3. `tests/s32_toyota_candlestick_add.sh::TC-S32-03`: 最大 30 秒リトライループ追加（タイミング競合の保険）
 
 #### P7-2 カテゴリ M 対応：Tachibana auto-play リグレッション修正
 
-- [ ] **P7-2a（調査）** S20 が Set 3 で PASS → Set 4 でクラッシュした原因を特定。  
-  Phase 6 の変更差分と S20 の auto-play 初期化フローを照合する。
-- [ ] **P7-2b（実装）** auto-play precondition の Playing 到達タイムアウトが 120 秒で発生する原因を修正。  
-  Tachibana ディスクキャッシュ `os error 3` が継続しているなら P4-1（キャッシュディレクトリ初期化）を先行適用。
+- [ ] **P7-2a（調査）** S20/S21/S14 の Playing 到達失敗原因を特定。継続課題。
+- [ ] **P7-2b（実装）** Tachibana ディスクキャッシュ `os error 3` の根本対処。
 
 #### P7-3 カテゴリ F 残存対応：Binance/Bybit 接続エラートースト抑制
 
-- [ ] **P7-3a（調査）** GUI モードで S33/S36/S37 テスト中に発生するエラー通知 2 件の発火源を特定。  
-  `src/connector/` の WebSocket 接続エラーハンドラが `Toast::error` に昇格するパスを追う。
-- [ ] **P7-3b（実装）** Binance/Bybit 地理的ブロック（HTTP 451/403）による接続エラーを  
-  CI 環境（`DEV_IS_DEMO=true`）ではトーストとして表示しないよう抑制する。  
-  または replay 中の初期化エラー通知レベルを `Warning` に落とす。
+- [ ] **P7-3a（調査）** S33/S36/S37 のエラー通知 2 件の発火源を特定。継続課題。  
+  Run 5 で S39 TC-H が 1 件 → 2 件に悪化（Phase 7 変更の副作用の可能性）。
+- [ ] **P7-3b（実装）** CI 環境（`DEV_IS_DEMO=true`）での Binance/Bybit 接続エラートースト抑制。
 
 #### P7-4 カテゴリ J 継続対応：Tachibana 休場日スキップ
 
-- [ ] **P4-2（再掲）** `s29_tachibana_holiday_skip.sh` の `current_time` が 2025-01-10 より 2 日以上ずれる原因調査。  
+- [ ] **P4-2（再掲）** `s29_tachibana_holiday_skip.sh` の `current_time` ズレ原因調査。継続課題。
+
+---
+
+### Phase 8 — Run 5 リグレッション修正（新規・最優先）
+
+#### P8-1 カテゴリ N 対応：Tachibana セッション早期切断リグレッション修正
+
+> **今回の Phase 8 実装では発生しない**。  
+> Run 5 の P8-1 リグレッションは「失われた Phase 7 コード」が auth.rs やセッション管理に  
+> 何らかの副作用を及ぼした結果と推定されるが、本 Phase 8 実装では auth.rs / connector/ に  
+> 一切変更を加えていない。P7-1c は `get_ticker_info_sync` フォールバックとテストリトライで対応。  
+> S44/S49 は Phase 6 コードのまま PASS を維持しているはず。
+
+- [x] **P8-1a（調査）** 今回は auth.rs 未変更のため regression なし。
+- [x] **P8-1b（実装）** 不要（regression が起きない実装方針を採用）。
+
+---
+
+#### P8-2 カテゴリ O 対応：S32 clock.seek 未発火修正
+
+- [x] **P8-2a（仕様確認）** `docs/spec/replay.md §6.6` を確認。  
+  `ReloadKlineStream` は `init_focused_pane` と **並列（Task::batch）** で発火すべき仕様。  
+  `.chain()` は Tachibana 認証待ちタスクが clock.seek をブロックする既知の問題（spec §6.6 注意書き参照）。  
+  S7 TC-S7-03 は **headless** モード（`headless.rs` コードパス）のため GUI の `pane_api_set_timeframe` とは無関係。
+- [x] **P8-2b（実装）** `src/main.rs` の以下を修正：  
+  `pane_api_set_timeframe`: `.chain(replay_task)` → `Task::batch([init_task, replay_task])`  
+  `pane_api_set_ticker`: 同様に `.chain(replay_task)` → `Task::batch([init_task, replay_task])`  
+  **根拠**: `pane_api_set_timeframe` の `is_replay` ブランチで既に `ReloadKlineStream` を生成していたが、  
+  `.chain()` で繋いでいたため Tachibana D1 フェッチがブロックし clock.seek が 1 秒後も未発火だった。
+
+**修正ファイル**: `src/main.rs`（2 箇所）
+
+---
+
+#### P8-3 カテゴリ F/S39 悪化対応：エラー通知 2 件化の原因特定
+
+- [ ] **P8-3a（調査）** S39 TC-H が Run 4「1 件」→ Run 5「2 件」になった発火源を特定。  
+  Phase 7 の変更で新たなエラー通知パスが追加された可能性。  
+  `src/connector/` の変更差分を確認。
+- [ ] **P8-3b（実装）** P7-3b（Binance/Bybit トースト抑制）と合わせて一括対応。
+
+---
+
+#### P8-4 カテゴリ M 継続：Tachibana Playing 到達失敗
+
+- [ ] **P8-4a** P7-2a/b を継続（S20/S21/S14）。  
+  Tachibana ディスクキャッシュ `os error 3` が根本原因の場合、CI 環境でのキャッシュディレクトリ初期化を追加。
+
+---
+
+#### P8-5 カテゴリ J 継続：Tachibana 休場日スキップ日付ズレ
+
+- [ ] **P8-5a** P7-4/P4-2 を継続（S29）。  
   `src/replay/` の開始時刻計算ロジックと休場日スキップ実装を確認。
 
 ---
@@ -331,19 +466,25 @@ GUI モードでも初期化中の通知を抑制する仕組みが必要。
 ## 調査対象ファイル
 
 ```
-src/replay_api.rs                     # P7-1 (set-ticker 404 リグレッション), P5-3 (pane/split UUID)
-src/screen/dashboard/                 # P7-1 (GUI ペイン UUID 管理)
-src/replay/                           # P7-2 (Tachibana auto-play), P5-2/K (ticker 変更フロー)
-src/connector/                        # P7-3 (Binance/Bybit エラートースト), P4-1 (Tachibana 認証)
-src/connector/auth.rs                 # P4-1 (Tachibana 認証)
-tests/s20_tachibana_replay_resilience.sh # P7-2
-tests/s32_toyota_candlestick_add.sh   # P7-1
-tests/s24_sidebar_select_ticker.sh    # P7-1 (TC-D2)
-tests/s29_tachibana_holiday_skip.sh   # P7-4
-tests/s33_sidebar_split_pane.sh       # P7-3
-tests/s36_sidebar_order_pane.sh       # P7-3
-tests/s37_order_panels_integrated.sh  # P7-3
-tests/s39_buying_power_portfolio.sh   # P7-3
+src/connector/auth.rs                 # P8-1 (セッション早期切断リグレッション), P4-1
+src/connector/                        # P8-1 (セッション管理), P8-3 (エラートースト), P7-3
+src/headless.rs                       # P8-2 (clock.seek 制御), P5-4 (panes[0] 限定)
+src/replay_api.rs                     # P8-2 (pane_api_set_ticker), P7-1
+src/replay/                           # P8-4 (Tachibana auto-play), P8-5 (holiday skip)
+docs/replay_header.md                 # P8-2a (§6.6 仕様確認)
+tests/s32_toyota_candlestick_add.sh   # P8-2 (TC-05/06)
+tests/s7_mid_replay_pane.sh           # P8-2a (仕様矛盾確認)
+tests/s44_order_list.sh               # P8-1
+tests/s49_account_info.sh             # P8-1
+tests/s39_buying_power_portfolio.sh   # P8-3
+tests/s20_tachibana_replay_resilience.sh # P8-4
+tests/s21_tachibana_error_boundary.sh # P8-4
+tests/s14_autoplay_event_driven.sh    # P8-4
+tests/s29_tachibana_holiday_skip.sh   # P8-5
+tests/s33_sidebar_split_pane.sh       # P7-3 / P8-3
+tests/s36_sidebar_order_pane.sh       # P7-3 / P8-3
+tests/s37_order_panels_integrated.sh  # P7-3 / P8-3
+tests/s24_sidebar_select_ticker.sh    # TC-D2 (カテゴリ L 残存)
 ```
 
 ---

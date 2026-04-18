@@ -2241,7 +2241,8 @@ impl Flowsurface {
             .sidebar
             .tickers_info()
             .get(&ticker)
-            .and_then(|opt| *opt);
+            .and_then(|opt| *opt)
+            .or_else(|| exchange::adapter::tachibana::get_ticker_info_sync(&ticker));
         let Some(ticker_info) = ticker_info else {
             return (
                 404,
@@ -2324,13 +2325,15 @@ impl Flowsurface {
             )))
         };
 
-        let task = dashboard
+        // .chain() だと Tachibana 認証待ちタスクが clock.seek をブロックする（spec §6.6 参照）。
+        // ReloadKlineStream を init_focused_pane と並列発火させるため Task::batch を使う。
+        let init_task = dashboard
             .init_focused_pane(main_window_id, ticker_info, kind)
             .map(move |msg| Message::Dashboard {
                 layout_id: None,
                 event: msg,
-            })
-            .chain(replay_task);
+            });
+        let task = Task::batch([init_task, replay_task]);
 
         // focus を元に戻す
         let dashboard = self.active_dashboard_mut();
@@ -2463,13 +2466,15 @@ impl Flowsurface {
             )))
         };
 
-        let task = dashboard
+        // .chain() だと Tachibana 認証待ちタスクが clock.seek をブロックする（spec §6.6 参照）。
+        // ReloadKlineStream を init_focused_pane と並列発火させるため Task::batch を使う。
+        let init_task = dashboard
             .init_focused_pane(main_window_id, ticker_info, kind)
             .map(move |msg| Message::Dashboard {
                 layout_id: None,
                 event: msg,
-            })
-            .chain(replay_task);
+            });
+        let task = Task::batch([init_task, replay_task]);
 
         let dashboard = self.active_dashboard_mut();
         dashboard.focus = prev_focus;
@@ -2529,7 +2534,8 @@ impl Flowsurface {
             .sidebar
             .tickers_info()
             .get(&ticker)
-            .and_then(|opt| *opt);
+            .and_then(|opt| *opt)
+            .or_else(|| exchange::adapter::tachibana::get_ticker_info_sync(&ticker));
         let Some(ticker_info) = ticker_info else {
             return (
                 404,
