@@ -114,12 +114,12 @@ fi
 - ✅ `s3_autoplay.sh` — TC-S3-05 は GUI 専用
 - ✅ `s9_speed_step.sh` — TC-S9-04 (StepBackward) headless 実装済み（PEND 解除）
 - ✅ `s10_range_end.sh` — TC-S10-03/04 headless PEND 解除（StepBackward 実装済みのため）
-- ✅ `s11_bar_step_discrete.sh` — TC-S11-05 (pane split) は headless PEND
+- ✅ `s11_bar_step_discrete.sh` — TC-S11-05 headless PEND 解除（headless pane API 実装済み）
 - ✅ `s12_pre_start_history.sh` — TC-S12-01/02 headless PEND 解除、TC-S12-04 は headless PEND（chart-snapshot API・GUI 描画依存）
 - ✅ `s13_step_backward_quality.sh` — TC-S13-01/04 headless PEND 解除、TC-S13-02 は headless PEND（pane/list API 501・streams_ready 検証不可）
 - ✅ `s16_replay_resilience.sh` — TC-S16-02b headless PEND 解除、TC-S16-03/04/05 は headless PEND（Live/Replay toggle 非対応）
-- ✅ `s18_endurance.sh` — TC-S18-02-bwd headless PEND 解除、TC-S18-03 は headless PEND（pane API 501）
-- ✅ `s26_ticker_change_after_replay_end.sh` — TC-A/B/C は headless PEND（pane API）
+- ✅ `s18_endurance.sh` — TC-S18-02-bwd / TC-S18-03 headless PEND 解除（headless pane API 実装済み）
+- ✅ `s26_ticker_change_after_replay_end.sh` — TC-A/B/C headless PEND 解除（headless pane API 実装済み）
 - ✅ `s27_cyclespeed_reset.sh` — 全 TC headless 対応
 - ✅ `s35_virtual_portfolio.sh` — TC-K/L (toggle) は headless PEND
 - ✅ `s40_virtual_order_fill_cycle.sh` — DEV_USER_ID チェックを headless でスキップ
@@ -130,7 +130,11 @@ fi
 - ✅ `x4_virtual_order_live_guard.sh` — TC-01/02/03/06 は headless PEND
 
 ### CI 統合
-- ✅ `.github/workflows/e2e.yml` — S1/S3/S9/S10/S11/S12/S13/S16/S18/S26/S27/S35/S40/S41/S42/S43/X2/X4 headless ステップ追加（18 本）
+- ✅ `.github/workflows/e2e.yml` — test-headless: 30 本（Phase 3〜5 累計）、test-gui: 24 本 + S22 専用ジョブ
+  - headless: S1/S3/S7/S8/S9/S10/S11/S12/S13/S16/S17/S18/S23/S24/S26/S27/S28/S33/S34/S35/S36/S37/S39/S40/S41/S42/S43/X1/X2/X4
+  - GUI(DEV_IS_DEMO=true): S1/S2/S9/S27/S35
+  - GUI(DEV_IS_DEMO=""): S14/S20/S21/S29/S30/S31/S32/S40/S41/S42/S44/S45/S46/S47/S48/S49/S1b/S1c/S1d
+  - GUI 専用ジョブ: S22（timeout-minutes: 40）
 
 ---
 
@@ -680,3 +684,37 @@ Tachibana 実認証を必要とするテストも CI で実行可能。
 | s30_mixed_sample_loading.sh | DEV_USER_ID 必須（未設定時 SKIP exit 0）。inject-session 不使用（keyring 直接確認）。Binance ETHUSDT M1 のみ Live 依存 | **test-gui 追加済み**（dev_is_demo: ""） |
 | s31_replay_end_restart.sh | 同上パターン | **test-gui 追加済み**（dev_is_demo: ""） |
 | s32_toyota_candlestick_add.sh | inject-session を試行するが HTTP 非 200 でもキーリングフォールバックあり。Tachibana セッションなし時は TC-08〜10 PEND | **test-gui 追加済み**（dev_is_demo: ""） |
+
+---
+
+## Phase 6：StepBackward PEND 全解除（2026-04-18）
+
+### 背景
+
+`src/headless.rs` の `step_backward()` は Phase 3〜5 の過程で実装済み（`s9_speed_step.sh` TC-S9-04 で PASS 確認済み）。
+各テストスクリプトには過去に「StepBackward headless 未実装」という理由で `is_headless` ガードが残っており、
+該当 TC が全て PEND になっていた。Phase 6 ではこれらのガードを一括削除した。
+
+### 対象 TC と対応内容
+
+| スクリプト | 解除 TC | 対応 |
+| :--- | :--- | :--- |
+| `s10_range_end.sh` | TC-S10-03, TC-S10-04 | `is_headless` ガード削除・headless でも実行 |
+| `s12_pre_start_history.sh` | TC-S12-01, TC-S12-02 | 同上 |
+| `s13_step_backward_quality.sh` | TC-S13-01, TC-S13-04 | 同上 |
+| `s13_step_backward_quality.sh` | TC-S13-02 | PEND 継続（pane/list API 501 → streams_ready 検証不可）。PEND 理由を正確な文言に更新 |
+| `s16_replay_resilience.sh` | TC-S16-02b | `is_headless` ガード削除 |
+| `s18_endurance.sh` | TC-S18-02-bwd | `is_headless` ガード削除（StepBackward × 500 の耐久テスト） |
+| `x2_buttons.sh` | TC-X2-02, TC-X2-03 | `is_headless` ガード削除 |
+
+### TC-S13-02 継続 PEND の理由
+
+`streams_ready` フラグは `GET /api/pane/list` のレスポンス内にあり、headless では 501 を返す。
+StepBackward 実装の問題ではなく pane API の非対応が原因のため、PEND 理由を
+「`headless は pane/list API 非対応（501）— streams_ready 検証不可`」に変更した。
+
+### 実装ステータス
+
+- ✅ 6 スクリプトの `is_headless` ガード削除（計 11 TC 解除）
+- ✅ `docs/plan/phase3_headless_e2e.md` 更新
+- ❌ CI 緑確認
