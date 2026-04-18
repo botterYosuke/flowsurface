@@ -512,19 +512,17 @@ impl HeadlessEngine {
                                 format!("{:?}", ticker_info.ticker.exchange).replace(' ', "");
                             let label =
                                 format!("{exchange_str}:{}:{timeframe}", ticker_info.ticker);
-                            let items: Vec<serde_json::Value> = slice
-                                .iter()
-                                .map(|k| {
-                                    serde_json::json!({
-                                        "time": k.time,
-                                        "open": k.open.to_f64(),
-                                        "high": k.high.to_f64(),
-                                        "low": k.low.to_f64(),
-                                        "close": k.close.to_f64(),
-                                    })
-                                })
-                                .collect();
-                            klines_out.push(serde_json::json!({"stream": label, "klines": items}));
+                            for k in slice {
+                                klines_out.push(serde_json::json!({
+                                    "stream": label,
+                                    "time": k.time,
+                                    "open": k.open.to_f64(),
+                                    "high": k.high.to_f64(),
+                                    "low": k.low.to_f64(),
+                                    "close": k.close.to_f64(),
+                                    "volume": k.volume.total().to_f64(),
+                                }));
+                            }
                         }
 
                         let trade_stream = StreamKind::Trades {
@@ -559,7 +557,7 @@ impl HeadlessEngine {
                 }
 
                 serde_json::json!({
-                    "current_time": now_ms,
+                    "current_time_ms": now_ms,
                     "klines": klines_out,
                     "trades": trades_out,
                 })
@@ -623,7 +621,7 @@ impl HeadlessEngine {
             status: crate::replay::virtual_exchange::VirtualOrderStatus::Pending,
         };
         let id = self.virtual_engine.place_order(order);
-        serde_json::json!({"ok": true, "order_id": id}).to_string()
+        serde_json::json!({"ok": true, "order_id": id, "status": "pending"}).to_string()
     }
 
     /// アクティブセッションの最新 close 価格を返す。

@@ -661,10 +661,15 @@ Tachibana 実認証を必要とするテストも CI で実行可能。
 - ✅ 5-D: s4/s6 ticker ハードコード調査 → **追加不可**（BinanceLinear ハードコード + CI の US IP Binance ブロック）
 - ✅ 5-D: s30/s31/s32 inject-session 依存調査 → **test-gui 追加済み**（DEV_USER_ID 必須・inject-session 不要）
 - ✅ pane API headless 実装（S11-TC-S11-05 / S18-TC-S18-03 / S26-TC-A/B/C の PEND 解消）
-  - `HeadlessPane` + `panes: Vec<HeadlessPane>` を `HeadlessEngine` に追加
-  - `list_panes / split_pane / close_pane / set_pane_ticker / set_pane_timeframe` を実装
-  - `min_step_ms()` でペインレジストリの最小 TF を使うよう `step_forward/backward` を修正
-  - s11 TC-S11-05 headless ブランチ追加、s18 TC-S18-03 `is_headless` ガード削除、s26 early-exit 削除
+  - `HeadlessPane { id, ticker, timeframe }` + `panes: Vec<HeadlessPane>` を `HeadlessEngine` に追加
+  - 起動時に初期 ticker/timeframe で 1 ペインを自動生成
+  - `list_panes_json / split_pane / close_pane / set_pane_ticker / set_pane_timeframe` を実装
+  - `min_step_ms()` でペインレジストリの最小 TF を取得、`step_forward/backward` のステップ幅をこれで決定
+  - `set_pane_ticker` は `clock.pause()` + `clock.seek(start)` でリセット（S26 要件: current_time = start_time, status = Paused）
+  - `GetChartSnapshot / OpenOrderPane / SidebarSelectTicker / ListNotifications` は引き続き 501
+  - s11 TC-S11-05 に headless ブランチ追加（split → set-timeframe M5 → step-forward delta=60000ms）
+  - s18 TC-S18-03 の `is_headless` ガード削除（split/close サイクルが headless でも動作）
+  - s26 の `is_headless` early-exit ブロック削除（pane/list + set-ticker が headless で動作）
 - ❌ CI 緑確認
 
 ---

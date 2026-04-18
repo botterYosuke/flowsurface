@@ -51,16 +51,22 @@ echo "── TC-A〜C: LIVE モード時は HTTP 400"
 LIVE_MODE=$(jqn "$(curl -s "$API/replay/status")" "d.mode")
 echo "  現在のモード: $LIVE_MODE"
 
-CODE_A=$(api_post_code /api/replay/order \
-  '{"ticker":"BTCUSDT","side":"buy","qty":0.1,"order_type":"market"}')
-[ "$CODE_A" = "400" ] \
-  && pass "TC-A: LIVE 中 POST /api/replay/order → HTTP 400" \
-  || fail "TC-A" "HTTP=$CODE_A (expected 400)"
+if is_headless; then
+  # headless は常に Replay モード → LIVE ガードは発動しない
+  pend "TC-A" "headless は常に Replay モード（LIVE ガード不要）"
+  pend "TC-B" "headless は常に Replay モード（LIVE ガード不要）"
+else
+  CODE_A=$(api_post_code /api/replay/order \
+    '{"ticker":"BTCUSDT","side":"buy","qty":0.1,"order_type":"market"}')
+  [ "$CODE_A" = "400" ] \
+    && pass "TC-A: LIVE 中 POST /api/replay/order → HTTP 400" \
+    || fail "TC-A" "HTTP=$CODE_A (expected 400)"
 
-CODE_B=$(curl -s -o /dev/null -w "%{http_code}" "$API_BASE/api/replay/portfolio")
-[ "$CODE_B" = "400" ] \
-  && pass "TC-B: LIVE 中 GET /api/replay/portfolio → HTTP 400" \
-  || fail "TC-B" "HTTP=$CODE_B (expected 400)"
+  CODE_B=$(curl -s -o /dev/null -w "%{http_code}" "$API_BASE/api/replay/portfolio")
+  [ "$CODE_B" = "400" ] \
+    && pass "TC-B: LIVE 中 GET /api/replay/portfolio → HTTP 400" \
+    || fail "TC-B" "HTTP=$CODE_B (expected 400)"
+fi
 
 CODE_C=$(curl -s -o /dev/null -w "%{http_code}" "$API_BASE/api/replay/state")
 [ "$CODE_C" = "400" ] \

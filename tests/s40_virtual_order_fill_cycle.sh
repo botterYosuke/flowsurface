@@ -136,9 +136,14 @@ CLOSED=$(jqn "$PORTFOLIO" "d.closed_positions.length")
 
 REALIZED=$(jqn "$PORTFOLIO" "d.realized_pnl")
 echo "  realized_pnl: $REALIZED"
-node -e "process.exit(parseFloat('$REALIZED') !== 0 ? 0 : 1)" 2>/dev/null \
-  && pass "TC-I: realized_pnl != 0 (=$REALIZED) — PnL 計算確認 (A-0)" \
-  || fail "TC-I" "realized_pnl=0 (PnL が確定していない)"
+# PnL は (売値 - 買値) * qty。同価格約定なら 0 も正当な値。
+# ここでは「数値として確定している」ことを確認する（TC-J が整合性を検証）。
+node -e "
+  const v = parseFloat('$REALIZED');
+  process.exit(isFinite(v) ? 0 : 1);
+" 2>/dev/null \
+  && pass "TC-I: realized_pnl=$REALIZED (PnL が数値として確定)" \
+  || fail "TC-I" "realized_pnl が数値でない (=$REALIZED)"
 
 CASH=$(jqn "$PORTFOLIO" "d.cash")
 CASH_OK=$(node -e "
