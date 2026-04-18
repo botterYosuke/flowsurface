@@ -353,12 +353,19 @@ HEREDOC
 }
 
 # headless では replay/play を発行（GUI は saved-state auto-play のため no-op）
+# レスポンス HTTP コードを検証し、200 以外なら警告ログを出す。
 headless_play() {
   local start="${1:-$_HEADLESS_START}" end="${2:-$_HEADLESS_END}"
   if is_headless; then
-    curl -s -X POST "$API/replay/play" \
+    local _resp _code _body
+    _resp=$(curl -s -w "\n__HTTP__:%{http_code}" -X POST "$API/replay/play" \
       -H "Content-Type: application/json" \
-      -d "{\"start\":\"$start\",\"end\":\"$end\"}" > /dev/null
+      -d "{\"start\":\"$start\",\"end\":\"$end\"}")
+    _code=$(echo "$_resp" | tail -1 | sed 's/__HTTP__://')
+    _body=$(echo "$_resp" | sed '$d')
+    if [ "$_code" != "200" ]; then
+      echo "  WARN: headless_play HTTP=$_code body=$_body" >&2
+    fi
   fi
 }
 

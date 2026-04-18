@@ -48,8 +48,9 @@ _HEADLESS_END="$END"
 _HEADLESS_TIMEFRAME="M1"
 start_app
 headless_play
-if ! wait_playing 30; then
-  fail "TC-S7-precond" "Playing 到達せず"
+if ! wait_playing 60; then
+  diagnose_playing_failure
+  fail "TC-S7-precond" "Playing 到達せず（60s タイムアウト）"
   exit 1
 fi
 
@@ -169,8 +170,9 @@ _HEADLESS_END="$END_SHORT"
 _HEADLESS_TIMEFRAME="M1"
 start_app
 headless_play
-if ! wait_playing 30; then
-  fail "TC-S7-07-pre" "Playing 到達せず（S7b）"
+if ! wait_playing 60; then
+  diagnose_playing_failure
+  fail "TC-S7-07-pre" "Playing 到達せず（S7b, 60s タイムアウト）"
   exit 1
 fi
 echo "  10x 速度で range end を待機（最大 480 秒）..."

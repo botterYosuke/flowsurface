@@ -91,7 +91,18 @@ else
 fi
 
 if [ "$TACH_SESSION" = "none" ]; then
-  echo "  INFO: Tachibana セッションなし — TC-S32-08〜10 は PEND"
+  echo "  INFO: Tachibana セッションなし — TC-S32-03 以降は TachibanaSpot:7203 への set-ticker が"
+  echo "        失敗するため、TC-S32-03〜10 を全て PEND として早期終了する"
+  pend "TC-S32-03" "Tachibana セッション不在（TachibanaSpot:7203 set-ticker 不可）"
+  pend "TC-S32-04" "Tachibana セッション不在"
+  pend "TC-S32-05" "Tachibana セッション不在"
+  pend "TC-S32-06" "Tachibana セッション不在"
+  pend "TC-S32-07" "Tachibana セッション不在"
+  pend "TC-S32-08" "Tachibana セッション不在"
+  pend "TC-S32-09" "Tachibana セッション不在"
+  pend "TC-S32-10" "Tachibana セッション不在"
+  print_summary
+  exit 0
 fi
 
 # ── TC-S32-02: ペイン split → pane count = 2 ─────────────────────────────────

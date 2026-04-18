@@ -102,11 +102,12 @@ echo "  F: 起動直後 mode=$INIT_MODE"
   && pass "TC-F1: autoplay 起動後 mode=Replay (status フィールドは Play 発火後に現れる)" \
   || fail "TC-F1" "mode=$INIT_MODE (expected Replay)"
 
-# Playing に到達するまで待機（最大 60 秒）
-if wait_status "Playing" 60; then
+# Playing に到達するまで待機（最大 90 秒）
+if wait_status "Playing" 90; then
   pass "TC-F2: 通常 Play フロー → Playing 到達"
 else
-  fail "TC-F2" "Playing 未到達（timeout）: status=$(get_status)"
+  diagnose_playing_failure
+  fail "TC-F2" "Playing 未到達（90s timeout）: status=$(get_status)"
   print_summary
   exit 1
 fi

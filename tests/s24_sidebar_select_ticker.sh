@@ -72,13 +72,16 @@ sidebar_select() {
 
 START=$(utc_offset -3)
 END=$(utc_offset -1)
+PRIMARY=$(primary_ticker)
+SECONDARY=$(secondary_ticker)
+TERTIARY=$(tertiary_ticker)
 
 cat > "$DATA_DIR/saved-state.json" <<EOF
 {
   "layout_manager":{"layouts":[{"name":"S24","dashboard":{"pane":{
     "KlineChart":{
       "layout":{"splits":[0.78],"autoscale":"FitToVisible"},"kind":"Candles",
-      "stream_type":[{"Kline":{"ticker":"BinanceLinear:BTCUSDT","timeframe":"M1"}}],
+      "stream_type":[{"Kline":{"ticker":"$PRIMARY","timeframe":"M1"}}],
       "settings":{"tick_multiply":null,"visual_config":null,"selected_basis":{"Time":"M1"}},
       "indicators":["Volume"],"link_group":"A"
     }
@@ -110,7 +113,7 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 echo ""
 echo "── TC-B: Playing 中に sidebar/select-ticker → Paused"
-RESP_B=$(sidebar_select "$PANE_ID" "BinanceLinear:ETHUSDT")
+RESP_B=$(sidebar_select "$PANE_ID" "$SECONDARY")
 HTTP_OK_B=$(node -e "
   try { JSON.parse(process.argv[1]); console.log('ok'); }
   catch(e) { console.log('err'); }
@@ -130,8 +133,8 @@ ST_B=$(get_status)
 # ─────────────────────────────────────────────────────────────────────────────
 echo ""
 echo "── TC-A: Paused 中に sidebar/select-ticker → ticker 変更確認"
-# 現在 ETHUSDT に変更済み。SOLUSDT にもう一度変更して確認。
-RESP_A=$(sidebar_select "$PANE_ID" "BinanceLinear:SOLUSDT")
+# 現在 secondary に変更済み。tertiary にもう一度変更して確認。
+RESP_A=$(sidebar_select "$PANE_ID" "$TERTIARY")
 HTTP_OK_A=$(node -e "
   try { JSON.parse(process.argv[1]); console.log('ok'); }
   catch(e) { console.log('err'); }
@@ -143,9 +146,9 @@ HTTP_OK_A=$(node -e "
 # streams_ready を待機（ticker 変更後にバックフィルが走る）
 if wait_for_streams_ready "$PANE_ID" 30; then
   TICKER_A=$(get_pane_ticker "$PANE_ID")
-  [ "$TICKER_A" = "BinanceLinear:SOLUSDT" ] \
-    && pass "TC-A2: ticker が BinanceLinear:SOLUSDT に変更された" \
-    || fail "TC-A2" "ticker=$TICKER_A (expected BinanceLinear:SOLUSDT)"
+  [ "$TICKER_A" = "$TERTIARY" ] \
+    && pass "TC-A2: ticker が $TERTIARY に変更された" \
+    || fail "TC-A2" "ticker=$TICKER_A (expected $TERTIARY)"
 else
   fail "TC-A2" "streams_ready タイムアウト（30s）"
 fi
@@ -173,7 +176,7 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 echo ""
 echo "── TC-D: kind=KlineChart を指定した sidebar/select-ticker"
-RESP_D=$(sidebar_select "$PANE_ID" "BinanceLinear:BTCUSDT" "KlineChart")
+RESP_D=$(sidebar_select "$PANE_ID" "$PRIMARY" "KlineChart")
 HTTP_OK_D=$(node -e "
   try { JSON.parse(process.argv[1]); console.log('ok'); }
   catch(e) { console.log('err'); }
@@ -199,7 +202,7 @@ echo ""
 echo "── TC-E: 不正な pane_id → HTTP 400"
 HTTP_CODE_E=$(curl -s -o /dev/null -w "%{http_code}" \
   -X POST -H "Content-Type: application/json" \
-  -d '{"pane_id":"not-a-uuid","ticker":"BinanceLinear:BTCUSDT"}' \
+  -d "{\"pane_id\":\"not-a-uuid\",\"ticker\":\"$PRIMARY\"}" \
   "$API_BASE/api/sidebar/select-ticker")
 [ "$HTTP_CODE_E" = "400" ] \
   && pass "TC-E: 不正 pane_id → HTTP 400" \
