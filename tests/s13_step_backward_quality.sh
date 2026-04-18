@@ -51,34 +51,30 @@ done
 wait_status Paused 10 || true
 
 # TC-S13-01: StepBackward 後 2 秒以内に Loading が解消される
-if is_headless; then
-  pend "TC-S13-01" "StepBackward headless 未実装"
-else
-  curl -s -X POST "$API/replay/step-backward" > /dev/null
-  T_START=$SECONDS
-  RESOLVED=false
-  FINAL_STATUS="unknown"
-  while [ $((SECONDS - T_START)) -le 2 ]; do
-    FINAL_STATUS=$(jqn "$(curl -s "$API/replay/status")" "d.status")
-    if [ "$FINAL_STATUS" = "Paused" ] || [ "$FINAL_STATUS" = "Playing" ]; then
-      RESOLVED=true
-      break
-    fi
-    sleep 0.2
-  done
-  if $RESOLVED; then
-    pass "TC-S13-01: StepBackward 後 $((SECONDS - T_START))s 以内に status=$FINAL_STATUS（Loading 解消）"
-  else
-    FINAL_STATUS=$(jqn "$(curl -s "$API/replay/status")" "d.status")
-    fail "TC-S13-01" "2 秒経過後も status=$FINAL_STATUS（Loading 継続の疑い）"
+curl -s -X POST "$API/replay/step-backward" > /dev/null
+T_START=$SECONDS
+RESOLVED=false
+FINAL_STATUS="unknown"
+while [ $((SECONDS - T_START)) -le 2 ]; do
+  FINAL_STATUS=$(jqn "$(curl -s "$API/replay/status")" "d.status")
+  if [ "$FINAL_STATUS" = "Paused" ] || [ "$FINAL_STATUS" = "Playing" ]; then
+    RESOLVED=true
+    break
   fi
-
-  wait_status Paused 10 || true
+  sleep 0.2
+done
+if $RESOLVED; then
+  pass "TC-S13-01: StepBackward 後 $((SECONDS - T_START))s 以内に status=$FINAL_STATUS（Loading 解消）"
+else
+  FINAL_STATUS=$(jqn "$(curl -s "$API/replay/status")" "d.status")
+  fail "TC-S13-01" "2 秒経過後も status=$FINAL_STATUS（Loading 継続の疑い）"
 fi
+
+wait_status Paused 10 || true
 
 # TC-S13-02: 10 回 StepBackward — 各ステップ後に streams_ready=true を個別確認
 if is_headless; then
-  pend "TC-S13-02" "StepBackward + pane API headless 未実装"
+  pend "TC-S13-02" "headless は pane/list API 非対応（501）— streams_ready 検証不可"
 else
   for i in $(seq 1 10); do
     curl -s -X POST "$API/replay/step-backward" > /dev/null
@@ -115,22 +111,18 @@ else
 fi
 
 # TC-S13-04: StepForward ↔ StepBackward 交互 × 5 でも status=Paused 維持
-if is_headless; then
-  pend "TC-S13-04" "StepBackward headless 未実装"
-else
-  curl -s -X POST "$API/replay/pause" > /dev/null
+curl -s -X POST "$API/replay/pause" > /dev/null
+wait_status Paused 10 || true
+for i in $(seq 1 5); do
+  curl -s -X POST "$API/replay/step-forward" > /dev/null
   wait_status Paused 10 || true
-  for i in $(seq 1 5); do
-    curl -s -X POST "$API/replay/step-forward" > /dev/null
-    wait_status Paused 10 || true
-    curl -s -X POST "$API/replay/step-backward" > /dev/null
-    wait_status Paused 10 || true
-    STATUS=$(jqn "$(curl -s "$API/replay/status")" "d.status")
-    [ "$STATUS" = "Paused" ] \
-      && pass "TC-S13-04-$i: 交互 Step #$i 後 status=Paused" \
-      || fail "TC-S13-04-$i" "status=$STATUS"
-  done
-fi
+  curl -s -X POST "$API/replay/step-backward" > /dev/null
+  wait_status Paused 10 || true
+  STATUS=$(jqn "$(curl -s "$API/replay/status")" "d.status")
+  [ "$STATUS" = "Paused" ] \
+    && pass "TC-S13-04-$i: 交互 Step #$i 後 status=Paused" \
+    || fail "TC-S13-04-$i" "status=$STATUS"
+done
 
 print_summary
 [ $FAIL -eq 0 ]

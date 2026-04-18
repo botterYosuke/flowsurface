@@ -113,20 +113,20 @@ fi
 - ✅ `s1_basic_lifecycle.sh`
 - ✅ `s3_autoplay.sh` — TC-S3-05 は GUI 専用
 - ✅ `s9_speed_step.sh` — TC-S9-04 (StepBackward) headless 実装済み（PEND 解除）
-- ✅ `s10_range_end.sh` — TC-S10-03/04 (StepBackward) は headless PEND
+- ✅ `s10_range_end.sh` — TC-S10-03/04 headless PEND 解除（StepBackward 実装済みのため）
 - ✅ `s11_bar_step_discrete.sh` — TC-S11-05 (pane split) は headless PEND
-- ✅ `s12_pre_start_history.sh` — TC-S12-01/02 (StepBackward) は headless PEND
-- ✅ `s13_step_backward_quality.sh` — TC-S13-01/02/04 は headless PEND
-- ✅ `s16_replay_resilience.sh` — TC-S16-02b/03/04/05 は headless PEND
-- ✅ `s18_endurance.sh` — TC-S18-02-bwd/03 は headless PEND
+- ✅ `s12_pre_start_history.sh` — TC-S12-01/02 headless PEND 解除、TC-S12-04 は headless PEND（chart-snapshot API・GUI 描画依存）
+- ✅ `s13_step_backward_quality.sh` — TC-S13-01/04 headless PEND 解除、TC-S13-02 は headless PEND（pane/list API 501・streams_ready 検証不可）
+- ✅ `s16_replay_resilience.sh` — TC-S16-02b headless PEND 解除、TC-S16-03/04/05 は headless PEND（Live/Replay toggle 非対応）
+- ✅ `s18_endurance.sh` — TC-S18-02-bwd headless PEND 解除、TC-S18-03 は headless PEND（pane API 501）
 - ✅ `s26_ticker_change_after_replay_end.sh` — TC-A/B/C は headless PEND（pane API）
 - ✅ `s27_cyclespeed_reset.sh` — 全 TC headless 対応
 - ✅ `s35_virtual_portfolio.sh` — TC-K/L (toggle) は headless PEND
 - ✅ `s40_virtual_order_fill_cycle.sh` — DEV_USER_ID チェックを headless でスキップ
 - ✅ `s41_limit_order_round_trip.sh` — 同上
 - ✅ `s42_naked_short_cycle.sh` — 同上
-- ✅ `s43_get_state_endpoint.sh` — TC-A PEND、current_time_ms/current_time 両対応
-- ✅ `x2_buttons.sh` — TC-X2-02/03/08 は headless PEND
+- ✅ `s43_get_state_endpoint.sh` — TC-A PEND（Live モードなし）、TC-G/H/I/J/K2 PEND（headless klines スキーマ差分あり）、current_time_ms/current_time 両対応
+- ✅ `x2_buttons.sh` — TC-X2-02/03 headless PEND 解除、TC-X2-08 は headless PEND（Live モードなし）
 - ✅ `x4_virtual_order_live_guard.sh` — TC-01/02/03/06 は headless PEND
 
 ### CI 統合
@@ -412,6 +412,25 @@ fn step_forward(&mut self) -> String {
 - ✅ Bug 4: `src/headless.rs` — GetState Idle 時 400 返却修正
 - ✅ Bug 5: `src/headless.rs` — `get_orders_json()` を `{"orders":[...]}` 形式に修正（TC-K 対応）
 - ✅ Bug 6: `src/headless.rs` — Playing 中 StepForward が End にシークしない（TC-S9-03b）
+- ✅ StepBackward PEND 解除（2026-04-18）: 以下 TC の `is_headless` ガードを削除
+  - `s10_range_end.sh` TC-S10-03/04
+  - `s12_pre_start_history.sh` TC-S12-01/02
+  - `s13_step_backward_quality.sh` TC-S13-01/04（TC-S13-02 は pane/list 依存で継続 PEND）
+  - `s16_replay_resilience.sh` TC-S16-02b
+  - `s18_endurance.sh` TC-S18-02-bwd
+  - `x2_buttons.sh` TC-X2-02/03
+
+---
+
+### Bug 7: Headless S43 TC-G/H/I/J/K2 — klines スキーマ差分（2026-04-18 CI 確認）
+
+**根本原因**
+
+`get_state_json()` が返す `klines` 配列の各要素に、GUI 版と比較してフィールドが不足している。
+CI ログでは `klines count=1` と表示されており、klines 自体は存在するが
+`stream_type` / `ticker` などのフィールドが headless 実装では未返却と推定される。
+
+**現状**: PEND（`API 拡張待ち`）— headless klines スキーマを GUI と揃えるまで未解決。
 
 ---
 
@@ -630,11 +649,23 @@ Tachibana 実認証を必要とするテストも CI で実行可能。
 
 ### 実装ステータス
 
-- ❌ 5-A: test-headless に 11 本追加（`e2e.yml` 変更）
-- ❌ 5-B: test-gui に 12 本追加（`e2e.yml` 変更）
-- ❌ 5-B: s22 専用ジョブ追加（timeout-minutes: 40）
-- ❌ 5-C: s8 修正（`is_headless` 分岐追加）
-- ❌ 5-C: s14 修正（`is_headless` 分岐追加）
-- ❌ 5-D: s4/s6 ticker ハードコード調査
-- ❌ 5-D: s30/s31/s32 inject-session 依存調査
+- ✅ 5-A: test-headless に 11 本追加（`e2e.yml` 変更）
+- ✅ 5-B: test-gui に 19 本追加（`e2e.yml` 変更）— s14/s20/s21/s29/s30/s31/s32/s44〜s49/s1b/s1c/s1d
+- ✅ 5-B: s22 専用ジョブ追加（timeout-minutes: 40）
+- ✅ 5-C: s8 修正（streams_ready 待機 + TC-S8-08〜11 を `is_headless` 分岐で囲む） → test-headless 追加
+- ✅ 5-C: s14 修正（冒頭に is_headless 全 TC PEND 分岐追加） → test-gui 追加（dev_is_demo: ""）
+- ✅ 5-D: s4/s6 ticker ハードコード調査 → **追加不可**（BinanceLinear ハードコード + CI の US IP Binance ブロック）
+- ✅ 5-D: s30/s31/s32 inject-session 依存調査 → **test-gui 追加済み**（DEV_USER_ID 必須・inject-session 不要）
 - ❌ CI 緑確認
+
+---
+
+### 5-D 調査結果詳細（2026-04-18）
+
+| スクリプト | 調査結果 | 対応 |
+| :--- | :--- | :--- |
+| s4_multi_pane_binance.sh | BinanceLinear:BTCUSDT/ETHUSDT ハードコード。`E2E_TICKER` 非使用。CI US IP から Binance ブロック（HTTP 451） | **追加不可** |
+| s6_mixed_timeframes.sh | BinanceLinear:BTCUSDT ハードコード。同上 | **追加不可** |
+| s30_mixed_sample_loading.sh | DEV_USER_ID 必須（未設定時 SKIP exit 0）。inject-session 不使用（keyring 直接確認）。Binance ETHUSDT M1 のみ Live 依存 | **test-gui 追加済み**（dev_is_demo: ""） |
+| s31_replay_end_restart.sh | 同上パターン | **test-gui 追加済み**（dev_is_demo: ""） |
+| s32_toyota_candlestick_add.sh | inject-session を試行するが HTTP 非 200 でもキーリングフォールバックあり。Tachibana セッションなし時は TC-08〜10 PEND | **test-gui 追加済み**（dev_is_demo: ""） |

@@ -84,6 +84,54 @@ jobs:
           - name: S42 Naked short cycle
             script: s42_naked_short_cycle.sh
             dev_is_demo: ""
+          - name: S14 Autoplay event driven
+            script: s14_autoplay_event_driven.sh
+            dev_is_demo: ""
+          - name: S20 Tachibana replay resilience
+            script: s20_tachibana_replay_resilience.sh
+            dev_is_demo: ""
+          - name: S21 Tachibana error boundary
+            script: s21_tachibana_error_boundary.sh
+            dev_is_demo: ""
+          - name: S29 Tachibana holiday skip
+            script: s29_tachibana_holiday_skip.sh
+            dev_is_demo: ""
+          - name: S30 Mixed sample loading
+            script: s30_mixed_sample_loading.sh
+            dev_is_demo: ""
+          - name: S31 Replay end restart
+            script: s31_replay_end_restart.sh
+            dev_is_demo: ""
+          - name: S32 Toyota candlestick add
+            script: s32_toyota_candlestick_add.sh
+            dev_is_demo: ""
+          - name: S44 Order list
+            script: s44_order_list.sh
+            dev_is_demo: ""
+          - name: S45 Order correct cancel
+            script: s45_order_correct_cancel.sh
+            dev_is_demo: ""
+          - name: S46 Wrong password
+            script: s46_wrong_password.sh
+            dev_is_demo: ""
+          - name: S47 Outside hours
+            script: s47_outside_hours.sh
+            dev_is_demo: ""
+          - name: S48 Invalid issue
+            script: s48_invalid_issue.sh
+            dev_is_demo: ""
+          - name: S49 Account info
+            script: s49_account_info.sh
+            dev_is_demo: ""
+          - name: S1b Limit buy
+            script: s1b_limit_buy.sh
+            dev_is_demo: ""
+          - name: S1c Market sell
+            script: s1c_market_sell.sh
+            dev_is_demo: ""
+          - name: S1d Limit sell
+            script: s1d_limit_sell.sh
+            dev_is_demo: ""
 
     steps:
       - uses: actions/checkout@v4
@@ -166,6 +214,30 @@ jobs:
             script: s26_ticker_change_after_replay_end.sh
           - name: X2 Buttons
             script: x2_buttons.sh
+          - name: S7 Mid-replay pane
+            script: s7_mid_replay_pane.sh
+          - name: S17 Error boundary
+            script: s17_error_boundary.sh
+          - name: S23 Mid-replay ticker change
+            script: s23_mid_replay_ticker_change.sh
+          - name: S24 Sidebar select ticker
+            script: s24_sidebar_select_ticker.sh
+          - name: S28 Ticker change while loading
+            script: s28_ticker_change_while_loading.sh
+          - name: S33 Sidebar split pane
+            script: s33_sidebar_split_pane.sh
+          - name: S34 Virtual order basic
+            script: s34_virtual_order_basic.sh
+          - name: S36 Sidebar order pane
+            script: s36_sidebar_order_pane.sh
+          - name: S37 Order panels integrated
+            script: s37_order_panels_integrated.sh
+          - name: S39 Buying power portfolio
+            script: s39_buying_power_portfolio.sh
+          - name: X1 Current time
+            script: x1_current_time.sh
+          - name: S8 Error boundary
+            script: s8_error_boundary.sh
 
     steps:
       - uses: actions/checkout@v4
@@ -198,3 +270,44 @@ jobs:
         with:
           name: log-headless-${{ matrix.script }}
           path: ${{ runner.temp }}/e2e_headless_debug.log
+
+  # ── S22 Tachibana Endurance（専用・長時間）────────────────────────────────────
+  test-s22-endurance:
+    name: "GUI: S22 Tachibana endurance"
+    needs: build
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Download exe artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: flowsurface-exe
+          path: target/debug/
+
+      - name: Prepare data directory
+        shell: bash
+        run: mkdir -p "$APPDATA/flowsurface"
+
+      - name: Run S22 Tachibana endurance
+        shell: bash
+        env:
+          FLOWSURFACE_EXE: ${{ github.workspace }}/target/debug/flowsurface.exe
+          E2E_TICKER: HyperliquidLinear:BTC
+          DEV_IS_DEMO: ""
+          DEV_USER_ID: ${{ secrets.DEV_USER_ID }}
+          DEV_PASSWORD: ${{ secrets.DEV_PASSWORD }}
+          DEV_SECOND_PASSWORD: ${{ secrets.DEV_SECOND_PASSWORD }}
+        run: bash tests/s22_tachibana_endurance.sh
+
+      - name: Upload debug log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: log-gui-s22_tachibana_endurance.sh
+          path: ${{ runner.temp }}/e2e_debug.log

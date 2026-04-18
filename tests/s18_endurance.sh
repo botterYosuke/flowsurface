@@ -91,33 +91,29 @@ else
     || fail "TC-S18-02-fwd" "status=$STATUS (Paused 期待)"
 fi
 
-if is_headless; then
-  pend "TC-S18-02-bwd" "StepBackward headless 未実装"
-else
-  echo "  StepBackward × 500..."
-  CRASH=false
-  for i in $(seq 1 500); do
-    curl -s -X POST "$API/replay/step-backward" > /dev/null
-    sleep 0.3
-    if ! curl -s "$API/replay/status" > /dev/null 2>&1; then
-      CRASH=true
-      echo "  CRASH detected at backward step #$i"
-      break
-    fi
-    if [ $((i % 100)) -eq 0 ]; then
-      echo "    backward step $i/500..."
-    fi
-  done
-
-  if $CRASH; then
-    fail "TC-S18-02-bwd" "StepBackward 連打中にアプリがクラッシュした"
-  else
-    wait_status Paused 15 || true
-    STATUS=$(jqn "$(curl -s "$API/replay/status")" "d.status")
-    [ "$STATUS" = "Paused" ] \
-      && pass "TC-S18-02-bwd: StepBackward 500 回完了 → status=Paused" \
-      || fail "TC-S18-02-bwd" "status=$STATUS (Paused 期待)"
+echo "  StepBackward × 500..."
+CRASH=false
+for i in $(seq 1 500); do
+  curl -s -X POST "$API/replay/step-backward" > /dev/null
+  sleep 0.3
+  if ! curl -s "$API/replay/status" > /dev/null 2>&1; then
+    CRASH=true
+    echo "  CRASH detected at backward step #$i"
+    break
   fi
+  if [ $((i % 100)) -eq 0 ]; then
+    echo "    backward step $i/500..."
+  fi
+done
+
+if $CRASH; then
+  fail "TC-S18-02-bwd" "StepBackward 連打中にアプリがクラッシュした"
+else
+  wait_status Paused 15 || true
+  STATUS=$(jqn "$(curl -s "$API/replay/status")" "d.status")
+  [ "$STATUS" = "Paused" ] \
+    && pass "TC-S18-02-bwd: StepBackward 500 回完了 → status=Paused" \
+    || fail "TC-S18-02-bwd" "status=$STATUS (Paused 期待)"
 fi
 
 stop_app

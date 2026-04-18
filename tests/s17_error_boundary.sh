@@ -119,10 +119,13 @@ start_app
 # アプリが起動して API が応答すれば OK（crash なし）
 sleep 5
 ALIVE=$(curl -s "$API/replay/status" > /dev/null 2>&1 && echo "true" || echo "false")
-STATUS=$(jqn "$(curl -s "$API/replay/status")" "d.status")
-[ "$ALIVE" = "true" ] \
-  && pass "TC-S17-04: 空 range でもアプリ生存 (status=$STATUS)" \
-  || fail "TC-S17-04" "空 range でアプリがクラッシュした"
+if [ "$ALIVE" = "true" ]; then
+  STATUS=$(jqn "$(curl -s "$API/replay/status")" "d.status")
+  pass "TC-S17-04: 空 range でもアプリ生存 (status=$STATUS)"
+else
+  fail "TC-S17-04" "空 range でアプリがクラッシュした"
+  STATUS="null"
+fi
 
 stop_app
 
@@ -136,10 +139,12 @@ start_app
 # EventStore が空でも Playing/Paused で停止するだけ（クラッシュしない）
 sleep 10
 ALIVE=$(curl -s "$API/replay/status" > /dev/null 2>&1 && echo "true" || echo "false")
-STATUS=$(jqn "$(curl -s "$API/replay/status")" "d.status")
-[ "$ALIVE" = "true" ] \
-  && pass "TC-S17-05: 未来 range でもアプリ生存 (status=$STATUS)" \
-  || fail "TC-S17-05" "未来 range でアプリがクラッシュした"
+if [ "$ALIVE" = "true" ]; then
+  STATUS=$(jqn "$(curl -s "$API/replay/status")" "d.status")
+  pass "TC-S17-05: 未来 range でもアプリ生存 (status=$STATUS)"
+else
+  fail "TC-S17-05" "未来 range でアプリがクラッシュした"
+fi
 
 stop_app
 

@@ -25,6 +25,18 @@ if [ -z "${DEV_USER_ID:-}" ] || [ -z "${DEV_PASSWORD:-}" ]; then
 fi
 
 echo "=== S14: Auto-play タイムアウト廃止 ==="
+
+# headless は Tachibana keyring 操作（persist_session / delete_session）が不可能なため全 TC を PEND
+if is_headless; then
+  pend "TC-S14-01" "headless は Tachibana keyring 操作不可"
+  pend "TC-S14-02" "headless は Tachibana keyring 操作不可"
+  pend "TC-S14-03a" "headless は Tachibana keyring 操作不可"
+  pend "TC-S14-03b" "headless は Tachibana keyring 操作不可"
+  pend "TC-S14-04" "headless は Tachibana keyring 操作不可"
+  print_summary
+  exit 0
+fi
+
 backup_state
 trap 'stop_app; restore_state' EXIT ERR
 

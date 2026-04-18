@@ -79,6 +79,11 @@ start_app
 sleep 10
 
 # --- TC-S3-05a: range 未設定 → auto-play しない & status=null ---
+ALIVE=$(curl -s "$API/replay/status" > /dev/null 2>&1 && echo "true" || echo "false")
+if [ "$ALIVE" = "false" ]; then
+  fail "TC-S3-05a" "API not ready after start_app"
+  fail "TC-S3-05b" "API not ready after start_app"
+else
 ST_CHECK=$(jqn "$(curl -s "$API/replay/status")" "d.status")
 MODE_CHECK=$(jqn "$(curl -s "$API/replay/status")" "d.mode")
 [ "$ST_CHECK" = "null" ] && pass "TC-S3-05a: range 未設定 → status=null" || \
@@ -95,6 +100,7 @@ ERR_COUNT=$(node -e "
 " "$NOTIF")
 [ "$ERR_COUNT" = "0" ] && pass "TC-S3-05c: error/warning toast なし" || \
   fail "TC-S3-05c" "error/warning toast が $ERR_COUNT 件発火: $NOTIF"
+fi # end ALIVE check
 fi
 
 restore_state

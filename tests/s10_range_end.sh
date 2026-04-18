@@ -66,31 +66,22 @@ EQ=$(bigt_eq "$CT_AT_END" "$CT_AFTER_SF")
   fail "TC-S10-02" "終端後 StepForward が前進 (before=$CT_AT_END after=$CT_AFTER_SF)"
 
 # --- TC-S10-03: 終端から StepBackward で戻れる ---
-if is_headless; then
-  pend "TC-S10-03" "StepBackward headless 未実装"
-else
 curl -s -X POST "$API/replay/step-backward" > /dev/null
 sleep 1
 CT_BACK=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
 IS_BACK=$(bigt_gt "$CT_AT_END" "$CT_BACK")
 [ "$IS_BACK" = "true" ] && pass "TC-S10-03: 終端から StepBackward 可能" || \
   fail "TC-S10-03" "後退しない (end=$CT_AT_END back=$CT_BACK)"
-fi
 
 # --- TC-S10-04: Resume で再び Playing になる ---
 # BASE_STEP_DELAY_MS=100ms / 10x = 10ms/bar。
 # 60 バー後退 (600ms) して Resume し、即座に status を確認。
-if is_headless; then
-  pend "TC-S10-04" "StepBackward headless 未実装"
-  curl -s -X POST "$API/replay/resume" > /dev/null
-else
 for _ in $(seq 1 59); do curl -s -X POST "$API/replay/step-backward" > /dev/null; done
 curl -s -X POST "$API/replay/resume" > /dev/null
 # 10ms/bar × 60 bars = 600ms の余裕。100ms 以内にチェック
 ST=$(jqn "$(curl -s "$API/replay/status")" "d.status")
 [ "$ST" = "Playing" ] && pass "TC-S10-04: StepBackward 後に Resume → Playing" || \
   fail "TC-S10-04" "status=$ST"
-fi
 
 # --- TC-S10-05: 2 分幅のレンジ（最小動作確認） ---
 stop_app

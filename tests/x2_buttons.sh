@@ -33,9 +33,6 @@ DIFF=$(bigt_sub "$POST" "$PRE")
   fail "TC-X2-01" "diff=$DIFF (expected 300000)"
 
 # --- TC-X2-02: StepBackward x5 で完全可逆 ---
-if is_headless; then
-  pend "TC-X2-02" "StepBackward headless 未実装"
-else
 for i in $(seq 1 5); do
   curl -s -X POST "$API/replay/step-backward" > /dev/null
   sleep 0.2
@@ -43,12 +40,8 @@ done
 BACK=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
 [ "$BACK" = "$PRE" ] && pass "TC-X2-02: 可逆 (back=$BACK)" || \
   fail "TC-X2-02" "back=$BACK pre=$PRE"
-fi
 
 # --- TC-X2-03: start 端での StepBackward は no-op ---
-if is_headless; then
-  pend "TC-X2-03" "StepBackward headless 未実装"
-else
 ST_T=$(jqn "$(curl -s "$API/replay/status")" "d.start_time")
 for i in $(seq 1 200); do
   CT=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
@@ -64,7 +57,6 @@ BEYOND=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
 EQ2=$(bigt_eq "$AT_START" "$BEYOND")
 [ "$EQ2" = "true" ] && pass "TC-X2-03: start 端 StepBackward は no-op" || \
   fail "TC-X2-03" "AT_START=$AT_START BEYOND=$BEYOND"
-fi
 
 # --- TC-X2-04: Pause 冪等性 ---
 curl -s -X POST "$API/replay/pause" > /dev/null

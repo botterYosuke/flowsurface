@@ -117,16 +117,12 @@ else
       || fail "TC-S16-02a" "delta=$DELTA (expected 60000)"
 
     # StepBackward → crash なし
-    if is_headless; then
-      pend "TC-S16-02b" "StepBackward headless 未実装"
-    else
-      curl -s -X POST "$API/replay/step-backward" > /dev/null
-      wait_status Paused 10
-      STATUS=$(jqn "$(curl -s "$API/replay/status")" "d.status")
-      [ "$STATUS" = "Paused" ] \
-        && pass "TC-S16-02b: UTC 0:00 越え後 StepBackward → status=Paused" \
-        || fail "TC-S16-02b" "status=$STATUS"
-    fi
+    curl -s -X POST "$API/replay/step-backward" > /dev/null
+    wait_status Paused 10
+    STATUS=$(jqn "$(curl -s "$API/replay/status")" "d.status")
+    [ "$STATUS" = "Paused" ] \
+      && pass "TC-S16-02b: UTC 0:00 越え後 StepBackward → status=Paused" \
+      || fail "TC-S16-02b" "status=$STATUS"
   else
     pend "TC-S16-02" "UTC 0:00 境界を超えられなかった（データ不足 or 速度不足）"
   fi

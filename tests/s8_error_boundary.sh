@@ -38,12 +38,15 @@ EOF
 start_app
 
 # Live ストリームが Ready になるまで待つ（Binance メタデータ取得に数秒かかる）
-for i in $(seq 1 30); do
-  PLIST=$(curl -s "$API/pane/list" 2>/dev/null || echo '{}')
-  READY=$(node -e "try{const d=JSON.parse(process.argv[1]);const ps=d.panes||[];const allReady=ps.length>0&&ps.every(p=>p.streams_ready===true);process.stdout.write(allReady?'true':'false');}catch(e){process.stdout.write('false');}" "$PLIST")
-  [ "$READY" = "true" ] && echo "  streams ready (${i}s)" && break
-  sleep 1
-done
+# headless はストリーム接続なし → スキップ
+if ! is_headless; then
+  for i in $(seq 1 30); do
+    PLIST=$(curl -s "$API/pane/list" 2>/dev/null || echo '{}')
+    READY=$(node -e "try{const d=JSON.parse(process.argv[1]);const ps=d.panes||[];const allReady=ps.length>0&&ps.every(p=>p.streams_ready===true);process.stdout.write(allReady?'true':'false');}catch(e){process.stdout.write('false');}" "$PLIST")
+    [ "$READY" = "true" ] && echo "  streams ready (${i}s)" && break
+    sleep 1
+  done
+fi
 
 # --- TC-S8-01: 存在しないパス → 404 ---
 CODE=$(curl -s -o /dev/null -w "%{http_code}" "$API/nonexistent")
@@ -149,64 +152,87 @@ CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$API/replay/play" \
   fail "TC-S8-07e" "code=$CODE (expected 200)"
 
 # --- TC-S8-08: pane/split に不正 UUID → 400 + error フィールド ---
-RESP=$(curl -s -w "\n%{http_code}" -X POST "$API/pane/split" \
-  -H "Content-Type: application/json" \
-  -d '{"pane_id":"not-a-uuid","axis":"Vertical"}')
-CODE=$(echo "$RESP" | tail -1)
-BODY=$(echo "$RESP" | head -1)
-HAS_ERR=$(node -e "try{const d=JSON.parse(process.argv[1]);console.log(d.error?'true':'false');}catch(e){console.log('false');}" "$BODY")
-[ "$CODE" = "400" ] && pass "TC-S8-08a: 不正 UUID → 400" || fail "TC-S8-08a" "code=$CODE"
-[ "$HAS_ERR" = "true" ] && pass "TC-S8-08b: 不正 UUID → error フィールドあり" || fail "TC-S8-08b" "body=$BODY"
-
-# --- TC-S8-09: pane/split に不正 axis → 400 + error フィールド ---
-PANE_LIST=$(curl -s "$API/pane/list")
-PANE_ID=$(node -e "
-  const d = JSON.parse(process.argv[1]);
-  const panes = d.panes || d;
-  const arr = Array.isArray(panes) ? panes : Object.values(panes);
-  console.log((arr[0]||{}).id || (arr[0]||{}).pane_id || '');
-" "$PANE_LIST" 2>/dev/null || echo "")
-if [ -n "$PANE_ID" ]; then
+if is_headless; then
+  pend "TC-S8-08" "headless は pane/split API 非対応（501）"
+else
   RESP=$(curl -s -w "\n%{http_code}" -X POST "$API/pane/split" \
     -H "Content-Type: application/json" \
-    -d "{\"pane_id\":\"$PANE_ID\",\"axis\":\"Diagonal\"}")
+    -d '{"pane_id":"not-a-uuid","axis":"Vertical"}')
   CODE=$(echo "$RESP" | tail -1)
   BODY=$(echo "$RESP" | head -1)
   HAS_ERR=$(node -e "try{const d=JSON.parse(process.argv[1]);console.log(d.error?'true':'false');}catch(e){console.log('false');}" "$BODY")
-  [ "$CODE" = "400" ] && pass "TC-S8-09a: 不正 axis → 400" || fail "TC-S8-09a" "code=$CODE"
-  [ "$HAS_ERR" = "true" ] && pass "TC-S8-09b: 不正 axis → error フィールドあり" || fail "TC-S8-09b" "body=$BODY"
+  [ "$CODE" = "400" ] && pass "TC-S8-08a: 不正 UUID → 400" || fail "TC-S8-08a" "code=$CODE"
+  [ "$HAS_ERR" = "true" ] && pass "TC-S8-08b: 不正 UUID → error フィールドあり" || fail "TC-S8-08b" "body=$BODY"
 fi
 
-# --- TC-S8-10: pane_id edge case（POST /api/pane/set-ticker）---
-RESP=$(curl -s -w "\n%{http_code}" -X POST "$API/pane/set-ticker" \
-  -H "Content-Type: application/json" \
-  -d '{"pane_id":"","ticker":"BinanceLinear:BTCUSDT"}')
-CODE=$(echo "$RESP" | tail -1)
-[ "$CODE" = "400" ] && pass "TC-S8-10a: pane_id 空文字 → 400" || fail "TC-S8-10a" "code=$CODE"
-
-RESP=$(curl -s -w "\n%{http_code}" -X POST "$API/pane/set-ticker" \
-  -H "Content-Type: application/json" \
-  -d '{"pane_id":"not-a-uuid","ticker":"BinanceLinear:BTCUSDT"}')
-CODE=$(echo "$RESP" | tail -1)
-[ "$CODE" = "404" ] || [ "$CODE" = "400" ] && pass "TC-S8-10b: 不正 UUID → 404 or 400" || \
-  fail "TC-S8-10b" "code=$CODE (expected 404 or 400)"
-
-# --- TC-S8-11: set-timeframe validation ---
-if [ -n "$PANE_ID" ]; then
-  for bad_tf in "M999" ""; do
-    RESP=$(curl -s -w "\n%{http_code}" -X POST "$API/pane/set-timeframe" \
+# --- TC-S8-09: pane/split に不正 axis → 400 + error フィールド ---
+if is_headless; then
+  pend "TC-S8-09" "headless は pane/split API 非対応（501）"
+else
+  PANE_LIST=$(curl -s "$API/pane/list")
+  PANE_ID=$(node -e "
+    const d = JSON.parse(process.argv[1]);
+    const panes = d.panes || d;
+    const arr = Array.isArray(panes) ? panes : Object.values(panes);
+    console.log((arr[0]||{}).id || (arr[0]||{}).pane_id || '');
+  " "$PANE_LIST" 2>/dev/null || echo "")
+  if [ -n "$PANE_ID" ]; then
+    RESP=$(curl -s -w "\n%{http_code}" -X POST "$API/pane/split" \
       -H "Content-Type: application/json" \
-      -d "{\"pane_id\":\"$PANE_ID\",\"timeframe\":\"$bad_tf\"}")
+      -d "{\"pane_id\":\"$PANE_ID\",\"axis\":\"Diagonal\"}")
     CODE=$(echo "$RESP" | tail -1)
     BODY=$(echo "$RESP" | head -1)
     HAS_ERR=$(node -e "try{const d=JSON.parse(process.argv[1]);console.log(d.error?'true':'false');}catch(e){console.log('false');}" "$BODY")
-    # set-timeframe の不正値は app 層でエラーとなり HTTP 200 + error フィールドで返る（route 層では 400 にならない）
-    [ "$CODE" = "200" ] && [ "$HAS_ERR" = "true" ] \
-      && pass "TC-S8-11a: timeframe='$bad_tf' → HTTP 200 + error フィールド（app 層エラー）" \
-      || fail "TC-S8-11a" "timeframe='$bad_tf' code=$CODE has_err=$HAS_ERR (expected 200+error)"
-    [ "$HAS_ERR" = "true" ] && pass "TC-S8-11b: timeframe='$bad_tf' → error フィールドあり" || \
-      fail "TC-S8-11b" "timeframe='$bad_tf' body=$BODY"
-  done
+    [ "$CODE" = "400" ] && pass "TC-S8-09a: 不正 axis → 400" || fail "TC-S8-09a" "code=$CODE"
+    [ "$HAS_ERR" = "true" ] && pass "TC-S8-09b: 不正 axis → error フィールドあり" || fail "TC-S8-09b" "body=$BODY"
+  fi
+fi
+
+# --- TC-S8-10: pane_id edge case（POST /api/pane/set-ticker）---
+if is_headless; then
+  pend "TC-S8-10" "headless は pane/set-ticker API 非対応（501）"
+else
+  RESP=$(curl -s -w "\n%{http_code}" -X POST "$API/pane/set-ticker" \
+    -H "Content-Type: application/json" \
+    -d '{"pane_id":"","ticker":"BinanceLinear:BTCUSDT"}')
+  CODE=$(echo "$RESP" | tail -1)
+  [ "$CODE" = "400" ] && pass "TC-S8-10a: pane_id 空文字 → 400" || fail "TC-S8-10a" "code=$CODE"
+
+  RESP=$(curl -s -w "\n%{http_code}" -X POST "$API/pane/set-ticker" \
+    -H "Content-Type: application/json" \
+    -d '{"pane_id":"not-a-uuid","ticker":"BinanceLinear:BTCUSDT"}')
+  CODE=$(echo "$RESP" | tail -1)
+  [ "$CODE" = "404" ] || [ "$CODE" = "400" ] && pass "TC-S8-10b: 不正 UUID → 404 or 400" || \
+    fail "TC-S8-10b" "code=$CODE (expected 404 or 400)"
+fi
+
+# --- TC-S8-11: set-timeframe validation ---
+if is_headless; then
+  pend "TC-S8-11" "headless は pane/set-timeframe API 非対応（501）"
+else
+  PANE_LIST_11=$(curl -s "$API/pane/list")
+  PANE_ID_11=$(node -e "
+    const d = JSON.parse(process.argv[1]);
+    const panes = d.panes || d;
+    const arr = Array.isArray(panes) ? panes : Object.values(panes);
+    console.log((arr[0]||{}).id || (arr[0]||{}).pane_id || '');
+  " "$PANE_LIST_11" 2>/dev/null || echo "")
+  if [ -n "$PANE_ID_11" ]; then
+    for bad_tf in "M999" ""; do
+      RESP=$(curl -s -w "\n%{http_code}" -X POST "$API/pane/set-timeframe" \
+        -H "Content-Type: application/json" \
+        -d "{\"pane_id\":\"$PANE_ID_11\",\"timeframe\":\"$bad_tf\"}")
+      CODE=$(echo "$RESP" | tail -1)
+      BODY=$(echo "$RESP" | head -1)
+      HAS_ERR=$(node -e "try{const d=JSON.parse(process.argv[1]);console.log(d.error?'true':'false');}catch(e){console.log('false');}" "$BODY")
+      # set-timeframe の不正値は parse_timeframe() で検証されて HTTP 400 + error フィールドが返る
+      [ "$CODE" = "400" ] && [ "$HAS_ERR" = "true" ] \
+        && pass "TC-S8-11a: timeframe='$bad_tf' → HTTP 400 + error フィールド" \
+        || fail "TC-S8-11a" "timeframe='$bad_tf' code=$CODE has_err=$HAS_ERR (expected 400+error)"
+      [ "$HAS_ERR" = "true" ] && pass "TC-S8-11b: timeframe='$bad_tf' → error フィールドあり" || \
+        fail "TC-S8-11b" "timeframe='$bad_tf' body=$BODY"
+    done
+  fi
 fi
 
 restore_state
