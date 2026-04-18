@@ -23,8 +23,14 @@ trap 'stop_app; restore_state' EXIT ERR
 # ── フィクスチャ: 単一ペイン BinanceLinear:BTCUSDT M1 ────────────────────────
 START=$(utc_offset -3)
 END=$(utc_offset -1)
-setup_single_pane "BinanceLinear:BTCUSDT" "M1" "$START" "$END"
-echo "  fixture: BTCUSDT M1, replay $START → $END"
+PRIMARY=$(primary_ticker)
+SECONDARY=$(secondary_ticker)
+TERTIARY=$(tertiary_ticker)
+SEC_SYMBOL="${SECONDARY##*:}"
+TER_SYMBOL="${TERTIARY##*:}"
+PRI_SYMBOL="${PRIMARY##*:}"
+setup_single_pane "$PRIMARY" "M1" "$START" "$END"
+echo "  fixture: $PRIMARY M1, replay $START → $END"
 
 # ── アプリ起動 ────────────────────────────────────────────────────────────────
 start_app
@@ -46,11 +52,11 @@ if [ -z "$PANE0" ]; then
 fi
 echo "  PANE0=$PANE0"
 
-# ── TC-A: kind=KlineChart で ETHUSDT を選択 → ペイン数 2 ─────────────────────
+# ── TC-A: kind=KlineChart で secondary を選択 → ペイン数 2 ─────────────────────
 echo ""
-echo "── TC-A: kind=KlineChart で ETHUSDT を選択 → ペイン数 2"
+echo "── TC-A: kind=KlineChart で $SECONDARY を選択 → ペイン数 2"
 api_post /api/sidebar/select-ticker \
-  "{\"pane_id\":\"$PANE0\",\"ticker\":\"BinanceLinear:ETHUSDT\",\"kind\":\"KlineChart\"}" \
+  "{\"pane_id\":\"$PANE0\",\"ticker\":\"$SECONDARY\",\"kind\":\"KlineChart\"}" \
   > /dev/null
 
 if wait_for_pane_count 2 15; then
@@ -88,10 +94,10 @@ NEW_TICKER=$(node -e "
   console.log(p ? (p.ticker || 'null') : 'not_found');
 " "$PANES_AFTER")
 echo "  new pane ticker=$NEW_TICKER"
-if echo "$NEW_TICKER" | grep -qi "ETHUSDT"; then
-  pass "TC-B: 新ペインの ticker に ETHUSDT が含まれる (=$NEW_TICKER)"
+if echo "$NEW_TICKER" | grep -qi "$SEC_SYMBOL"; then
+  pass "TC-B: 新ペインの ticker に $SEC_SYMBOL が含まれる (=$NEW_TICKER)"
 else
-  fail "TC-B" "新ペイン ticker=$NEW_TICKER (expected to contain ETHUSDT)"
+  fail "TC-B" "新ペイン ticker=$NEW_TICKER (expected to contain $SEC_SYMBOL)"
 fi
 
 # TC-C: 元ペインの ticker が BTCUSDT のまま
@@ -101,10 +107,10 @@ ORIG_TICKER=$(node -e "
   console.log(p ? (p.ticker || 'null') : 'not_found');
 " "$PANES_AFTER")
 echo "  orig pane ticker=$ORIG_TICKER"
-if echo "$ORIG_TICKER" | grep -qi "BTCUSDT"; then
-  pass "TC-C: 元ペインの ticker は BTCUSDT のまま (=$ORIG_TICKER)"
+if echo "$ORIG_TICKER" | grep -qi "$PRI_SYMBOL"; then
+  pass "TC-C: 元ペインの ticker は $PRI_SYMBOL のまま (=$ORIG_TICKER)"
 else
-  fail "TC-C" "元ペイン ticker=$ORIG_TICKER (expected to contain BTCUSDT — 上書きされている)"
+  fail "TC-C" "元ペイン ticker=$ORIG_TICKER (expected to contain $PRI_SYMBOL — 上書きされている)"
 fi
 
 # ── TC-D: エラー通知が出ていない ─────────────────────────────────────────────
@@ -120,15 +126,15 @@ echo "  error notification count=$ERROR_COUNT"
   && pass "TC-D: エラー通知 0 件" \
   || fail "TC-D" "エラー通知が $ERROR_COUNT 件発生"
 
-# ── TC-E: 2 回目の split（SOLUSDT, kind=KlineChart）→ ペイン数 3 ─────────────
+# ── TC-E: 2 回目の split（tertiary, kind=KlineChart）→ ペイン数 3 ─────────────
 echo ""
-echo "── TC-E: 2 回目 split SOLUSDT → ペイン数 3"
+echo "── TC-E: 2 回目 split $TERTIARY → ペイン数 3"
 api_post /api/sidebar/select-ticker \
-  "{\"pane_id\":\"$PANE0\",\"ticker\":\"BinanceLinear:SOLUSDT\",\"kind\":\"KlineChart\"}" \
+  "{\"pane_id\":\"$PANE0\",\"ticker\":\"$TERTIARY\",\"kind\":\"KlineChart\"}" \
   > /dev/null
 
 if wait_for_pane_count 3 15; then
-  pass "TC-E: 2 回目 kind=KlineChart → ペイン数 3"
+  pass "TC-E: 2 回目 kind=KlineChart ($TERTIARY) → ペイン数 3"
 else
   ACTUAL_COUNT=$(node -e "console.log((JSON.parse(process.argv[1]).panes||[]).length);" \
     "$(curl -s "$API/pane/list")")

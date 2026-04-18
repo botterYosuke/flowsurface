@@ -28,12 +28,16 @@ START_MS=$(node -e "console.log(new Date('${START}:00Z').getTime())")
 
 echo "  range: $START → $END (start_ms=$START_MS)"
 
+PRIMARY=$(primary_ticker)
+SECONDARY=$(secondary_ticker)
+TERTIARY=$(tertiary_ticker)
+
 cat > "$DATA_DIR/saved-state.json" <<EOF
 {
   "layout_manager":{"layouts":[{"name":"S28","dashboard":{"pane":{
     "KlineChart":{
       "layout":{"splits":[0.78],"autoscale":"FitToVisible"},"kind":"Candles",
-      "stream_type":[{"Kline":{"ticker":"BinanceLinear:BTCUSDT","timeframe":"M1"}}],
+      "stream_type":[{"Kline":{"ticker":"$PRIMARY","timeframe":"M1"}}],
       "settings":{"tick_multiply":null,"visual_config":null,"selected_basis":{"Time":"M1"}},
       "indicators":["Volume"],"link_group":"A"
     }
@@ -43,7 +47,11 @@ cat > "$DATA_DIR/saved-state.json" <<EOF
 }
 EOF
 
+_HEADLESS_START="$START"
+_HEADLESS_END="$END"
+_HEADLESS_TIMEFRAME="M1"
 start_app
+headless_play
 
 # Playing に到達するまで待機（最大 90 秒: 5h レンジのフェッチ時間を考慮）
 if ! wait_status "Playing" 90; then
@@ -87,8 +95,8 @@ if [ -z "$NEW_PANE" ]; then
 fi
 echo "  NEW_PANE=$NEW_PANE"
 
-# 新ペインに ETHUSDT を設定 → 新ストリームのロードが始まる → Loading 遷移
-api_post /api/pane/set-ticker "{\"pane_id\":\"$NEW_PANE\",\"ticker\":\"BinanceLinear:ETHUSDT\"}" > /dev/null
+# 新ペインに secondary ticker を設定 → 新ストリームのロードが始まる → Loading 遷移
+api_post /api/pane/set-ticker "{\"pane_id\":\"$NEW_PANE\",\"ticker\":\"$SECONDARY\"}" > /dev/null
 
 # Loading 状態を 100ms ポーリングで最大 5 秒間確認
 LOADING_CAUGHT="false"
@@ -117,8 +125,8 @@ echo ""
 echo "── TC-A: 元ペイン ticker を SOLUSDT に変更 → クラッシュなし"
 
 # ticker 変更を実行（Loading / Playing / Paused のいずれの状態でも §6.6 リセットが適用される）
-api_post /api/pane/set-ticker "{\"pane_id\":\"$PANE0\",\"ticker\":\"BinanceLinear:SOLUSDT\"}" > /dev/null
-echo "  ticker 変更送信完了"
+api_post /api/pane/set-ticker "{\"pane_id\":\"$PANE0\",\"ticker\":\"$TERTIARY\"}" > /dev/null
+echo "  ticker 変更送信完了 (PANE0 → $TERTIARY)"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TC-B: 変更後 最大 30s 待機 → status=Paused（自動再生されない）
@@ -161,11 +169,11 @@ fi
 # TC-D: SOLUSDT のデータロード待機 → Resume → Playing 到達
 # ─────────────────────────────────────────────────────────────────────────────
 echo ""
-echo "── TC-D: SOLUSDT streams_ready 待機 → Resume → Playing 到達"
+echo "── TC-D: $TERTIARY streams_ready 待機 → Resume → Playing 到達"
 
-# SOLUSDT のロードが完了するまで待機
+# tertiary ticker のロードが完了するまで待機
 if wait_for_streams_ready "$PANE0" 30; then
-  echo "  PANE0 (SOLUSDT) streams_ready=true"
+  echo "  PANE0 ($TERTIARY) streams_ready=true"
 else
   echo "  WARN: PANE0 streams_ready timeout (continuing)"
 fi

@@ -379,6 +379,38 @@ pend_if_headless() {
 # E2E_TICKER のシンボル部分（例: "HyperliquidLinear:BTC" → "BTC"）
 order_symbol() { echo "${E2E_TICKER:-BinanceLinear:BTCUSDT}" | cut -d: -f2; }
 
+# E2E_TICKER の取引所部分（例: "HyperliquidLinear:BTC" → "HyperliquidLinear"）
+ticker_exchange() { echo "${E2E_TICKER:-BinanceLinear:BTCUSDT}" | cut -d: -f1; }
+
+# プライマリティッカー（E2E_TICKER そのもの）
+primary_ticker() { echo "${E2E_TICKER:-BinanceLinear:BTCUSDT}"; }
+
+# セカンダリティッカー（別銘柄・同取引所）
+# テストで「別ティッカーに切り替える」必要がある場面で使う。
+# BinanceLinear → ETHUSDT, HyperliquidLinear → ETH。
+secondary_ticker() {
+  local ex
+  ex=$(ticker_exchange)
+  case "$ex" in
+    HyperliquidLinear|HyperliquidSpot) echo "$ex:ETH" ;;
+    BinanceLinear|BinanceSpot) echo "$ex:ETHUSDT" ;;
+    BybitLinear|BybitSpot) echo "$ex:ETHUSDT" ;;
+    *) echo "$ex:ETH" ;;
+  esac
+}
+
+# ターシャリティッカー（3 銘柄目・同取引所）
+tertiary_ticker() {
+  local ex
+  ex=$(ticker_exchange)
+  case "$ex" in
+    HyperliquidLinear|HyperliquidSpot) echo "$ex:HYPE" ;;
+    BinanceLinear|BinanceSpot) echo "$ex:SOLUSDT" ;;
+    BybitLinear|BybitSpot) echo "$ex:SOLUSDT" ;;
+    *) echo "$ex:SOL" ;;
+  esac
+}
+
 # ステップサイズ定数
 STEP_M1=60000
 STEP_M5=300000
