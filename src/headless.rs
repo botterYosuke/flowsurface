@@ -296,7 +296,7 @@ impl HeadlessEngine {
         let ticker_str = &self.ticker_str;
         for (_, trades) in &dispatch.trade_events {
             self.virtual_engine
-                .on_tick(&ticker_str, trades, dispatch.current_time);
+                .on_tick(ticker_str, trades, dispatch.current_time);
         }
 
         if dispatch.reached_end {
@@ -304,8 +304,12 @@ impl HeadlessEngine {
         }
     }
 
-    /// `POST /api/replay/step-forward` を処理する（Paused 時のみ）。
+    /// `POST /api/replay/step-forward` を処理する。Playing 中は先に自動 pause する。
     fn step_forward(&mut self) -> String {
+        // Playing 中は GUI と同様に自動 pause してからステップする
+        if self.state.is_playing() {
+            let _ = self.pause();
+        }
         if !self.state.is_paused() {
             return serde_json::json!({"ok": false, "error": "not paused"}).to_string();
         }
@@ -340,15 +344,29 @@ impl HeadlessEngine {
         {
             clock.seek(new_time);
 
-            // 仮想約定エンジンにトレードを通知する
-            let ticker_str = &self.ticker_str;
-            for stream in active_streams.iter() {
-                let end = new_time.saturating_add(1);
-                let start = new_time.saturating_sub(step_ms);
-                let trades = store.trades_in(stream, start..end);
-                if !trades.is_empty() {
-                    self.virtual_engine.on_tick(&ticker_str, trades, new_time);
-                }
+            // kline の close 価格から合成 Trade を生成して仮想約定エンジンに通知する。
+            // active_streams は Kline バリアントのみを持ち、Trades バリアントはストアに
+            // 保存されていないため store.trades_in() は常に空を返す。
+            let ticker_str = self.ticker_str.clone();
+            let synthetic: Vec<exchange::Trade> = active_streams
+                .iter()
+                .filter(|s| matches!(s, StreamKind::Kline { .. }))
+                .filter_map(|stream| {
+                    let klines = store.klines_in(stream, 0..new_time.saturating_add(1));
+                    klines
+                        .iter()
+                        .rev()
+                        .find(|k| k.time <= new_time)
+                        .map(|k| exchange::Trade {
+                            time: new_time,
+                            is_sell: false,
+                            price: k.close,
+                            qty: exchange::unit::qty::Qty::from_f32(1.0),
+                        })
+                })
+                .collect();
+            if !synthetic.is_empty() {
+                self.virtual_engine.on_tick(&ticker_str, &synthetic, new_time);
             }
         }
 
@@ -477,8 +495,7 @@ impl HeadlessEngine {
 
     fn get_orders_json(&self) -> String {
         let orders = self.virtual_engine.get_orders();
-        serde_json::to_string(orders)
-            .unwrap_or_else(|e| format!(r#"{{"error":"serialize failed: {e}"}}"#))
+        serde_json::json!({"orders": orders}).to_string()
     }
 
     fn place_order_json(
@@ -590,7 +607,13 @@ impl HeadlessEngine {
                 reply.send(r#"{"ok":true}"#.to_string());
             }
             ApiCommand::VirtualExchange(VirtualExchangeCommand::GetState) => {
-                reply.send(self.get_state_json(200));
+                match &self.state.session {
+                    ReplaySession::Active { .. } => reply.send(self.get_state_json(200)),
+                    _ => reply.send_status(
+                        400,
+                        r#"{"error":"replay not active"}"#.to_string(),
+                    ),
+                }
             }
             ApiCommand::VirtualExchange(VirtualExchangeCommand::GetPortfolio) => {
                 reply.send(self.get_portfolio_json());

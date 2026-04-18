@@ -121,8 +121,10 @@ impl LoginRequest {
 }
 
 /// 現在時刻を p_sd_date 形式 (YYYY.MM.DD-hh:mm:ss.sss) で返す。
+/// CI runner が UTC タイムゾーンであっても JST (UTC+9) の時刻を返す。
 fn current_p_sd_date() -> String {
-    let now = chrono::Local::now();
+    let jst = chrono::FixedOffset::east_opt(9 * 3600).expect("valid offset");
+    let now = chrono::Utc::now().with_timezone(&jst);
     now.format("%Y.%m.%d-%H:%M:%S%.3f").to_string()
 }
 
