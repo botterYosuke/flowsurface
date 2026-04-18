@@ -129,13 +129,16 @@ IN=$(ct_in_range "$CT2" "$START_T" "$END_T")
 
 # --- TC-S1-06: Pause で固定 ---
 curl -s -X POST "$API/replay/pause" > /dev/null
-sleep 1
-P1=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
-sleep 3
-P2=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
-EQ=$(bigt_eq "$P1" "$P2")
-[ "$EQ" = "true" ] && pass "TC-S1-06: Pause 中は current_time 固定" || \
-  fail "TC-S1-06" "Pause 中に時刻が変化 ($P1 → $P2)"
+if wait_status Paused 10; then
+  P1=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
+  sleep 1
+  P2=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
+  EQ=$(bigt_eq "$P1" "$P2")
+  [ "$EQ" = "true" ] && pass "TC-S1-06: Pause 中は current_time 固定" || \
+    fail "TC-S1-06" "Pause 中に時刻が変化 ($P1 → $P2)"
+else
+  fail "TC-S1-06" "Pause に遷移しなかった"
+fi
 
 # --- TC-S1-07: status=Paused ---
 ST_PAUSED=$(jqn "$(curl -s "$API/replay/status")" "d.status")
