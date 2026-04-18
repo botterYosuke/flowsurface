@@ -20,16 +20,17 @@ backup_state
 trap 'stop_app; restore_state' EXIT ERR
 
 # ── フィクスチャ: saved-state.json サンプルと同等の構成 ─────────────────────
-# 動的日付（UTC -5h 〜 -1h）: Binance REST API から取得可能な最近データを使用
+# 動的日付（UTC -5h 〜 -1h）: E2E_TICKER の REST API から取得可能な最近データを使用
 RANGE_START=$(utc_offset -5)
 RANGE_END=$(utc_offset -1)
+PRIMARY=$(primary_ticker)
 
 cat > "$DATA_DIR/saved-state.json" <<EOF
 {
   "layout_manager":{"layouts":[{"name":"Test-M1","dashboard":{"pane":{
     "KlineChart":{
       "layout":{"splits":[0.78],"autoscale":"FitToVisible"},"kind":"Candles",
-      "stream_type":[{"Kline":{"ticker":"BinanceLinear:BTCUSDT","timeframe":"M1"}}],
+      "stream_type":[{"Kline":{"ticker":"$PRIMARY","timeframe":"M1"}}],
       "settings":{"tick_multiply":null,"visual_config":null,"selected_basis":{"Time":"M1"}},
       "indicators":["Volume"],"link_group":"A"
     }
@@ -39,7 +40,7 @@ cat > "$DATA_DIR/saved-state.json" <<EOF
 }
 EOF
 
-echo "  fixture: BTCUSDT M1, replay $RANGE_START → $RANGE_END"
+echo "  fixture: $PRIMARY M1, replay $RANGE_START → $RANGE_END"
 
 # ── アプリ起動（auto-play 付き）───────────────────────────────────────────────
 start_app

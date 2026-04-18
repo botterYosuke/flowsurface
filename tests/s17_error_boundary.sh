@@ -27,8 +27,9 @@ echo "  [TC-S17-01/03] 不正 pane_id テスト..."
 
 START=$(utc_offset -3)
 END=$(utc_offset -1)
-setup_single_pane "BinanceLinear:BTCUSDT" "M1" "$START" "$END"
+setup_single_pane "$(primary_ticker)" "M1" "$START" "$END"
 start_app
+headless_play
 
 if ! wait_playing 30; then
   diagnose_playing_failure
@@ -70,7 +71,7 @@ ALIVE=$(curl -s "$API/replay/status" > /dev/null 2>&1 && echo "true" || echo "fa
 # TC-S17-03: pane/set-ticker に存在しない UUID → HTTP 404 + error フィールド & アプリ生存
 RESP_TICKER=$(curl -s -w "\n%{http_code}" -X POST "$API/pane/set-ticker" \
   -H "Content-Type: application/json" \
-  -d "{\"pane_id\":\"$FAKE_UUID\",\"ticker\":\"BinanceLinear:ETHUSDT\"}")
+  -d "{\"pane_id\":\"$FAKE_UUID\",\"ticker\":\"$(secondary_ticker)\"}")
 HTTP_TICKER=$(echo "$RESP_TICKER" | tail -1)
 BODY_TICKER=$(echo "$RESP_TICKER" | head -1)
 HAS_ERR_TICKER=$(node -e "try{const d=JSON.parse(process.argv[1]);console.log(d.error?'true':'false');}catch(e){console.log('false');}" "$BODY_TICKER")
@@ -113,8 +114,9 @@ stop_app
 # ── TC-S17-04: 空 range (start == end) ─────────────────────────────────
 echo "  [TC-S17-04] 空 range (start == end)..."
 SAME_TIME=$(utc_offset -1)
-setup_single_pane "BinanceLinear:BTCUSDT" "M1" "$SAME_TIME" "$SAME_TIME"
+setup_single_pane "$(primary_ticker)" "M1" "$SAME_TIME" "$SAME_TIME"
 start_app
+headless_play
 
 # アプリが起動して API が応答すれば OK（crash なし）
 sleep 5
@@ -133,8 +135,9 @@ stop_app
 echo "  [TC-S17-05] 未来 range テスト..."
 FUTURE_START=$(utc_offset 24)
 FUTURE_END=$(utc_offset 26)
-setup_single_pane "BinanceLinear:BTCUSDT" "M1" "$FUTURE_START" "$FUTURE_END"
+setup_single_pane "$(primary_ticker)" "M1" "$FUTURE_START" "$FUTURE_END"
 start_app
+headless_play
 
 # EventStore が空でも Playing/Paused で停止するだけ（クラッシュしない）
 sleep 10
@@ -150,8 +153,9 @@ stop_app
 
 # ── TC-S17-06: StepForward 連打 50 回 (Paused 状態) ─────────────────────
 echo "  [TC-S17-06] StepForward 連打 50 回..."
-setup_single_pane "BinanceLinear:BTCUSDT" "M1" "$(utc_offset -3)" "$(utc_offset -1)"
+setup_single_pane "$(primary_ticker)" "M1" "$(utc_offset -3)" "$(utc_offset -1)"
 start_app
+headless_play
 
 if ! wait_playing 30; then
   fail "TC-S17-06-pre" "Playing 到達せず"
@@ -190,8 +194,9 @@ stop_app
 # ── TC-S17-07: split 上限テスト ──────────────────────────────────────────
 # ペインを分割し続けて最大ペイン数を超えた後 split → HTTP 200 or エラー応答、クラッシュなし
 echo "  [TC-S17-07] split 上限テスト..."
-setup_single_pane "BinanceLinear:BTCUSDT" "M1" "$(utc_offset -3)" "$(utc_offset -1)"
+setup_single_pane "$(primary_ticker)" "M1" "$(utc_offset -3)" "$(utc_offset -1)"
 start_app
+headless_play
 
 if ! wait_playing 30; then
   fail "TC-S17-07-pre" "Playing 到達せず"

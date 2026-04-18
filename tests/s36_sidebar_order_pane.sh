@@ -22,8 +22,8 @@ trap 'stop_app; restore_state' EXIT ERR
 # ── フィクスチャ: 単一ペイン BinanceLinear:BTCUSDT M1 ────────────────────────
 START=$(utc_offset -3)
 END=$(utc_offset -1)
-setup_single_pane "BinanceLinear:BTCUSDT" "M1" "$START" "$END"
-echo "  fixture: BTCUSDT M1, replay $START → $END"
+setup_single_pane "$(primary_ticker)" "M1" "$START" "$END"
+echo "  fixture: $(primary_ticker) M1, replay $START → $END"
 
 # ── アプリ起動 ────────────────────────────────────────────────────────────────
 start_app

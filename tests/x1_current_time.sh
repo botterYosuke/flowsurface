@@ -8,22 +8,11 @@ backup_state
 START=$(utc_offset -3)
 END=$(utc_offset -1)
 
-cat > "$DATA_DIR/saved-state.json" <<EOF
-{
-  "layout_manager":{"layouts":[{"name":"X1","dashboard":{"pane":{
-    "KlineChart":{
-      "layout":{"splits":[0.78],"autoscale":"FitToVisible"},"kind":"Candles",
-      "stream_type":[{"Kline":{"ticker":"BinanceLinear:BTCUSDT","timeframe":"M1"}}],
-      "settings":{"tick_multiply":null,"visual_config":null,"selected_basis":{"Time":"M1"}},
-      "indicators":["Volume"],"link_group":"A"
-    }
-  },"popout":[]}}],"active_layout":"X1"},
-  "timezone":"UTC","trade_fetch_enabled":false,"size_in_quote_ccy":"Base",
-  "replay":{"mode":"replay","range_start":"$START","range_end":"$END"}
-}
-EOF
+# GUI / headless の差分は setup_single_pane + headless_play に委譲する。
+setup_single_pane "$(primary_ticker)" "M1" "$START" "$END"
 
 start_app
+headless_play
 if ! wait_playing 60; then
   fail "X1-precond" "Playing 到達せず"
   restore_state
@@ -94,14 +83,20 @@ else
     fail "TC-X1-05" "display 固定 ($D1)"
 fi
 
-# --- TC-X1-06: Live モードで current_time / display が null ---
-curl -s -X POST "$API/replay/toggle" > /dev/null  # → Live
-sleep 1
-ST=$(curl -s "$API/replay/status")
-CT=$(jqn "$ST" "d.current_time")
-SP=$(jqn "$ST" "d.speed")
-[ "$CT" = "null" ] && pass "TC-X1-06a: Live current_time=null" || fail "TC-X1-06a" "ct=$CT"
-[ "$SP" = "null" ] && pass "TC-X1-06b: Live speed=null" || fail "TC-X1-06b" "speed=$SP"
+# --- TC-X1-06: Live モードで current_time / display が null（GUI のみ）---
+# headless は常に Replay モード（toggle は no-op）のため PEND。
+if is_headless; then
+  pend "TC-X1-06a" "headless は Live モードなし"
+  pend "TC-X1-06b" "headless は Live モードなし"
+else
+  curl -s -X POST "$API/replay/toggle" > /dev/null  # → Live
+  sleep 1
+  ST=$(curl -s "$API/replay/status")
+  CT=$(jqn "$ST" "d.current_time")
+  SP=$(jqn "$ST" "d.speed")
+  [ "$CT" = "null" ] && pass "TC-X1-06a: Live current_time=null" || fail "TC-X1-06a" "ct=$CT"
+  [ "$SP" = "null" ] && pass "TC-X1-06b: Live speed=null" || fail "TC-X1-06b" "speed=$SP"
+fi
 
 restore_state
 print_summary

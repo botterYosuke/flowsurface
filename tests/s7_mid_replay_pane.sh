@@ -25,12 +25,15 @@ trap 'stop_app; restore_state' EXIT ERR
 START=$(utc_offset -3)
 END=$(utc_offset -1)
 
+PRIMARY=$(primary_ticker)
+SECONDARY=$(secondary_ticker)
+
 cat > "$DATA_DIR/saved-state.json" <<EOF
 {
   "layout_manager":{"layouts":[{"name":"S7","dashboard":{"pane":{
     "KlineChart":{
       "layout":{"splits":[0.78],"autoscale":"FitToVisible"},"kind":"Candles",
-      "stream_type":[{"Kline":{"ticker":"BinanceLinear:BTCUSDT","timeframe":"M1"}}],
+      "stream_type":[{"Kline":{"ticker":"$PRIMARY","timeframe":"M1"}}],
       "settings":{"tick_multiply":null,"visual_config":null,"selected_basis":{"Time":"M1"}},
       "indicators":["Volume"],"link_group":"A"
     }
@@ -40,7 +43,11 @@ cat > "$DATA_DIR/saved-state.json" <<EOF
 }
 EOF
 
+_HEADLESS_START="$START"
+_HEADLESS_END="$END"
+_HEADLESS_TIMEFRAME="M1"
 start_app
+headless_play
 if ! wait_playing 30; then
   fail "TC-S7-precond" "Playing 到達せず"
   exit 1
@@ -78,9 +85,9 @@ if [ -z "$NEW_PANE" ]; then
 else
   curl -s -X POST "$API/pane/set-ticker" \
     -H "Content-Type: application/json" \
-    -d "{\"pane_id\":\"$NEW_PANE\",\"ticker\":\"BinanceLinear:ETHUSDT\"}" > /dev/null
+    -d "{\"pane_id\":\"$NEW_PANE\",\"ticker\":\"$SECONDARY\"}" > /dev/null
   if wait_for_streams_ready "$NEW_PANE" 30; then
-    pass "TC-S7-02: 新ペイン ETHUSDT streams_ready=true"
+    pass "TC-S7-02: 新ペイン $SECONDARY streams_ready=true"
   else
     fail "TC-S7-02" "streams_ready タイムアウト（30s）"
   fi
@@ -148,7 +155,7 @@ cat > "$DATA_DIR/saved-state.json" <<EOF
   "layout_manager":{"layouts":[{"name":"S7b","dashboard":{"pane":{
     "KlineChart":{
       "layout":{"splits":[0.78],"autoscale":"FitToVisible"},"kind":"Candles",
-      "stream_type":[{"Kline":{"ticker":"BinanceLinear:BTCUSDT","timeframe":"M1"}}],
+      "stream_type":[{"Kline":{"ticker":"$PRIMARY","timeframe":"M1"}}],
       "settings":{"tick_multiply":null,"visual_config":null,"selected_basis":{"Time":"M1"}},
       "indicators":["Volume"],"link_group":"A"
     }
@@ -157,7 +164,11 @@ cat > "$DATA_DIR/saved-state.json" <<EOF
   "replay":{"mode":"replay","range_start":"$START_SHORT","range_end":"$END_SHORT"}
 }
 EOF
+_HEADLESS_START="$START_SHORT"
+_HEADLESS_END="$END_SHORT"
+_HEADLESS_TIMEFRAME="M1"
 start_app
+headless_play
 if ! wait_playing 30; then
   fail "TC-S7-07-pre" "Playing 到達せず（S7b）"
   exit 1
