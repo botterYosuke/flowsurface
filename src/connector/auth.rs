@@ -94,11 +94,10 @@ pub async fn try_restore_session() -> Option<TachibanaSession> {
             // 本番環境では env vars が未設定のため None を返してフォールスルーする。
             let user_id = std::env::var("DEV_USER_ID").ok()?;
             let password = std::env::var("DEV_PASSWORD").ok()?;
-            let is_demo =
-                std::env::var("DEV_IS_DEMO").map(|v| !v.is_empty()).unwrap_or(false);
-            log::info!(
-                "Falling back to DEV_USER_ID/DEV_PASSWORD re-login (is_demo={is_demo})"
-            );
+            let is_demo = std::env::var("DEV_IS_DEMO")
+                .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+                .unwrap_or(false);
+            log::info!("Falling back to DEV_USER_ID/DEV_PASSWORD re-login (is_demo={is_demo})");
             match perform_login(user_id, password, is_demo).await {
                 Ok(session) => {
                     persist_session(&session);

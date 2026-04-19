@@ -131,7 +131,8 @@ RANGE_START_MS=$(node -e "
   console.log(new Date(s).getTime());
 ")
 CT_PAST_START=$(node -e "
-  const ct = BigInt('${CT_AFTER_LOOP:-0}');
+  const raw = '${CT_AFTER_LOOP:-0}';
+  const ct = BigInt(/^\d+\$/.test(raw) ? raw : '0');
   const rs = BigInt('$RANGE_START_MS');
   console.log(ct > rs ? 'true' : 'false');
 ")

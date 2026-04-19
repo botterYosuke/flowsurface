@@ -59,7 +59,7 @@ CT_ADVANCED=$(node -e "
   const post = Number('${CT_POST_RESUME}') || 0;
   const rend = Number('${RANGE_END_MS}') || 0;
   // 通常の進行 OR SPEED_INSTANT により range_end まで到達（range 消化完了 = crash なし）
-  const at_end = rend > 0 && Math.abs(post - rend) < 300000;
+  const at_end = rend > 0 && post >= rend;
   console.log(post > pre || at_end ? 'true' : 'false');
 ")
 { [ "$FINAL_STATUS" = "Playing" ] || [ "$CT_ADVANCED" = "true" ]; } \
