@@ -113,6 +113,10 @@ if [ -z "$PANE_ID" ]; then
 fi
 echo "  PANE_ID=$PANE_ID"
 
+# D1 klines が Ready になるまで待機（prepare_replay は Ready ペインからのみ stream を収集する）
+echo "  D1 klines 待機 (streams_ready)..."
+wait_for_streams_ready "$PANE_ID" 120 || echo "  WARN: streams_ready timeout (continuing)"
+
 # Replay モードへ toggle
 curl -s -X POST "$API/replay/toggle" > /dev/null
 echo "  Replay モードに切替"

@@ -917,7 +917,6 @@ pub fn load_master_from_disk(
     Some(out)
 }
 
-
 /// 特定の Ticker に対応する TickerInfo をキャッシュから同期的に取得する。
 /// サイドバーのメタデータ更新が完了する前に set-ticker が呼ばれた場合のフォールバック用。
 /// キャッシュ未初期化の場合は None を返す。

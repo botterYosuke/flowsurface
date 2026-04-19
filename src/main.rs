@@ -808,16 +808,17 @@ impl Flowsurface {
                             },
                         ))),
                         Some(dashboard::Event::SwitchTickersInGroup { ticker_info }) => {
-                            let old_kline_streams: Vec<exchange::adapter::StreamKind> =
-                                if self.replay.is_replay() {
-                                    self.replay.active_kline_streams()
-                                } else {
-                                    vec![]
-                                };
+                            let is_replay = self.replay.is_replay();
+                            let old_kline_streams: Vec<exchange::adapter::StreamKind> = if is_replay
+                            {
+                                self.replay.active_kline_streams()
+                            } else {
+                                vec![]
+                            };
 
                             let switch_task = self
                                 .active_dashboard_mut()
-                                .switch_tickers_in_group(main_window.id, ticker_info)
+                                .switch_tickers_in_group(main_window.id, ticker_info, is_replay)
                                 .map(move |msg| Message::Dashboard {
                                     layout_id: Some(layout_id),
                                     event: msg,
@@ -1101,16 +1102,18 @@ impl Flowsurface {
                         // mid-replay での銘柄変更: active_streams にある旧 kline stream を取得してから
                         // switch を実行し、ReloadKlineStream で pause + active_streams 更新 + 再ロードする。
                         // Live モードでは空 Vec になり、末尾で SyncReplayBuffers にフォールバックする。
-                        let old_kline_streams: Vec<exchange::adapter::StreamKind> =
-                            if self.replay.is_replay() {
-                                self.replay.active_kline_streams()
-                            } else {
-                                vec![]
-                            };
+                        let is_replay = self.replay.is_replay();
+                        let old_kline_streams: Vec<exchange::adapter::StreamKind> = if is_replay {
+                            self.replay.active_kline_streams()
+                        } else {
+                            vec![]
+                        };
 
-                        let task = self
-                            .active_dashboard_mut()
-                            .switch_tickers_in_group(main_window_id, ticker_info);
+                        let task = self.active_dashboard_mut().switch_tickers_in_group(
+                            main_window_id,
+                            ticker_info,
+                            is_replay,
+                        );
 
                         // mid-replay で kline stream がある場合は ReloadKlineStream を即時発火する。
                         // これにより: clock.pause() → active_streams 更新 → clock.seek(start) →
@@ -1165,7 +1168,9 @@ impl Flowsurface {
                             });
                     }
                     Some(dashboard::sidebar::Action::ErrorOccurred(err)) => {
-                        self.notifications.push(Toast::error(err.to_string()));
+                        if !self.is_headless {
+                            self.notifications.push(Toast::error(err.to_string()));
+                        }
                     }
                     None => {}
                 }
@@ -2274,7 +2279,8 @@ impl Flowsurface {
 
         // リプレイ中は mutable borrow の前に旧 kline stream を確保する。
         // init_focused_pane は pane の streams を書き換えるため、先に取得しておく必要がある。
-        let old_kline_stream_for_replay = if self.replay.is_replay() {
+        let is_replay = self.replay.is_replay();
+        let old_kline_stream_for_replay = if is_replay {
             self.active_dashboard()
                 .iter_all_panes(main_window_id)
                 .find(|(_, p, _)| *p == pg_pane)
@@ -2336,8 +2342,10 @@ impl Flowsurface {
 
         // .chain() だと Tachibana 認証待ちタスクが clock.seek をブロックする（spec §6.6 参照）。
         // ReloadKlineStream を init_focused_pane と並列発火させるため Task::batch を使う。
+        // リプレイ中は ReloadKlineStream が kline fetch を担うため init_focused_pane 側の
+        // kline fetch をスキップし、Tachibana デモ API への並行リクエストを防ぐ。
         let init_task = dashboard
-            .init_focused_pane(main_window_id, ticker_info, kind)
+            .init_focused_pane(main_window_id, ticker_info, kind, is_replay)
             .map(move |msg| Message::Dashboard {
                 layout_id: None,
                 event: msg,
@@ -2477,8 +2485,10 @@ impl Flowsurface {
 
         // .chain() だと Tachibana 認証待ちタスクが clock.seek をブロックする（spec §6.6 参照）。
         // ReloadKlineStream を init_focused_pane と並列発火させるため Task::batch を使う。
+        // リプレイ中は ReloadKlineStream が kline fetch を担うため init_focused_pane 側の
+        // kline fetch をスキップし、Tachibana デモ API への並行リクエストを防ぐ。
         let init_task = dashboard
-            .init_focused_pane(main_window_id, ticker_info, kind)
+            .init_focused_pane(main_window_id, ticker_info, kind, is_replay)
             .map(move |msg| Message::Dashboard {
                 layout_id: None,
                 event: msg,
@@ -2612,7 +2622,8 @@ impl Flowsurface {
 
         // kind == None → switch_tickers_in_group 経路（旧フロー）
         // mid-replay での銘柄変更: active_streams の旧 kline stream を取得して ReloadKlineStream する。
-        let old_kline_streams: Vec<exchange::adapter::StreamKind> = if self.replay.is_replay() {
+        let is_replay = self.replay.is_replay();
+        let old_kline_streams: Vec<exchange::adapter::StreamKind> = if is_replay {
             self.replay.active_kline_streams()
         } else {
             vec![]
@@ -2622,7 +2633,7 @@ impl Flowsurface {
         let prev_focus = dashboard.focus;
         dashboard.focus = Some((window_id, pg_pane));
 
-        let task = dashboard.switch_tickers_in_group(main_window_id, ticker_info);
+        let task = dashboard.switch_tickers_in_group(main_window_id, ticker_info, is_replay);
 
         let reload_tasks: Vec<Task<Message>> = old_kline_streams
             .into_iter()

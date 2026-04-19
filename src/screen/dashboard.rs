@@ -1085,6 +1085,7 @@ impl Dashboard {
         selected_pane: pane_grid::Pane,
         ticker_info: TickerInfo,
         content_kind: ContentKind,
+        skip_kline_fetch: bool,
     ) -> Task<Message> {
         if let Some(state) = self.get_mut_pane(main_window, window, selected_pane) {
             let pane_id = state.unique_id();
@@ -1092,10 +1093,18 @@ impl Dashboard {
             let streams = state.set_content_and_streams(vec![ticker_info], content_kind);
             self.streams.extend(streams.iter());
 
-            for stream in &streams {
-                if let StreamKind::Kline { .. } = stream {
-                    return fetcher::kline_fetch_task(self.layout_id, pane_id, *stream, None, None)
+            if !skip_kline_fetch {
+                for stream in &streams {
+                    if let StreamKind::Kline { .. } = stream {
+                        return fetcher::kline_fetch_task(
+                            self.layout_id,
+                            pane_id,
+                            *stream,
+                            None,
+                            None,
+                        )
                         .map(Message::from);
+                    }
                 }
             }
         }
@@ -1108,6 +1117,7 @@ impl Dashboard {
         main_window: window::Id,
         ticker_info: TickerInfo,
         content_kind: ContentKind,
+        skip_kline_fetch: bool,
     ) -> Task<Message> {
         if self.focus.is_none()
             && self.panes.len() == 1
@@ -1129,10 +1139,18 @@ impl Dashboard {
             let pane_id = state.unique_id();
             self.streams.extend(streams.iter());
 
-            for stream in &streams {
-                if let StreamKind::Kline { .. } = stream {
-                    return fetcher::kline_fetch_task(self.layout_id, pane_id, *stream, None, None)
+            if !skip_kline_fetch {
+                for stream in &streams {
+                    if let StreamKind::Kline { .. } = stream {
+                        return fetcher::kline_fetch_task(
+                            self.layout_id,
+                            pane_id,
+                            *stream,
+                            None,
+                            None,
+                        )
                         .map(Message::from);
+                    }
                 }
             }
             return Task::none();
@@ -1176,7 +1194,14 @@ impl Dashboard {
         self.focus = Some((window, new_pane));
 
         // 新ペインに銘柄とチャート種類を設定
-        let task = self.init_pane(main_window, window, new_pane, ticker_info, content_kind);
+        let task = self.init_pane(
+            main_window,
+            window,
+            new_pane,
+            ticker_info,
+            content_kind,
+            false,
+        );
         Some(task)
     }
 
@@ -1268,6 +1293,7 @@ impl Dashboard {
         &mut self,
         main_window: window::Id,
         ticker_info: TickerInfo,
+        skip_kline_fetch: bool,
     ) -> Task<Message> {
         self.auto_focus_single_pane(main_window);
 
@@ -1291,7 +1317,14 @@ impl Dashboard {
             let tasks: Vec<Task<Message>> = pane_infos
                 .iter()
                 .map(|(window, pane, content_kind)| {
-                    self.init_pane(main_window, *window, *pane, ticker_info, *content_kind)
+                    self.init_pane(
+                        main_window,
+                        *window,
+                        *pane,
+                        ticker_info,
+                        *content_kind,
+                        skip_kline_fetch,
+                    )
                 })
                 .collect();
 
@@ -1299,7 +1332,7 @@ impl Dashboard {
         } else if let Some((window, pane)) = self.focus {
             if let Some(state) = self.get_mut_pane(main_window, window, pane) {
                 let content_kind = state.content.kind();
-                self.init_focused_pane(main_window, ticker_info, content_kind)
+                self.init_focused_pane(main_window, ticker_info, content_kind, skip_kline_fetch)
             } else {
                 Task::done(Message::Notification(Toast::warn(
                     "Couldn't get focused pane's content".to_string(),

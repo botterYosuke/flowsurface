@@ -100,26 +100,14 @@ jobs:
           - name: S42 Naked short cycle
             script: s42_naked_short_cycle.sh
             dev_is_demo: ""
-          - name: S14 Autoplay event driven
-            script: s14_autoplay_event_driven.sh
-            dev_is_demo: ""
-          - name: S20 Tachibana replay resilience
-            script: s20_tachibana_replay_resilience.sh
-            dev_is_demo: ""
           - name: S21 Tachibana error boundary
             script: s21_tachibana_error_boundary.sh
-            dev_is_demo: ""
-          - name: S29 Tachibana holiday skip
-            script: s29_tachibana_holiday_skip.sh
             dev_is_demo: ""
           - name: S30 Mixed sample loading
             script: s30_mixed_sample_loading.sh
             dev_is_demo: ""
           - name: S31 Replay end restart
             script: s31_replay_end_restart.sh
-            dev_is_demo: ""
-          - name: S32 Toyota candlestick add
-            script: s32_toyota_candlestick_add.sh
             dev_is_demo: ""
           - name: S46 Wrong password
             script: s46_wrong_password.sh
@@ -282,10 +270,25 @@ jobs:
         include:
           - name: S44 Order list
             script: s44_order_list.sh
+            dev_is_demo: "true"
           - name: S45 Order correct cancel
             script: s45_order_correct_cancel.sh
+            dev_is_demo: "true"
           - name: S49 Account info
             script: s49_account_info.sh
+            dev_is_demo: "true"
+          - name: S14 Autoplay event driven
+            script: s14_autoplay_event_driven.sh
+            dev_is_demo: ""
+          - name: S20 Tachibana replay resilience
+            script: s20_tachibana_replay_resilience.sh
+            dev_is_demo: ""
+          - name: S29 Tachibana holiday skip
+            script: s29_tachibana_holiday_skip.sh
+            dev_is_demo: ""
+          - name: S32 Toyota candlestick add
+            script: s32_toyota_candlestick_add.sh
+            dev_is_demo: ""
 
     steps:
       - uses: actions/checkout@v4
@@ -309,7 +312,7 @@ jobs:
         env:
           FLOWSURFACE_EXE: ${{ github.workspace }}/target/debug/flowsurface.exe
           E2E_TICKER: HyperliquidLinear:BTC
-          DEV_IS_DEMO: "true"
+          DEV_IS_DEMO: ${{ matrix.dev_is_demo }}
           DEV_USER_ID: ${{ secrets.DEV_USER_ID }}
           DEV_PASSWORD: ${{ secrets.DEV_PASSWORD }}
           DEV_SECOND_PASSWORD: ${{ secrets.DEV_SECOND_PASSWORD }}

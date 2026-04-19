@@ -707,16 +707,14 @@ impl HeadlessEngine {
     }
 
     fn set_pane_ticker(&mut self, pane_id: uuid::Uuid, ticker: String) -> String {
-        let found = self.panes.iter_mut().find(|p| p.id == pane_id);
-        if found.is_none() {
+        let Some(idx) = self.panes.iter().position(|p| p.id == pane_id) else {
             return serde_json::json!({ "ok": false, "error": "pane not found" }).to_string();
-        }
-        found.unwrap().ticker = ticker;
+        };
+        self.panes[idx].ticker = ticker;
 
         // Only reset the clock for the primary (first) pane. Secondary panes added via split
         // are label-only in headless mode; changing their ticker must not interrupt playback.
-        let is_primary = self.panes.first().map(|p| p.id == pane_id).unwrap_or(false);
-        if is_primary {
+        if idx == 0 {
             if let crate::replay::ReplaySession::Active { clock, .. } = &mut self.state.session {
                 let start = clock.full_range().start;
                 clock.pause();
@@ -734,12 +732,14 @@ impl HeadlessEngine {
                 return serde_json::json!({ "ok": false, "error": e }).to_string();
             }
         };
-        let found = self.panes.iter_mut().find(|p| p.id == pane_id);
-        if found.is_none() {
+        let Some(idx) = self.panes.iter().position(|p| p.id == pane_id) else {
             return serde_json::json!({ "ok": false, "error": "pane not found" }).to_string();
-        }
-        found.unwrap().timeframe = tf;
-        if let crate::replay::ReplaySession::Active { clock, .. } = &mut self.state.session {
+        };
+        self.panes[idx].timeframe = tf;
+        // Mirror set_pane_ticker: only reset the clock for the primary pane.
+        if idx == 0
+            && let crate::replay::ReplaySession::Active { clock, .. } = &mut self.state.session
+        {
             let start = clock.full_range().start;
             clock.pause();
             clock.seek(start);
