@@ -141,7 +141,9 @@ impl LoginScreen {
         if let (Ok(user_id), Ok(password)) =
             (std::env::var("DEV_USER_ID"), std::env::var("DEV_PASSWORD"))
         {
-            let is_demo = std::env::var("DEV_IS_DEMO").map_or(true, |v| v != "false");
+            let is_demo = std::env::var("DEV_IS_DEMO")
+                .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+                .unwrap_or(false);
             return Self {
                 user_id,
                 password,

@@ -95,7 +95,7 @@ SHORT_ID=$(jqn "$SHORT_RESP" "d.order_id")
 OPEN=0
 for i in $(seq 1 10); do
   api_post /api/replay/step-forward > /dev/null
-  sleep 1.0
+  sleep 0.3
   PORTFOLIO=$(api_get /api/replay/portfolio)
   OPEN=$(jqn "$PORTFOLIO" "d.open_positions.length")
   echo "  step $i: open_positions=$OPEN"
@@ -134,7 +134,7 @@ BUY_ID=$(jqn "$BUY_RESP" "d.order_id")
 OPEN=1
 for i in $(seq 1 10); do
   api_post /api/replay/step-forward > /dev/null
-  sleep 1.0
+  sleep 0.3
   PORTFOLIO=$(api_get /api/replay/portfolio)
   OPEN=$(jqn "$PORTFOLIO" "d.open_positions.length")
   echo "  step $i: open_positions=$OPEN"
@@ -149,6 +149,14 @@ CLOSED=$(jqn "$PORTFOLIO" "d.closed_positions.length")
   && pass "TC-I: closed_positions.length=1 — Short の record_close() 呼び出し確認" \
   || fail "TC-I" "closed_positions.length=$CLOSED (expected 1)"
 
+# VirtualOrderFilled task が iced メッセージループで処理され realized_pnl に反映されるまで待機
+# (最大 5s @ 200ms ポーリング — sleep 固定値では CI 負荷次第でも失敗するため同期バリアで置換)
+for _poll in $(seq 1 25); do
+  REALIZED=$(jqn "$PORTFOLIO" "d.realized_pnl")
+  node -e "process.exit(parseFloat('$REALIZED') !== 0 ? 0 : 1)" 2>/dev/null && break
+  sleep 0.2
+  PORTFOLIO=$(api_get /api/replay/portfolio)
+done
 REALIZED=$(jqn "$PORTFOLIO" "d.realized_pnl")
 echo "  realized_pnl: $REALIZED"
 node -e "process.exit(parseFloat('$REALIZED') !== 0 ? 0 : 1)" 2>/dev/null \

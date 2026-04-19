@@ -286,10 +286,10 @@ jobs:
             dev_is_demo: ""
           - name: S22 Tachibana endurance
             script: s22_tachibana_endurance.sh
-            dev_is_demo: ""
+            dev_is_demo: "true"
           - name: S29 Tachibana holiday skip
             script: s29_tachibana_holiday_skip.sh
-            dev_is_demo: ""
+            dev_is_demo: "true"
           - name: S32 Toyota candlestick add
             script: s32_toyota_candlestick_add.sh
             dev_is_demo: ""

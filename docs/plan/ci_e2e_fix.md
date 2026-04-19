@@ -9,12 +9,12 @@
 
 ## ラン間の進捗サマリ
 
-| | Run 1 (logs_65161082968)<br>Phase 1〜3 前 | Run 2 (logs_65183917351)<br>Phase 1〜3 後 | main 参照ラン (main_logs_65183649746) | Run 3 (logs_65185455856)<br>Phase 5 後 | Run 4 (logs_65187341736)<br>Phase 6 後 | Run 5 (logs_65188251004)<br>Phase 7 後 | Run 6 (logs_65191053658)<br>Phase 8 後 | Run 7 (logs_65193176416)<br>Phase 9 後 | Run 8 (logs_65217707443)<br>Phase 10 後 | Run 9 (logs_65219918691)<br>Phase 11 後 |
-|:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| 総テスト数 | 112 | 110 | 110 | 110 | 110 | 110 | 110 | 110 | 110 | 110 |
-| PASS | 85 | 95 | ~93 | ~98 | **~98** | **~98** | **~99** | **~105** | **~101** | **~107** |
-| FAIL | 27 | 15 | ~17 | **11スクリプト/17TC** | **10スクリプト/~13TC** | **10スクリプト/~13TC** | **9スクリプト/~13TC** | **8スクリプト/~16TC** | **6スクリプト/~9TC** | **4スクリプト/~4TC** |
-| 合格率 | 75.9% | 86.4% | ~84.5% | ~89.1% | **~89.1%** | **~89.1%** | **~90%** | **~95.5%** | **~91.8%** | **~97.3%** |
+| | Run 1 (logs_65161082968)<br>Phase 1〜3 前 | Run 2 (logs_65183917351)<br>Phase 1〜3 後 | main 参照ラン (main_logs_65183649746) | Run 3 (logs_65185455856)<br>Phase 5 後 | Run 4 (logs_65187341736)<br>Phase 6 後 | Run 5 (logs_65188251004)<br>Phase 7 後 | Run 6 (logs_65191053658)<br>Phase 8 後 | Run 7 (logs_65193176416)<br>Phase 9 後 | Run 8 (logs_65217707443)<br>Phase 10 後 | Run 9 (logs_65219918691)<br>Phase 11 後 | Run 10 (logs_65222745418)<br>Phase 12 後 |
+|:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| 総テスト数 | 112 | 110 | 110 | 110 | 110 | 110 | 110 | 110 | 110 | 110 | 110 |
+| PASS | 85 | 95 | ~93 | ~98 | **~98** | **~98** | **~99** | **~105** | **~101** | **~107** | **~108** |
+| FAIL | 27 | 15 | ~17 | **11スクリプト/17TC** | **10スクリプト/~13TC** | **10スクリプト/~13TC** | **9スクリプト/~13TC** | **8スクリプト/~16TC** | **6スクリプト/~9TC** | **4スクリプト/~4TC** | **3スクリプト/~4TC** |
+| 合格率 | 75.9% | 86.4% | ~84.5% | ~89.1% | **~89.1%** | **~89.1%** | **~90%** | **~95.5%** | **~91.8%** | **~97.3%** | **~98.2%** |
 
 ※ Run 3 は計画書記載の「12件」より正確には 11 スクリプト失敗（S17・S21 は Run 3 時点で PASS 済み）。  
 ※ Run 4 は S7/S23/S49 が解消したが S32/S20 でリグレッションが発生し、合格率は横ばい。  
@@ -23,6 +23,7 @@
 ※ Run 7 は S45・S49 が PASS 転換（P9-2b 直列化）、S32 が PASS:3→7 に大幅改善（TC-03 PASS）。S32 TC-05/06/09/10 は Tachibana daily history セッション切断が根本原因として残存。  
 ※ Run 8（Phase 10 後）は S32/S33/S36/S37/S39/S24/Headless-S42 が完全 PASS 転換（P10-1b/2b 効果大）。一方 S22 が新規リグレッション・S29 が 2→4TC に悪化。スクリプト数は 11→6 に改善したが TC 合計は増加。  
 ※ Run 9（Phase 11 後）は S22/S29/S44 が完全 PASS 転換（P11-1a で S22 を直列化、P11-4a で S29 巻き戻し追加、P11-5 で S44 解消）。一方 GUI S42 TC-J が新規リグレッション（realized_pnl=0）。スクリプト数は 6→4、TC は ~9→~4 に改善。S21 は tachibana-session に移動したが TC-S21-precond は継続失敗。
+※ Run 10（Phase 12 後）は S42 TC-J / S14 TC-S14-01 / S21 TC-S21-precond が PASS 転換（各 P12-3c/P12-4c-A/P12-1c）。スクリプト数は 4→3 に改善。一方 S22 TC-S22-01-pre（Playing 遷移フリーズ）と S29 TC-A/TC-C2（current_time が 2025-01-13 で 2025-01-10 から 3 日乖離）が新規リグレッション。S20 TC-S20-01 は P12-2c（at_end 判定）が不完全で引き続き FAIL。
 
 **Run 7 → Run 8 で解消したもの（Phase 10 の修正効果）**
 
@@ -1048,6 +1049,138 @@ TC-K: `cash = 1,000,000 + realized_pnl(0)` → cash も初期値のまま（PnL 
 - [x] **P12-3a（調査完了）** `src/main.rs` L1274–1296: StepForward ハンドラで `engine.on_tick()` 同期呼び出し + `Task::done(VirtualOrderFilled)` 非同期キュー。fill task は iced のメッセージループ経由で遅延処理される。
 - [x] **P12-3b（調査完了）** Headless（S42 Run 9 PASS）との差異: headless は tick ループが同期的に回るため fill が即座にポートフォリオへ反映される。GUI は iced フレームごとのメッセージ処理のため非同期遅延がある。
 - [x] **P12-3c（実装済み）** `tests/s42_naked_short_cycle.sh` の StepForward ループ内 `sleep 0.3` を `sleep 1.0` に延長（lines 98, 137）。`VirtualOrderFilled` task が iced のメッセージループで処理されポートフォリオに反映されるまでの余裕を確保。根本修正（将来）: StepForward 後に portfolio が安定するまでポーリングするか、fill 反映完了の同期バリアを API 側に追加。
+
+---
+
+---
+
+## Run 10 の結果（logs_65222745418 / Phase 12 後）
+
+### Run 9 → Run 10 で解消したもの（Phase 12 の修正効果）
+
+| テスト | Run 9 | Run 10 | 解消内容 |
+|:---|:---:|:---:|:---|
+| GUI S42 Naked short cycle | FAIL:1 (TC-J: realized_pnl=0) | **PASS:12** ✅ | P12-3c: StepForward ループ内 `sleep 0.3` → `sleep 1.0` 延長。`VirtualOrderFilled` task の非同期処理が entry_price 確定前に exit_price を記録する競合を解消。|
+| GUI Tachibana Session S14 Autoplay event driven | FAIL:1 (TC-S14-01: keyring 期限切れ→全削除→未接続) | **PASS:4 PEND:1** ✅ | P12-4c-A: `auth.rs` の `try_restore_session()` Err ブランチに `DEV_USER_ID`/`DEV_PASSWORD` env var フォールバック再ログインを追加。|
+| GUI Tachibana Session S21 Tachibana error boundary | FAIL:1 (TC-S21-precond: Playing が 300ms で終了し 1s ポーリングで検出不可) | **PASS:7** ✅ | P12-1c: `utc_offset -96` → `utc_offset -1440`（59 D1 bars = 5.9s Playing）に範囲拡大。`wait_playing` 1s ポーリングが確実に検出できるようになった。|
+
+### Run 9 → Run 10 で継続している失敗
+
+| テスト | TC | 失敗内容 | 根本原因 |
+|:---|:---|:---|:---|
+| GUI Tachibana Session S20 Tachibana replay resilience | TC-S20-01 | `status=Paused, ct_advanced=false`（Playing 期待） | P12-2c の `at_end` 判定が機能せず。`ct_advanced=false` = CycleSpeed 20 連打後に current_time が前進していない（range_end 到達か range_start 付近か不明）。`Integrity check failed: missing 145 klines`（app 終了時） が毎回出現するため kline データ不整合が Playing 遷移を阻害している可能性。|
+
+### Run 9 → Run 10 で新たに壊れたもの（Phase 12 リグレッション）
+
+| テスト | Run 9 | Run 10 | 根本原因 |
+|:---|:---:|:---:|:---|
+| GUI Tachibana Session S22 Tachibana endurance | PASS:4 | **FAIL:1 (TC-S22-01-pre: Playing 到達せず)** | klines(206本)ロード完了（02:37:41）後も 1:31 待機して Playing 未到達。S21と類似の "Playing 遷移フリーズ" パターン。S22の範囲(~206 D1bars = 20.6s Playing)は S21 修正前(-96 = 3bars = 300ms)と同等の短さではないが、P12-4c-A (auth.rs auto-relogin) によるセッション初期化タイミング変化が `KlinesLoadCompleted` → `clock.resume_from_waiting()` のパスに影響した可能性。|
+| GUI Tachibana Session S29 Tachibana holiday skip | PASS:8 | **FAIL:2 (TC-A: ct=2025-01-13, 2025-01-10 から 3 日乖離 / TC-C2: 同)**  | P11-4a の巻き戻し処理（range_end 到達時の StepBackward）が Run 10 では機能しない。play+pause 後の `current_time=1736726400000`（2025-01-13 Mon）が range_end（2025-01-15）に未到達のため「at_end 巻き戻し」if 条件が発火しない。2025-01-13 の状態で TC-A の「2025-01-10 ± 2 日」アサーションに引っかかる。TC-B/C1/C3/D1/D2/E は PASS。|
+
+---
+
+### Phase 12 結果サマリ
+
+**P12-1c（S21 範囲拡大）・P12-3c（S42 sleep 延長）・P12-4c-A（S14 auto-relogin）** により 3 スクリプトが PASS 転換。  
+スクリプト FAIL 数：4 → 3、TC FAIL 数：~4 → ~4（新旧入れ替え）。  
+P12-2c（S20 at_end 判定）は不完全で TC-S20-01 が継続 FAIL。  
+P12-4c-A の auth.rs 変更が副作用として S22・S29 の新規リグレッションを引き起こした。
+
+**S22/S29 リグレッションの真の根本原因（ログ照合で確定）**:
+
+`DEV_IS_DEMO=""` に対する `is_demo` 解釈の不整合:
+
+| 経路 | `DEV_IS_DEMO=""` の解釈 | コード箇所 |
+|:---|:---|:---|
+| `LoginScreen::new()` | `"" != "false"` → `true` → **DEMO チャンネル** | `src/screen/login.rs` L144 |
+| `try_restore_session()` P12-4c-A | `matches!("", "1"\|"true"\|"yes")` → `false` → **REAL チャンネル** | `src/connector/auth.rs` L97-99 |
+
+- **Run 9**: S14 が `all sessions cleared` → S22/S29 は `SessionRestoreResult(None)` → ログイン画面 → DEV AUTO-LOGIN（LoginScreen 経由）→ **DEMO チャンネル** → PASS  
+- **Run 10**: S14 が P12-4c-A auto-relogin で成功 → S22/S29 は `try_restore_session()` 経由 → **REAL チャンネル** → S22 Playing 遷移失敗・S29 current_time ズレ
+
+`Integrity check failed: missing 145 klines` は `src/chart/kline.rs:408`（chart rendering 専用）で `clock.play()` のガード条件ではない。S20 の Playing 遷移への影響は無関係。
+
+---
+
+### Phase 13 — Run 10 残存失敗の解消（次フェーズ）
+
+残失敗: **3 スクリプト / ~4 TC**
+
+| スクリプト | job | TC | 失敗内容 | カテゴリ |
+|:---|:---|:---|:---|:---|
+| GUI Tachibana Session S20 Tachibana replay resilience | `test-gui-tachibana-session` | TC-S20-01 | `status=Paused, ct_advanced=false` — at_end 判定が機能せず | W |
+| GUI Tachibana Session S22 Tachibana endurance | `test-gui-tachibana-session` | TC-S22-01-pre | Playing 到達せず（klines ロード完了後 1:31 フリーズ） | X |
+| GUI Tachibana Session S29 Tachibana holiday skip | `test-gui-tachibana-session` | TC-A / TC-C2 | current_time=2025-01-13 が 2025-01-10 から 3 日乖離（at_end 未到達で巻き戻し不発） | Y |
+
+---
+
+#### P13-1 カテゴリ W — S20 TC-S20-01 at_end 判定不完全（継続）
+
+**症状**: `status=Paused, ct_advanced=false`。P12-2c の「CT_POST_RESUME が range_end ± 300000ms 以内なら at_end=true で PASS」判定が発火しない。
+
+**`Integrity check failed: missing 145 klines`（S20 ログに毎回出現）について（調査済み）**:  
+このログは `src/chart/kline.rs:408`（chart レンダリング専用）で出力される。`clock.play()` のガード条件ではなく、Playing 遷移には無関係。P13-1 では S20 at_end 判定の問題にのみ集中してよい。
+
+**調査方針**:
+- [ ] **P13-1a（調査）** `tests/s20_tachibana_replay_resilience.sh` の TC-S20-01 ロジックで `d.range_end` の取得が成功しているか、CT_POST_RESUME の実際の値を確認（スクリプトにデバッグログを追加）。
+  - `ct_advanced=false` の原因: CT が 0 か、resume 前後で同値か確認
+  - P12-2c の at_end 分岐の `if` 条件が発火しているかをスクリプトトレースで特定
+- [ ] **P13-1b（実装）** 調査結果に応じて:
+  - A) TC-S20-01 の range_end 取得方法を修正（現在の API レスポンス形式と合っているか確認）
+  - B) at_end 判定の ± マージン（300000ms = 5 分）を拡大（SPEED_INSTANT で range_end を超えていてもマッチするよう十分広げる）
+  - C) テスト側で CycleSpeed 後のステップを待機してから resume するよう変更
+
+---
+
+#### P13-2 カテゴリ X — S22/S29 `DEV_IS_DEMO=""` チャンネル不整合（新規・P12-4c-A 副作用・共通根本原因）
+
+**根本原因（確定）**:  
+`src/screen/login.rs` L144 と `src/connector/auth.rs` L97-99 で `DEV_IS_DEMO=""` の解釈が食い違っている:
+
+```
+LoginScreen::new():        map_or(true, |v| v != "false") → "" != "false" = true  → DEMO チャンネル
+try_restore_session():     matches!("", "1"|"true"|"yes") = false                  → REAL チャンネル
+```
+
+- **Run 9**: S14 が全セッション削除 → S22/S29 は DEV AUTO-LOGIN（LoginScreen 経由）→ **DEMO チャンネル** → PASS  
+- **Run 10**: S14 が P12-4c-A auto-relogin で成功 → S22/S29 は `try_restore_session()` 経由 → **REAL チャンネル** → Playing 失敗（S22）・current_time ズレ（S29）
+
+**S22 の症状**: セッション・master cache・klines（206本）はすべて正常ロード。`play` 後に Playing に遷移しない（REAL チャンネルの D1 data では replay Playing 遷移が失敗するか、`wait_playing` が Playing を捕捉できない）。S21 の「Playing が 300ms で終了」とは異なる（S22 は 206 bars × 100ms = 20.6s Playing のはずで検出可能）。
+
+**S29 の症状**: play+pause 後の current_time が `2025-01-13`（REAL チャンネル）で止まり、P11-4a の巻き戻し if 条件（range_end 到達）が発火しない → TC-A/C2 の「2025-01-10 ± 2 日」チェックで 3 日差 FAIL。
+
+**修正方針（推奨: 最小変更・Run 9 の動作を復元）**:
+
+- [x] **P13-2a（実装済み）** `e2e.yml` の `test-gui-tachibana-session` matrix で S22 と S29 の `dev_is_demo: ""` を `dev_is_demo: "true"` に変更し、DEMO チャンネルを明示。
+  - S22（endurance: CRUD 20 サイクル）は demo channel でも動作することが Run 9 ログで確認済み
+  - S29（holiday skip: StepBackward が取引日に着地）は demo channel でも同等のデータを持つ
+  - `dev_is_demo: "true"` とすることで LoginScreen 経由・try_restore_session 経由いずれも `is_demo=true` で一致
+
+- [x] **P13-2b（実装済み）** `src/screen/login.rs` L144 の `is_demo` 解釈を `auth.rs` と統一。`DEV_IS_DEMO=""` = REAL（`matches!` ロジック）とし、設計バグを根絶。
+  - 変更前: `map_or(true, |v| v != "false")` → `""` → DEMO
+  - 変更後: `.map(|v| matches!(v.to_ascii_lowercase().as_str(), "1"|"true"|"yes")).unwrap_or(false)` → `""` → REAL
+  - e2e.yml の意図（`""` = REAL）と一致。S22/S29 は P13-2a で `"true"` を明示したため影響なし。
+
+---
+
+---
+
+#### P13-3 カテゴリ S42 flaky — VirtualOrderFilled 非同期同期バリア（実装済み）
+
+P12-3c（`sleep 1.0` 延長）は確率的暫定策で、CI ランナー負荷次第で失敗し続ける flaky fix だった。
+
+- [x] **P13-3a/b（実装済み）** `tests/s42_naked_short_cycle.sh` を以下に変更:
+  - TC-D/TC-G loop の `sleep 1.0` → `sleep 0.3`（step-forward 処理待ちは 0.3s で十分）
+  - TC-H loop 後（`OPEN -eq 0` 確認後）に `realized_pnl != 0` を確認する同期バリアを追加:
+    ```bash
+    for _poll in $(seq 1 25); do          # 最大 5s @ 200ms
+      REALIZED=$(jqn "$PORTFOLIO" "d.realized_pnl")
+      node -e "process.exit(parseFloat('$REALIZED') !== 0 ? 0 : 1)" 2>/dev/null && break
+      sleep 0.2
+      PORTFOLIO=$(api_get /api/replay/portfolio)
+    done
+    ```
+  - TC-J/TC-K は `$PORTFOLIO` が確定済みの状態でチェックされるため、確率的失敗が解消される。
 
 ---
 
