@@ -534,7 +534,10 @@ impl Dashboard {
                                     move |result| Message::OrdersListResult { pane_id, result },
                                 )
                             }
-                            pane::Effect::FetchOrderDetail(order_num, detail_eig_day) => {
+                            pane::Effect::FetchOrderDetail {
+                                order_num,
+                                eig_day: detail_eig_day,
+                            } => {
                                 let pane_id = state.unique_id();
                                 Task::perform(
                                     order_connector::fetch_order_detail(

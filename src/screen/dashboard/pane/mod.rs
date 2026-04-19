@@ -1,9 +1,15 @@
+mod content;
+mod controls;
+mod effect;
+
+pub use content::Content;
+pub use effect::Effect;
+
+use controls::{basis_modifier, link_group_modal, ticksize_modifier};
+
 use crate::{
-    chart::{self, comparison::ComparisonChart, heatmap::HeatmapChart, kline::KlineChart},
-    connector::{
-        ResolvedStream,
-        fetcher::{FetchSpec, InfoKind},
-    },
+    chart::{self, comparison::ComparisonChart, kline::KlineChart},
+    connector::{ResolvedStream, fetcher::InfoKind},
     modal::{
         self, ModifierKind,
         pane::{
@@ -29,9 +35,9 @@ use crate::{
 use data::{
     UserTimezone,
     chart::{
-        Basis, ViewConfig,
+        Basis,
         heatmap::HeatmapStudy,
-        indicator::{HeatmapIndicator, Indicator, KlineIndicator, UiIndicator},
+        indicator::{HeatmapIndicator, UiIndicator},
     },
     layout::pane::{ContentKind, LinkGroup, PaneSetup, Settings, VisualConfig},
     stream::PersistStreamKind,
@@ -39,44 +45,12 @@ use data::{
 use exchange::{
     Kline, OpenInterest, StreamPairKind, TickMultiplier, TickerInfo, Timeframe,
     adapter::{MarketKind, StreamKind, StreamTicksize},
-    unit::PriceStep,
 };
 use iced::{
     Alignment, Element, Length, Renderer, Theme, padding,
     widget::{button, center, column, container, pane_grid, pick_list, row, text, tooltip},
 };
 use std::time::Instant;
-
-#[derive(Debug, Clone)]
-pub enum Effect {
-    RefreshStreams,
-    RequestFetch(Vec<FetchSpec>),
-    SwitchTickersInGroup(TickerInfo),
-    FocusWidget(iced::widget::Id),
-    /// リプレイ中に kline stream の basis が変わったとき、コントローラに再ロードを依頼する。
-    ReloadReplayKlines {
-        old_stream: Option<StreamKind>,
-        new_stream: StreamKind,
-    },
-    // ── 注文関連 Effect ───────────────────────────────────────────────────────
-    SubmitNewOrder(exchange::adapter::tachibana::NewOrderRequest),
-    SubmitCorrectOrder(exchange::adapter::tachibana::CorrectOrderRequest),
-    SubmitCancelOrder(exchange::adapter::tachibana::CancelOrderRequest),
-    /// REPLAYモード専用：仮想注文を VirtualExchangeEngine に登録する
-    SubmitVirtualOrder(crate::replay::virtual_exchange::VirtualOrder),
-    FetchOrders,
-    FetchOrderDetail(String, String), // (order_num, eig_day)
-    FetchBuyingPower,
-    FetchHoldings {
-        issue_code: String,
-    },
-    /// チャートペインの銘柄変更時に OrderEntry ペインへ配信する
-    SyncIssueToOrderEntry {
-        issue_code: String,
-        issue_name: String,
-        tick_size: Option<f64>,
-    },
-}
 
 #[derive(Debug, Default, Clone, PartialEq)]
 pub enum Status {
@@ -193,12 +167,15 @@ impl State {
         tickers: Vec<TickerInfo>,
         kind: ContentKind,
     ) -> Vec<StreamKind> {
-        if !(self.content.kind() == kind) {
+        if self.content.kind() != kind {
             self.settings.selected_basis = None;
             self.settings.tick_multiply = None;
         }
 
-        let base_ticker = tickers[0];
+        let Some(&base_ticker) = tickers.first() else {
+            log::warn!("set_content_and_streams: empty tickers — skipping");
+            return vec![];
+        };
         let prev_base_ticker = self.stream_pair();
 
         let derived_plan = PaneSetup::new(
@@ -263,16 +240,13 @@ impl State {
                     (content, streams)
                 }
                 ContentKind::CandlestickChart => {
-                    let content = {
-                        let base_ticker = tickers[0];
-                        Content::new_kline(
-                            kind,
-                            &self.content,
-                            derived_plan.ticker_info,
-                            &self.settings,
-                            base_ticker.min_ticksize.into(),
-                        )
-                    };
+                    let content = Content::new_kline(
+                        kind,
+                        &self.content,
+                        derived_plan.ticker_info,
+                        &self.settings,
+                        base_ticker.min_ticksize.into(),
+                    );
 
                     let time_basis_stream = |tf| vec![kline_stream(derived_plan.ticker_info, tf)];
                     let tick_basis_stream = || {
@@ -421,10 +395,15 @@ impl State {
 
                     (content, streams)
                 }
-                ContentKind::Starter => unreachable!(),
-                ContentKind::OrderEntry | ContentKind::OrderList | ContentKind::BuyingPower => {
-                    // 注文パネルは ticker_info / stream を必要としない — ここに到達するのはバグ
-                    unreachable!("order panes do not use streams — caller must not reach here")
+                ContentKind::Starter
+                | ContentKind::OrderEntry
+                | ContentKind::OrderList
+                | ContentKind::BuyingPower => {
+                    log::warn!(
+                        "set_content_and_streams: unexpected kind {:?} — skipping",
+                        kind
+                    );
+                    return vec![];
                 }
             }
         };
@@ -439,12 +418,16 @@ impl State {
         match &mut self.content {
             Content::Kline { chart, .. } => {
                 let Some(chart) = chart else {
-                    panic!("Kline chart wasn't initialized when inserting open interest");
+                    log::warn!("insert_hist_oi: Kline chart not initialized, skipping");
+                    return;
                 };
                 chart.insert_open_interest(req_id, oi);
             }
             _ => {
-                log::error!("pane content not candlestick");
+                log::error!(
+                    "insert_hist_oi: unexpected content kind {:?}",
+                    self.content.kind()
+                );
             }
         }
     }
@@ -476,7 +459,7 @@ impl State {
                     let basis = c.basis();
                     let saved_indicators = indicators.clone();
 
-                    let new_chart = KlineChart::new(
+                    let mut new_chart = KlineChart::new(
                         saved_layout.clone(),
                         basis,
                         step,
@@ -486,7 +469,6 @@ impl State {
                         ti,
                         &saved_kind,
                     );
-                    let mut new_chart = new_chart;
                     new_chart.set_replay_mode(replay_mode);
                     *chart = Some(new_chart);
                     *layout = saved_layout;
@@ -517,7 +499,8 @@ impl State {
                 chart, indicators, ..
             } => {
                 let Some(chart) = chart else {
-                    panic!("chart wasn't initialized when inserting klines");
+                    log::warn!("insert_hist_klines: Kline chart not initialized, skipping");
+                    return;
                 };
 
                 if let Some(id) = req_id {
@@ -548,7 +531,8 @@ impl State {
             }
             Content::Comparison(chart) => {
                 let Some(chart) = chart else {
-                    panic!("Comparison chart wasn't initialized when inserting klines");
+                    log::warn!("insert_hist_klines: Comparison chart not initialized, skipping");
+                    return;
                 };
 
                 if let Some(id) = req_id {
@@ -570,7 +554,10 @@ impl State {
                 }
             }
             _ => {
-                log::error!("pane content not candlestick or footprint");
+                log::error!(
+                    "insert_hist_klines: unexpected content kind {:?}",
+                    self.content.kind()
+                );
             }
         }
     }
@@ -595,6 +582,19 @@ impl State {
         is_replay: bool,
         theme: &'a Theme,
     ) -> pane_grid::Content<'a, Message, Theme, Renderer> {
+        let is_ticker_modal_active = matches!(self.modal, Some(Modal::MiniTickersList(_)));
+        let mini_tickers_btn = |content: Element<'a, Message>| {
+            button(content)
+                .on_press(Message::PaneEvent(
+                    id,
+                    Event::ShowModal(Modal::MiniTickersList(MiniPanel::new())),
+                ))
+                .style(move |theme, status| {
+                    style::button::modifier(theme, status, !is_ticker_modal_active)
+                })
+                .height(widget::PANE_CONTROL_BTN_HEIGHT)
+        };
+
         let mut top_left_buttons = if Content::Starter == self.content {
             row![]
         } else {
@@ -631,21 +631,7 @@ impl State {
             .align_y(Alignment::Center)
             .spacing(4);
 
-            let tickers_list_btn = button(content)
-                .on_press(Message::PaneEvent(
-                    id,
-                    Event::ShowModal(Modal::MiniTickersList(MiniPanel::new())),
-                ))
-                .style(|theme, status| {
-                    style::button::modifier(
-                        theme,
-                        status,
-                        !matches!(self.modal, Some(Modal::MiniTickersList(_))),
-                    )
-                })
-                .height(widget::PANE_CONTROL_BTN_HEIGHT);
-
-            top_left_buttons = top_left_buttons.push(tickers_list_btn);
+            top_left_buttons = top_left_buttons.push(mini_tickers_btn(content.into()));
         } else if !matches!(
             self.content,
             Content::Starter
@@ -662,21 +648,7 @@ impl State {
             ]
             .align_y(Alignment::Center);
 
-            let tickers_list_btn = button(content)
-                .on_press(Message::PaneEvent(
-                    id,
-                    Event::ShowModal(Modal::MiniTickersList(MiniPanel::new())),
-                ))
-                .style(|theme, status| {
-                    style::button::modifier(
-                        theme,
-                        status,
-                        !matches!(self.modal, Some(Modal::MiniTickersList(_))),
-                    )
-                })
-                .height(widget::PANE_CONTROL_BTN_HEIGHT);
-
-            top_left_buttons = top_left_buttons.push(tickers_list_btn);
+            top_left_buttons = top_left_buttons.push(mini_tickers_btn(content.into()));
         }
 
         match &self.content {
@@ -707,9 +679,9 @@ impl State {
             _ => {}
         }
 
-        let modifier: Option<modal::stream::Modifier> = self.modal.clone().and_then(|m| {
+        let modifier: Option<modal::stream::Modifier> = self.modal.as_ref().and_then(|m| {
             if let Modal::StreamModifier(modifier) = m {
-                Some(modifier)
+                Some(*modifier)
             } else {
                 None
             }
@@ -1166,7 +1138,7 @@ impl State {
                         tickers_table,
                     )
                 } else {
-                    let base = uninitialized_base(ContentKind::HeatmapChart);
+                    let base = uninitialized_base(ContentKind::ShaderHeatmap);
                     self.compose_stack_view(
                         base,
                         id,
@@ -1363,7 +1335,7 @@ impl State {
                         return match action {
                             panel::order_list::Action::FetchOrders => Some(Effect::FetchOrders),
                             panel::order_list::Action::FetchOrderDetail { order_num, eig_day } => {
-                                Some(Effect::FetchOrderDetail(order_num, eig_day))
+                                Some(Effect::FetchOrderDetail { order_num, eig_day })
                             }
                             panel::order_list::Action::SubmitCorrect(req) => {
                                 Some(Effect::SubmitCorrectOrder(*req))
@@ -1738,8 +1710,6 @@ impl State {
                 if let Some(Modal::MiniTickersList(ref mut mini_panel)) = self.modal
                     && let Some(action) = mini_panel.update(message)
                 {
-                    self.modal = Some(Modal::MiniTickersList(mini_panel.clone()));
-
                     let crate::modal::pane::mini_tickers_list::Action::RowSelected(sel) = action;
                     match sel {
                         crate::modal::pane::mini_tickers_list::RowSelection::Add(ti) => {
@@ -2115,582 +2085,6 @@ impl Default for State {
     }
 }
 
-#[derive(Default)]
-pub enum Content {
-    #[default]
-    Starter,
-    Heatmap {
-        chart: Option<HeatmapChart>,
-        indicators: Vec<HeatmapIndicator>,
-        layout: data::chart::ViewConfig,
-        studies: Vec<data::chart::heatmap::HeatmapStudy>,
-    },
-    ShaderHeatmap {
-        chart: Option<Box<HeatmapShader>>,
-        indicators: Vec<HeatmapIndicator>,
-        studies: Vec<data::chart::heatmap::HeatmapStudy>,
-    },
-    Kline {
-        chart: Option<KlineChart>,
-        indicators: Vec<KlineIndicator>,
-        layout: data::chart::ViewConfig,
-        kind: data::chart::KlineChartKind,
-    },
-    TimeAndSales(Option<TimeAndSales>),
-    Ladder(Option<Ladder>),
-    Comparison(Option<ComparisonChart>),
-    OrderEntry(panel::order_entry::OrderEntryPanel),
-    OrderList(panel::order_list::OrderListPanel),
-    BuyingPower(panel::buying_power::BuyingPowerPanel),
-}
-
-impl Content {
-    fn new_heatmap(
-        current_content: &Content,
-        ticker_info: TickerInfo,
-        settings: &Settings,
-        price_step: exchange::unit::PriceStep,
-    ) -> Self {
-        let (enabled_indicators, layout, prev_studies) = if let Content::Heatmap {
-            chart,
-            indicators,
-            studies,
-            layout,
-        } = current_content
-        {
-            (
-                indicators.clone(),
-                chart
-                    .as_ref()
-                    .map(|c| c.chart_layout())
-                    .unwrap_or(layout.clone()),
-                chart
-                    .as_ref()
-                    .map_or(studies.clone(), |c| c.studies.clone()),
-            )
-        } else {
-            (
-                vec![HeatmapIndicator::Volume],
-                ViewConfig {
-                    splits: vec![],
-                    autoscale: Some(data::chart::Autoscale::CenterLatest),
-                },
-                vec![],
-            )
-        };
-
-        let basis = settings
-            .selected_basis
-            .unwrap_or_else(|| Basis::default_heatmap_time(Some(ticker_info)));
-        let config = settings.visual_config.clone().and_then(|cfg| cfg.heatmap());
-
-        let chart = HeatmapChart::new(
-            layout.clone(),
-            basis,
-            price_step,
-            &enabled_indicators,
-            ticker_info,
-            config,
-            prev_studies.clone(),
-        );
-
-        Content::Heatmap {
-            chart: Some(chart),
-            indicators: enabled_indicators,
-            layout,
-            studies: prev_studies,
-        }
-    }
-
-    fn new_kline(
-        content_kind: ContentKind,
-        current_content: &Content,
-        ticker_info: TickerInfo,
-        settings: &Settings,
-        step: exchange::unit::PriceStep,
-    ) -> Self {
-        let (prev_indis, prev_layout, prev_kind_opt) = if let Content::Kline {
-            chart,
-            indicators,
-            kind,
-            layout,
-        } = current_content
-        {
-            (
-                Some(indicators.clone()),
-                Some(chart.as_ref().map_or(layout.clone(), |c| c.chart_layout())),
-                Some(chart.as_ref().map_or(kind.clone(), |c| c.kind().clone())),
-            )
-        } else {
-            (None, None, None)
-        };
-
-        let (default_tf, determined_chart_kind) = match content_kind {
-            ContentKind::FootprintChart => (
-                Timeframe::M5,
-                prev_kind_opt
-                    .filter(|k| matches!(k, data::chart::KlineChartKind::Footprint { .. }))
-                    .unwrap_or_else(|| data::chart::KlineChartKind::Footprint {
-                        clusters: data::chart::kline::ClusterKind::default(),
-                        scaling: data::chart::kline::ClusterScaling::default(),
-                        studies: vec![],
-                    }),
-            ),
-            ContentKind::CandlestickChart => (Timeframe::M15, data::chart::KlineChartKind::Candles),
-            _ => unreachable!("invalid content kind for kline chart"),
-        };
-
-        let basis = settings.selected_basis.unwrap_or(Basis::Time(default_tf));
-
-        let enabled_indicators = {
-            let available = KlineIndicator::for_market(ticker_info.market_type());
-            prev_indis.map_or_else(
-                || vec![KlineIndicator::Volume],
-                |indis| {
-                    indis
-                        .into_iter()
-                        .filter(|i| available.contains(i))
-                        .collect()
-                },
-            )
-        };
-
-        let splits = {
-            let main_chart_split: f32 = 0.8;
-            let mut splits_vec = vec![main_chart_split];
-
-            if !enabled_indicators.is_empty() {
-                let num_indicators = enabled_indicators.len();
-
-                if num_indicators > 0 {
-                    let indicator_total_height_ratio = 1.0 - main_chart_split;
-                    let height_per_indicator_pane =
-                        indicator_total_height_ratio / num_indicators as f32;
-
-                    let mut current_split_pos = main_chart_split;
-                    for _ in 0..(num_indicators - 1) {
-                        current_split_pos += height_per_indicator_pane;
-                        splits_vec.push(current_split_pos);
-                    }
-                }
-            }
-            splits_vec
-        };
-
-        let layout = prev_layout
-            .filter(|l| l.splits.len() == splits.len())
-            .unwrap_or(ViewConfig {
-                splits,
-                autoscale: Some(data::chart::Autoscale::FitToVisible),
-            });
-
-        let chart = KlineChart::new(
-            layout.clone(),
-            basis,
-            step,
-            &[],
-            vec![],
-            &enabled_indicators,
-            ticker_info,
-            &determined_chart_kind,
-        );
-
-        Content::Kline {
-            chart: Some(chart),
-            indicators: enabled_indicators,
-            layout,
-            kind: determined_chart_kind,
-        }
-    }
-
-    pub fn placeholder(kind: ContentKind) -> Self {
-        match kind {
-            ContentKind::Starter => Content::Starter,
-            ContentKind::CandlestickChart => Content::Kline {
-                chart: None,
-                indicators: vec![KlineIndicator::Volume],
-                kind: data::chart::KlineChartKind::Candles,
-                layout: ViewConfig {
-                    splits: vec![],
-                    autoscale: Some(data::chart::Autoscale::FitToVisible),
-                },
-            },
-            ContentKind::FootprintChart => Content::Kline {
-                chart: None,
-                indicators: vec![KlineIndicator::Volume],
-                kind: data::chart::KlineChartKind::Footprint {
-                    clusters: data::chart::kline::ClusterKind::default(),
-                    scaling: data::chart::kline::ClusterScaling::default(),
-                    studies: vec![],
-                },
-                layout: ViewConfig {
-                    splits: vec![],
-                    autoscale: Some(data::chart::Autoscale::FitToVisible),
-                },
-            },
-            ContentKind::ShaderHeatmap => Content::ShaderHeatmap {
-                chart: None,
-                indicators: vec![HeatmapIndicator::Volume],
-                studies: vec![data::chart::heatmap::HeatmapStudy::VolumeProfile(
-                    data::chart::heatmap::ProfileKind::default(),
-                )],
-            },
-            ContentKind::HeatmapChart => Content::Heatmap {
-                chart: None,
-                indicators: vec![HeatmapIndicator::Volume],
-                studies: vec![],
-                layout: ViewConfig {
-                    splits: vec![],
-                    autoscale: Some(data::chart::Autoscale::CenterLatest),
-                },
-            },
-            ContentKind::ComparisonChart => Content::Comparison(None),
-            ContentKind::TimeAndSales => Content::TimeAndSales(None),
-            ContentKind::Ladder => Content::Ladder(None),
-            ContentKind::OrderEntry => {
-                Content::OrderEntry(panel::order_entry::OrderEntryPanel::new())
-            }
-            ContentKind::OrderList => Content::OrderList(panel::order_list::OrderListPanel::new()),
-            ContentKind::BuyingPower => {
-                Content::BuyingPower(panel::buying_power::BuyingPowerPanel::new())
-            }
-        }
-    }
-
-    pub fn last_tick(&self) -> Option<Instant> {
-        match self {
-            Content::Heatmap { chart, .. } => Some(chart.as_ref()?.last_update()),
-            Content::Kline { chart, .. } => Some(chart.as_ref()?.last_update()),
-            Content::TimeAndSales(panel) => Some(panel.as_ref()?.last_update()),
-            Content::Ladder(panel) => Some(panel.as_ref()?.last_update()),
-            Content::Comparison(chart) => Some(chart.as_ref()?.last_update()),
-            Content::Starter => None,
-            Content::ShaderHeatmap { chart, .. } => Some(chart.as_ref()?.last_tick?),
-            Content::OrderEntry(_) | Content::OrderList(_) | Content::BuyingPower(_) => None,
-        }
-    }
-
-    pub fn chart_kind(&self) -> Option<data::chart::KlineChartKind> {
-        match self {
-            Content::Kline { chart, .. } => Some(chart.as_ref()?.kind().clone()),
-            _ => None,
-        }
-    }
-
-    pub fn toggle_indicator(&mut self, indicator: UiIndicator) {
-        match (self, indicator) {
-            (
-                Content::Heatmap {
-                    chart, indicators, ..
-                },
-                UiIndicator::Heatmap(ind),
-            ) => {
-                let Some(chart) = chart else {
-                    return;
-                };
-
-                if indicators.contains(&ind) {
-                    indicators.retain(|i| i != &ind);
-                } else {
-                    indicators.push(ind);
-                }
-                chart.toggle_indicator(ind);
-            }
-            (
-                Content::Kline {
-                    chart, indicators, ..
-                },
-                UiIndicator::Kline(ind),
-            ) => {
-                let Some(chart) = chart else {
-                    return;
-                };
-
-                if indicators.contains(&ind) {
-                    indicators.retain(|i| i != &ind);
-                } else {
-                    indicators.push(ind);
-                }
-                chart.toggle_indicator(ind);
-            }
-            (
-                Content::ShaderHeatmap {
-                    chart, indicators, ..
-                },
-                UiIndicator::Heatmap(ind),
-            ) => {
-                let Some(chart) = chart else {
-                    return;
-                };
-
-                if indicators.contains(&ind) {
-                    indicators.retain(|i| i != &ind);
-                } else {
-                    indicators.push(ind);
-                }
-                chart.toggle_indicator(ind);
-            }
-            _ => panic!("indicator toggle on {indicator:?} pane",),
-        }
-    }
-
-    pub fn reorder_indicators(&mut self, event: &column_drag::DragEvent) {
-        match self {
-            Content::Heatmap { indicators, .. } => column_drag::reorder_vec(indicators, event),
-            Content::Kline { indicators, .. } => column_drag::reorder_vec(indicators, event),
-            Content::TimeAndSales(_)
-            | Content::Ladder(_)
-            | Content::Starter
-            | Content::Comparison(_)
-            | Content::ShaderHeatmap { .. }
-            | Content::OrderEntry(_)
-            | Content::OrderList(_)
-            | Content::BuyingPower(_) => {
-                panic!("indicator reorder on {} pane", self)
-            }
-        }
-    }
-
-    pub fn change_visual_config(&mut self, config: VisualConfig) {
-        match (self, config) {
-            (Content::Heatmap { chart: Some(c), .. }, VisualConfig::Heatmap(cfg)) => {
-                c.set_visual_config(cfg);
-            }
-            (Content::ShaderHeatmap { chart: Some(c), .. }, VisualConfig::Heatmap(cfg)) => {
-                c.set_visual_config(cfg);
-            }
-            (Content::TimeAndSales(Some(panel)), VisualConfig::TimeAndSales(cfg)) => {
-                panel.config = cfg;
-            }
-            (Content::Ladder(Some(panel)), VisualConfig::Ladder(cfg)) => {
-                panel.config = cfg;
-            }
-            (Content::Comparison(Some(chart)), VisualConfig::Comparison(cfg)) => {
-                chart.config = cfg;
-            }
-            _ => {}
-        }
-    }
-
-    pub fn studies(&self) -> Option<data::chart::Study> {
-        match &self {
-            Content::Heatmap { studies, .. } => Some(data::chart::Study::Heatmap(studies.clone())),
-            Content::ShaderHeatmap { studies, .. } => {
-                Some(data::chart::Study::Heatmap(studies.clone()))
-            }
-            Content::Kline { kind, .. } => {
-                if let data::chart::KlineChartKind::Footprint { studies, .. } = kind {
-                    Some(data::chart::Study::Footprint(studies.clone()))
-                } else {
-                    None
-                }
-            }
-            Content::TimeAndSales(_)
-            | Content::Ladder(_)
-            | Content::Starter
-            | Content::Comparison(_)
-            | Content::OrderEntry(_)
-            | Content::OrderList(_)
-            | Content::BuyingPower(_) => None,
-        }
-    }
-
-    pub fn update_studies(&mut self, studies: data::chart::Study) {
-        match (self, studies) {
-            (
-                Content::Heatmap {
-                    chart,
-                    studies: previous,
-                    ..
-                },
-                data::chart::Study::Heatmap(studies),
-            ) => {
-                chart
-                    .as_mut()
-                    .expect("heatmap chart not initialized")
-                    .studies = studies.clone();
-                *previous = studies;
-            }
-            (
-                Content::ShaderHeatmap {
-                    chart,
-                    studies: previous,
-                    ..
-                },
-                data::chart::Study::Heatmap(studies),
-            ) => {
-                chart
-                    .as_mut()
-                    .expect("shader heatmap chart not initialized")
-                    .studies = studies.clone();
-                *previous = studies;
-            }
-            (Content::Kline { chart, kind, .. }, data::chart::Study::Footprint(studies)) => {
-                chart
-                    .as_mut()
-                    .expect("kline chart not initialized")
-                    .set_studies(studies.clone());
-                if let data::chart::KlineChartKind::Footprint {
-                    studies: k_studies, ..
-                } = kind
-                {
-                    *k_studies = studies;
-                }
-            }
-            _ => {}
-        }
-    }
-
-    pub fn kind(&self) -> ContentKind {
-        match self {
-            Content::Heatmap { .. } => ContentKind::HeatmapChart,
-            Content::Kline { kind, .. } => match kind {
-                data::chart::KlineChartKind::Footprint { .. } => ContentKind::FootprintChart,
-                data::chart::KlineChartKind::Candles => ContentKind::CandlestickChart,
-            },
-            Content::TimeAndSales(_) => ContentKind::TimeAndSales,
-            Content::Ladder(_) => ContentKind::Ladder,
-            Content::Comparison(_) => ContentKind::ComparisonChart,
-            Content::Starter => ContentKind::Starter,
-            Content::ShaderHeatmap { .. } => ContentKind::ShaderHeatmap,
-            Content::OrderEntry(_) => ContentKind::OrderEntry,
-            Content::OrderList(_) => ContentKind::OrderList,
-            Content::BuyingPower(_) => ContentKind::BuyingPower,
-        }
-    }
-
-    pub fn update_theme(&mut self, theme: &iced_core::Theme) {
-        if let Content::ShaderHeatmap { chart: Some(c), .. } = self {
-            c.update_theme(theme);
-        }
-    }
-
-    fn initialized(&self) -> bool {
-        match self {
-            Content::Heatmap { chart, .. } => chart.is_some(),
-            Content::ShaderHeatmap { chart, .. } => chart.is_some(),
-            Content::Kline { chart, .. } => chart.is_some(),
-            Content::TimeAndSales(panel) => panel.is_some(),
-            Content::Ladder(panel) => panel.is_some(),
-            Content::Comparison(chart) => chart.is_some(),
-            Content::Starter => true,
-            Content::OrderEntry(_) | Content::OrderList(_) | Content::BuyingPower(_) => true,
-        }
-    }
-}
-
-impl std::fmt::Display for Content {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.kind())
-    }
-}
-
-impl PartialEq for Content {
-    fn eq(&self, other: &Self) -> bool {
-        matches!(
-            (self, other),
-            (Content::Starter, Content::Starter)
-                | (Content::Heatmap { .. }, Content::Heatmap { .. })
-                | (Content::Kline { .. }, Content::Kline { .. })
-                | (Content::TimeAndSales(_), Content::TimeAndSales(_))
-                | (Content::Ladder(_), Content::Ladder(_))
-        )
-    }
-}
-
-fn link_group_modal<'a>(
-    pane: pane_grid::Pane,
-    selected_group: Option<LinkGroup>,
-) -> Element<'a, Message> {
-    let mut grid = column![].spacing(4);
-    let rows = LinkGroup::ALL.chunks(3);
-
-    for row_groups in rows {
-        let mut button_row = row![].spacing(4);
-
-        for &group in row_groups {
-            let is_selected = selected_group == Some(group);
-            let btn_content = text(group.to_string()).font(style::AZERET_MONO);
-
-            let btn = if is_selected {
-                button_with_tooltip(
-                    btn_content.align_x(iced::Alignment::Center),
-                    Message::SwitchLinkGroup(pane, None),
-                    Some("Unlink"),
-                    tooltip::Position::Bottom,
-                    move |theme, status| style::button::menu_body(theme, status, true),
-                )
-            } else {
-                button(btn_content.align_x(iced::Alignment::Center))
-                    .on_press(Message::SwitchLinkGroup(pane, Some(group)))
-                    .style(move |theme, status| style::button::menu_body(theme, status, false))
-                    .into()
-            };
-
-            button_row = button_row.push(btn);
-        }
-
-        grid = grid.push(button_row);
-    }
-
-    container(grid)
-        .max_width(240)
-        .padding(16)
-        .style(style::chart_modal)
-        .into()
-}
-
-fn ticksize_modifier<'a>(
-    id: pane_grid::Pane,
-    price_step: PriceStep,
-    min_ticksize: Option<exchange::unit::MinTicksize>,
-    multiplier: TickMultiplier,
-    modifier: Option<modal::stream::Modifier>,
-    kind: ModifierKind,
-    exchange: Option<exchange::adapter::Exchange>,
-) -> Element<'a, Message> {
-    let modifier_modal =
-        Modal::StreamModifier(modal::stream::Modifier::new(kind).with_ticksize_view(
-            price_step,
-            min_ticksize,
-            multiplier,
-            exchange,
-        ));
-
-    let is_active = modifier.is_some_and(|m| {
-        matches!(
-            m.view_mode,
-            modal::stream::ViewMode::TicksizeSelection { .. }
-        )
-    });
-
-    button(text(multiplier.to_string()).align_y(Alignment::Center))
-        .style(move |theme, status| style::button::modifier(theme, status, !is_active))
-        .on_press(Message::PaneEvent(id, Event::ShowModal(modifier_modal)))
-        .height(widget::PANE_CONTROL_BTN_HEIGHT)
-        .into()
-}
-
-fn basis_modifier<'a>(
-    id: pane_grid::Pane,
-    selected_basis: Basis,
-    modifier: Option<modal::stream::Modifier>,
-    kind: ModifierKind,
-) -> Element<'a, Message> {
-    let modifier_modal = Modal::StreamModifier(
-        modal::stream::Modifier::new(kind).with_view_mode(modal::stream::ViewMode::BasisSelection),
-    );
-
-    let is_active =
-        modifier.is_some_and(|m| m.view_mode == modal::stream::ViewMode::BasisSelection);
-
-    button(text(selected_basis.to_string()).align_y(Alignment::Center))
-        .style(move |theme, status| style::button::modifier(theme, status, !is_active))
-        .on_press(Message::PaneEvent(id, Event::ShowModal(modifier_modal)))
-        .height(widget::PANE_CONTROL_BTN_HEIGHT)
-        .into()
-}
-
 fn by_basis_default<T>(
     basis: Option<Basis>,
     default_tf: Timeframe,
@@ -2703,9 +2097,6 @@ fn by_basis_default<T>(
     }
 }
 
-/// `NewOrderRequest` を `VirtualOrder` に変換するヘルパー。
-/// `placed_time_ms` は 0 とする（main.rs でクロック時刻が必要な場合は呼び出し側で上書きする）。
-/// 価格・数量のパース失敗時は `None` を返す（サイレントに 0.0 へ変換しない）。
 fn virtual_order_from_new_order_request(
     req: &exchange::adapter::tachibana::NewOrderRequest,
 ) -> Option<crate::replay::virtual_exchange::VirtualOrder> {
@@ -2747,7 +2138,10 @@ fn virtual_order_from_new_order_request(
         side,
         qty,
         order_type,
-        placed_time_ms: 0,
+        placed_time_ms: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is before UNIX epoch")
+            .as_millis() as u64,
         status: VirtualOrderStatus::Pending,
     })
 }
