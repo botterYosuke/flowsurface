@@ -685,7 +685,9 @@ Tachibana 実認証を必要とするテストも CI で実行可能。
 | スクリプト | 調査結果 | 対応 |
 | :--- | :--- | :--- |
 | s4_multi_pane_binance.sh | BinanceLinear:BTCUSDT/ETHUSDT ハードコード。`E2E_TICKER` 非使用。CI US IP から Binance ブロック（HTTP 451） | **追加不可** |
-| s6_mixed_timeframes.sh | BinanceLinear:BTCUSDT ハードコード。同上 | **追加不可** |
+| s5_tachibana_mixed.sh | inject-session/master/daily-history でモックデータ注入。実認証不要。inject 404 時は TC-S5-02 等 PEND | **test-gui 追加済み**（dev_is_demo: "true"）2026-04-19 |
+| s6_mixed_timeframes.sh | BinanceLinear:BTCUSDT ハードコード。Replay kline fetch が CI US IP ブロックの影響を受ける可能性あり | **test-gui 追加済み**（dev_is_demo: "true"）2026-04-19 |
+| s34_virtual_order_basic.sh | 仮想注文 API 基本動作（Live ガード・成行/指値注文）。Tachibana 不要・Live モード起動 | **test-gui 追加済み**（dev_is_demo: "true"）2026-04-19 |
 | s30_mixed_sample_loading.sh | DEV_USER_ID 必須（未設定時 SKIP exit 0）。inject-session 不使用（keyring 直接確認）。Binance ETHUSDT M1 のみ Live 依存 | **test-gui 追加済み**（dev_is_demo: ""） |
 | s31_replay_end_restart.sh | 同上パターン | **test-gui 追加済み**（dev_is_demo: ""） |
 | s32_toyota_candlestick_add.sh | inject-session を試行するが HTTP 非 200 でもキーリングフォールバックあり。Tachibana セッションなし時は TC-08〜10 PEND | **test-gui 追加済み**（dev_is_demo: ""） |

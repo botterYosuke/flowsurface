@@ -140,6 +140,7 @@ reward = portfolio["unrealized_pnl"] + portfolio["realized_pnl"]  # 簡易実装
 - ✅ `tests/common_helpers.sh` — `headless_play()` / `ensure_replay_mode()` / `pend_if_headless()` / `order_symbol()` / `setup_single_pane()` headless 対応
 - ✅ 18 本のテストスクリプトを headless/GUI 両対応に改修（詳細は `docs/plan/phase3_headless_e2e.md`）
 - ✅ `.github/workflows/e2e.yml` — S1/S3/S9/S10/S11/S12/S13/S16/S18/S26/S27/S35/S40/S41/S42/S43/X2/X4 headless CI ステップ追加（18 本）
+- ✅ `.github/workflows/e2e.yml` — S5/S6/S34 を GUI test-gui matrix に追加（2026-04-19）
 
 ---
 
