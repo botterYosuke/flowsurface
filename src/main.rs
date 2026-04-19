@@ -860,7 +860,7 @@ impl Flowsurface {
     }
 
     fn handle_theme_editor(&mut self, msg: modal::theme_editor::Message) {
-        let action = self.theme_editor.update(msg, &self.theme.clone().into());
+        let action = self.theme_editor.update(msg, &self.theme.0);
 
         match action {
             Some(modal::theme_editor::Action::Exit) => {
@@ -1082,7 +1082,8 @@ impl Flowsurface {
                 }
                 Some(dashboard::Event::SubmitVirtualOrder(vo)) => {
                     if let Some(engine) = &mut self.virtual_engine {
-                        let _order_id = engine.place_order(vo);
+                        let order_id = engine.place_order(vo);
+                        log::debug!("仮想注文を受け付けました: order_id={order_id:?}");
                     } else {
                         log::warn!("仮想注文が来たが VirtualExchangeEngine が初期化されていません");
                     }
@@ -1352,6 +1353,7 @@ impl Flowsurface {
                 ReplayCommand::GetStatus => {
                     // headless CI 対応: iced::time::every が発火しない環境でも
                     // API ポーリング毎に clock を前進させる。
+                    let mut tick_tasks: Vec<Task<Message>> = Vec::new();
                     if self.replay.is_playing() {
                         let now = std::time::Instant::now();
                         let main_window_id = self.main_window.id;
@@ -1359,10 +1361,37 @@ impl Flowsurface {
                             && let Some(dash) =
                                 self.layout_manager.get_mut(id).map(|l| &mut l.dashboard)
                         {
-                            let _ = self.replay.tick(now, dash, main_window_id);
+                            let outcome = self.replay.tick(now, dash, main_window_id);
+                            if outcome.reached_end {
+                                self.notifications.push(Toast::info("Replay reached end"));
+                            }
+                            for (stream, trades, update_t) in outcome.trade_events {
+                                if let Some(engine) = &mut self.virtual_engine {
+                                    let ticker = stream.ticker_info().ticker.to_string();
+                                    let clock_ms = self.replay.current_time_ms().unwrap_or(0);
+                                    let fills = engine.on_tick(&ticker, &trades, clock_ms);
+                                    for fill in fills {
+                                        tick_tasks.push(Task::done(Message::Dashboard {
+                                            layout_id: None,
+                                            event: dashboard::Message::VirtualOrderFilled(fill),
+                                        }));
+                                    }
+                                }
+                                let ingest_task = self
+                                    .active_dashboard_mut()
+                                    .ingest_trades(&stream, &trades, update_t, main_window_id)
+                                    .map(move |msg| Message::Dashboard {
+                                        layout_id: None,
+                                        event: msg,
+                                    });
+                                tick_tasks.push(ingest_task);
+                            }
                         }
                     }
                     reply_tx.send(reply_replay_status(self));
+                    if !tick_tasks.is_empty() {
+                        return Task::batch(tick_tasks);
+                    }
                 }
                 ReplayCommand::Toggle => {
                     let task =
@@ -2002,10 +2031,7 @@ impl Flowsurface {
         }
     }
 
-    /// Pane CRUD API コマンドを処理する。
-    /// 返り値: (JSON レスポンス, 続行する Task)。
-    /// E2E テスト用コマンドを処理する。
-    /// debug ビルドでコンパイルされる。本番 release ビルドには含まれない。
+    /// E2E テスト用コマンドを処理する。debug ビルドのみ（release ビルドには含まれない）。
     #[cfg(debug_assertions)]
     fn handle_test_api(&mut self, cmd: replay_api::TestCommand) -> (String, Task<Message>) {
         use replay_api::TestCommand;
@@ -2086,7 +2112,6 @@ impl Flowsurface {
     fn build_pane_list_json(&self) -> String {
         let main_window_id = self.main_window.id;
         let dashboard = self.active_dashboard();
-        let pending_streams: Vec<String> = Vec::new();
         let trade_buffer_streams: Vec<String> = self.replay.active_stream_debug_labels();
 
         let panes: Vec<serde_json::Value> = dashboard
@@ -2112,7 +2137,6 @@ impl Flowsurface {
 
         let body = serde_json::json!({
             "panes": panes,
-            "pending_trade_streams": pending_streams,
             "trade_buffer_streams": trade_buffer_streams,
         });
         serde_json::to_string(&body)
@@ -2225,13 +2249,13 @@ impl Flowsurface {
             );
         };
 
-        let task = self.update(Message::Dashboard {
-            layout_id: None,
-            event: dashboard::Message::Pane(
+        let task = self.handle_dashboard_message(
+            None,
+            dashboard::Message::Pane(
                 window_id,
                 dashboard::pane::Message::SplitPane(axis, pg_pane),
             ),
-        });
+        );
         let ok = serde_json::json!({"ok": true, "action": "split", "pane_id": pane_id.to_string()});
         (200, ok.to_string(), task)
     }
@@ -2245,13 +2269,10 @@ impl Flowsurface {
             );
         };
 
-        let task = self.update(Message::Dashboard {
-            layout_id: None,
-            event: dashboard::Message::Pane(
-                window_id,
-                dashboard::pane::Message::ClosePane(pg_pane),
-            ),
-        });
+        let task = self.handle_dashboard_message(
+            None,
+            dashboard::Message::Pane(window_id, dashboard::pane::Message::ClosePane(pg_pane)),
+        );
         let ok = serde_json::json!({"ok": true, "action": "close", "pane_id": pane_id.to_string()});
         (200, ok.to_string(), task)
     }
@@ -2757,18 +2778,11 @@ impl Flowsurface {
 
         self.main_window = window::Window::new(main_window_id);
 
-        let active_layout_uid = self
-            .layout_manager
-            .active_layout_id()
-            .map(|id| id.unique)
-            .unwrap_or_else(|| {
-                self.layout_manager
-                    .layouts
-                    .first()
-                    .expect("No layouts available")
-                    .id
-                    .unique
-            });
+        let Some(active_layout_uid) = self.layout_manager.active_layout_id().map(|id| id.unique)
+        else {
+            log::error!("transition_to_dashboard: layout_manager が空です — 起動を中断します");
+            return Task::none();
+        };
         let initial_buying_power = self
             .layout_manager
             .get(active_layout_uid)

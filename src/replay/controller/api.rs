@@ -5,7 +5,7 @@ use super::super::ReplaySession;
 use super::ReplayController;
 
 /// GetState API レスポンスウィンドウ: trades の取得範囲（現在時刻から遡る ms 数）。
-pub(super) const TRADE_WINDOW_MS: u64 = 300_000; // 5 分
+pub(crate) const TRADE_WINDOW_MS: u64 = 300_000; // 5 分
 
 /// GET /api/replay/state レスポンス用データ。
 /// `ReplaySession::Active` のときのみ生成される。

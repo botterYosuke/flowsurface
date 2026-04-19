@@ -528,8 +528,8 @@ impl HeadlessEngine {
                         let trade_stream = StreamKind::Trades {
                             ticker_info: *ticker_info,
                         };
-                        const TRADE_WINDOW_MS: u64 = 300_000;
-                        let trade_start = now_ms.saturating_sub(TRADE_WINDOW_MS);
+                        let trade_start =
+                            now_ms.saturating_sub(crate::replay::controller::api::TRADE_WINDOW_MS);
                         let all_trades = store.trades_in(&trade_stream, trade_start..now_ms + 1);
                         let trade_slice = if all_trades.len() > limit {
                             &all_trades[all_trades.len() - limit..]

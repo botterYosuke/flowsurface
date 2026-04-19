@@ -114,24 +114,18 @@ impl ReplayController {
         self.state.pending_auto_play = false;
     }
 
-    /// 範囲入力の開始テキストを設定する
-    /// NOTE: play_with_range が一括処理するが、単独利用のために公開したまま残す。
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn set_range_start(&mut self, s: String) {
         self.state.range_input.start = s;
     }
 
-    /// 範囲入力の終了テキストを設定する
-    /// NOTE: play_with_range が一括処理するが、単独利用のために公開したまま残す。
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn set_range_end(&mut self, s: String) {
         self.state.range_input.end = s;
     }
 
     /// API コマンド `ReplayCommand::Play { start, end }` の処理を一括実行する。
     /// range_input を更新してから ReplayMessage::Play を処理する。
-    /// `main.rs` の set_range_start + set_range_end + update の3ステップを1メソッドに集約。
-    /// NOTE: `set_range_start` / `set_range_end` は引き続き単独利用可能として公開したまま残す。
     pub fn play_with_range(
         &mut self,
         start: String,

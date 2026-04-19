@@ -82,7 +82,11 @@ impl LayoutManager {
     }
 
     pub fn active_layout_id(&self) -> Option<&LayoutId> {
-        self.get(self.active_layout_id?).map(|layout| &layout.id)
+        // 保存データが壊れて active_layout_id が UUID 不一致になった場合は先頭レイアウトにフォールバック
+        self.active_layout_id
+            .and_then(|id| self.get(id))
+            .or_else(|| self.layouts.first())
+            .map(|layout| &layout.id)
     }
 
     pub fn insert_layout(&mut self, id: LayoutId, dashboard: Dashboard) {
