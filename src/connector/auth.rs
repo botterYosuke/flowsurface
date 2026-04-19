@@ -93,10 +93,9 @@ pub async fn try_restore_session() -> Option<TachibanaSession> {
             // debug build（E2E CI）のみ: keyring validation 失敗後に DEV_USER_ID/DEV_PASSWORD で自動再ログイン。
             // release build では除外されるため本番環境で env vars が誤設定されても自動ログインは発生しない。
             #[cfg(debug_assertions)]
-            if let (Ok(user_id), Ok(password)) = (
-                std::env::var("DEV_USER_ID"),
-                std::env::var("DEV_PASSWORD"),
-            ) {
+            if let (Ok(user_id), Ok(password)) =
+                (std::env::var("DEV_USER_ID"), std::env::var("DEV_PASSWORD"))
+            {
                 let is_demo = std::env::var("DEV_IS_DEMO")
                     .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
                     .unwrap_or(false);
