@@ -31,7 +31,7 @@ cargo test
 # Lint（警告をエラーとして扱う）
 cargo clippy -- -D warnings
 
-# フォーマット
+# フォーマット（コミット前に必ず実行すること — format.yml CI がチェックする）
 cargo fmt
 
 # フォーマットチェック（修正なし）
