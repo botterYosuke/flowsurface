@@ -33,7 +33,7 @@ JSON レスポンス → curl → テストスクリプト
 flowsurface/
 ├── docs/plan/e2e_scripts/      # 実装済みシナリオスクリプト
 │   ├── common_helpers.sh       # 共通ヘルパー（jqn, pass, fail, start_app 等）
-│   ├── s1_basic_lifecycle.sh   # リプレイ基本ライフサイクル
+│   ├── s1_basic_lifecycle.sh   # リプレイ基本ライフサイクル（廃止 → tests/s1_basic_lifecycle.py）
 │   ├── s2_persistence.sh       # saved-state 永続化テスト
 │   ├── s3_autoplay.sh          # fixture 自動 play
 │   ├── s4_multi_pane_binance.sh
@@ -370,7 +370,8 @@ StepForward / StepBackward のステップ幅はアクティブなペインの *
 
 ```bash
 # 単体シナリオ実行
-bash docs/plan/e2e_scripts/s1_basic_lifecycle.sh
+uv run tests/s1_basic_lifecycle.py          # GUI モード
+IS_HEADLESS=true uv run tests/s1_basic_lifecycle.py  # headless モード
 
 # 全シナリオ実行（CI 向け）
 bash tests/e2e_replay_api.sh

@@ -1,5 +1,10 @@
 # Phase 3 Headless モード E2E テスト実装計画
 
+> **[2026-04-19] bash → Python 移行完了**  
+> すべての `tests/*.sh` を `tests/*.py`（Python + `uv run`）に移行済み。  
+> CI (`e2e.yml`) の全ジョブで `.sh` → `.py` 切り替え・`setup-uv` ステップ追加・`uv run` 対応済み。  
+> 詳細は `docs/plan/archive/e2e_sh_to_py_migration.md` を参照。
+
 ## 目標
 
 既存の E2E テストスクリプトを `IS_HEADLESS=true` 環境変数で  
@@ -103,38 +108,38 @@ fi
 
 ## 実装ステータス
 
-### common_helpers.sh
-- ✅ `IS_HEADLESS` / `is_headless()` / `_start_headless_app()`
-- ✅ `headless_play()` / `ensure_replay_mode()` / `pend_if_headless()` / `order_symbol()`
-- ✅ `setup_single_pane()` headless 対応（`_HEADLESS_*` 変数格納、JSON スキップ）
-- ✅ `_start_headless_app()` で `_HEADLESS_TIMEFRAME` 使用
+### Python 共通インフラ（bash → Python 移行後）
+- ✅ `tests/helpers.py` — `common_helpers.sh` 相当。`IS_HEADLESS` / `headless_play()` / `setup_single_pane()` / `backup_state()` / `restore_state()` 等を提供
+- ✅ `python/env.py` — `FlowsurfaceEnv` SDK（プロセス起動・close・環境変数管理）
+- ✅ 実行方法: `uv run tests/<script>.py`（`FLOWSURFACE_BINARY` 環境変数でバイナリ指定）
 
-### テストスクリプト（headless/GUI 両対応済み）
-- ✅ `s1_basic_lifecycle.sh`
-- ✅ `s3_autoplay.sh` — TC-S3-05 は GUI 専用
-- ✅ `s9_speed_step.sh` — TC-S9-04 (StepBackward) headless 実装済み（PEND 解除）
-- ✅ `s10_range_end.sh` — TC-S10-03/04 headless PEND 解除（StepBackward 実装済みのため）
-- ✅ `s11_bar_step_discrete.sh` — TC-S11-05 headless PEND 解除（headless pane API 実装済み）
-- ✅ `s12_pre_start_history.sh` — TC-S12-01/02 headless PEND 解除、TC-S12-04 は headless PEND（chart-snapshot API・GUI 描画依存）
-- ✅ `s13_step_backward_quality.sh` — TC-S13-01/04 headless PEND 解除、TC-S13-02 は headless PEND（pane/list API 501・streams_ready 検証不可）
-- ✅ `s16_replay_resilience.sh` — TC-S16-02b headless PEND 解除、TC-S16-03/04/05 は headless PEND（Live/Replay toggle 非対応）
-- ✅ `s18_endurance.sh` — TC-S18-02-bwd / TC-S18-03 headless PEND 解除（headless pane API 実装済み）
-- ✅ `s26_ticker_change_after_replay_end.sh` — TC-A/B/C headless PEND 解除（headless pane API 実装済み）
-- ✅ `s27_cyclespeed_reset.sh` — 全 TC headless 対応
-- ✅ `s35_virtual_portfolio.sh` — TC-K/L (toggle) は headless PEND
-- ✅ `s40_virtual_order_fill_cycle.sh` — DEV_USER_ID チェックを headless でスキップ
-- ✅ `s41_limit_order_round_trip.sh` — 同上
-- ✅ `s42_naked_short_cycle.sh` — 同上
-- ✅ `s43_get_state_endpoint.sh` — TC-A PEND（Live モードなし）、TC-G/H/I/J/K2 PEND（headless klines スキーマ差分あり）、current_time_ms/current_time 両対応
-- ✅ `x2_buttons.sh` — TC-X2-02/03 headless PEND 解除、TC-X2-08 は headless PEND（Live モードなし）
-- ✅ `x4_virtual_order_live_guard.sh` — TC-01/02/03/06 は headless PEND
+### テストスクリプト（headless/GUI 両対応済み・Python 版）
+- ✅ `s1_basic_lifecycle.py`
+- ✅ `s3_autoplay.py` — TC-S3-05 は GUI 専用（pytest では run_s3_no_autoplay() 未実行、docstring に明記）
+- ✅ `s9_speed_step.py` — TC-S9-04 (StepBackward) headless 実装済み（PEND 解除）
+- ✅ `s10_range_end.py` — TC-S10-03/04 headless PEND 解除（StepBackward 実装済みのため）
+- ✅ `s11_bar_step_discrete.py` — TC-S11-05 headless PEND 解除（headless pane API 実装済み）
+- ✅ `s12_pre_start_history.py` — TC-S12-01/02 headless PEND 解除、TC-S12-04 は headless PEND（chart-snapshot API・GUI 描画依存）
+- ✅ `s13_step_backward_quality.py` — TC-S13-01/04 headless PEND 解除、TC-S13-02 は headless PEND（pane/list API 501・streams_ready 検証不可）
+- ✅ `s16_replay_resilience.py` — TC-S16-02b headless PEND 解除、TC-S16-03/04/05 は headless PEND（Live/Replay toggle 非対応）
+- ✅ `s18_endurance.py` — TC-S18-02-bwd / TC-S18-03 headless PEND 解除（headless pane API 実装済み）
+- ✅ `s26_ticker_change_after_replay_end.py` — TC-A/B/C headless PEND 解除（headless pane API 実装済み）
+- ✅ `s27_cyclespeed_reset.py` — 全 TC headless 対応
+- ✅ `s35_virtual_portfolio.py` — TC-K/L (toggle) は headless PEND
+- ✅ `s40_virtual_order_fill_cycle.py` — DEV_USER_ID チェックを headless でスキップ
+- ✅ `s41_limit_order_round_trip.py` — 同上
+- ✅ `s42_naked_short_cycle.py` — 同上
+- ✅ `s43_get_state_endpoint.py` — TC-A PEND（Live モードなし）、TC-G/H/I/J/K2 PEND（headless klines スキーマ差分あり）、current_time_ms/current_time 両対応
+- ✅ `x2_buttons.py` — TC-X2-02/03 headless PEND 解除、TC-X2-08 は headless PEND（Live モードなし）
+- ✅ `x4_virtual_order_live_guard.py` — TC-01/02/03/06 は headless PEND
 
 ### CI 統合
-- ✅ `.github/workflows/e2e.yml` — test-headless: 30 本（Phase 3〜5 累計）、test-gui: 24 本 + S22 専用ジョブ
+- ✅ `.github/workflows/e2e.yml` — test-headless: 30 本（Phase 3〜5 累計）、test-gui: 24 本 + S22 専用ジョブ（**全スクリプト `.py`・`uv run` 対応**）
   - headless: S1/S3/S7/S8/S9/S10/S11/S12/S13/S16/S17/S18/S23/S24/S26/S27/S28/S33/S34/S35/S36/S37/S39/S40/S41/S42/S43/X1/X2/X4
-  - GUI(DEV_IS_DEMO=true): S1/S2/S9/S27/S35
-  - GUI(DEV_IS_DEMO=""): S14/S20/S21/S29/S30/S31/S32/S40/S41/S42/S44/S45/S46/S47/S48/S49/S1b/S1c/S1d
-  - GUI 専用ジョブ: S22（timeout-minutes: 40）
+  - GUI(DEV_IS_DEMO=true): S1/S2/S5/S6/S9/S24/S27/S30/S31/S33/S34/S35/S36/S37/S39/S46/S47/S48
+  - Tachibana 直列（DEV_IS_DEMO=""）: S14/S20/S21/S29/S32/S40/S41/S42/S44/S45/S49/S1b/S1c/S1d
+  - Tachibana 直列（DEV_IS_DEMO=true）: S22/S44/S45/S49
+  - GUI 専用ジョブ: S22（timeout-minutes: 45）
 
 ---
 
@@ -467,21 +472,21 @@ Bug 6 修正完了後、計画書で「headless 両対応済み ✅」だが CI 
 
 ```yaml
           - name: S10 Range end
-            script: s10_range_end.sh
+            script: s10_range_end.py
           - name: S11 Bar step discrete
-            script: s11_bar_step_discrete.sh
+            script: s11_bar_step_discrete.py
           - name: S12 Pre-start history
-            script: s12_pre_start_history.sh
+            script: s12_pre_start_history.py
           - name: S13 Step backward quality
-            script: s13_step_backward_quality.sh
+            script: s13_step_backward_quality.py
           - name: S16 Replay resilience
-            script: s16_replay_resilience.sh
+            script: s16_replay_resilience.py
           - name: S18 Endurance
-            script: s18_endurance.sh
+            script: s18_endurance.py
           - name: S26 Ticker change after replay end
-            script: s26_ticker_change_after_replay_end.sh
+            script: s26_ticker_change_after_replay_end.py
           - name: X2 Buttons
-            script: x2_buttons.sh
+            script: x2_buttons.py
 ```
 
 ### 実装ステータス
@@ -503,41 +508,41 @@ Tachibana 実認証を必要とするテストも CI で実行可能。
 
 | スクリプト | is_headless | Tachibana 認証 | GUI 専用機能 | 追加先 |
 | :--- | :---: | :---: | :---: | :--- |
-| s7_mid_replay_pane.sh | ✅ | ✗ | ✗ | test-headless |
-| s8_error_boundary.sh | ❌ 未実装 | ✗ | ✗ | **要修正** → test-headless |
-| s17_error_boundary.sh | ✅ | ✗ | ✗ | test-headless |
-| s23_mid_replay_ticker_change.sh | ✅ | ✗ | ✗ | test-headless |
-| s24_sidebar_select_ticker.sh | ✅ | ✗ | ✗ | test-headless |
-| s28_ticker_change_while_loading.sh | ✅ | ✗ | ✗ | test-headless |
-| s33_sidebar_split_pane.sh | ✅ | ✗ | ✗ | test-headless |
-| s34_virtual_order_basic.sh | ✅ | ✗ | ✗ | test-headless |
-| s36_sidebar_order_pane.sh | ✅ | ✗ | ✗ | test-headless |
-| s37_order_panels_integrated.sh | ✅ | ✗ | ✗ | test-headless |
-| s39_buying_power_portfolio.sh | ✅ | ✗ | ✗ | test-headless |
-| x1_current_time.sh | ✅ | ✗ | ✗ | test-headless |
-| s4_multi_pane_binance.sh | ✅ | ✗ | ✗ | **要調査**（ticker ハードコード確認） |
-| s6_mixed_timeframes.sh | ✅ | ✗ | ✗ | **要調査**（ticker ハードコード確認） |
-| s32_toyota_candlestick_add.sh | ✅ | inject-session | ✗ | **要調査**（inject-session 依存確認） |
-| s14_autoplay_event_driven.sh | ❌ 未実装 | ✅ 必須 | ✗ | **要修正** → test-gui (DEV_IS_DEMO="") |
-| s20_tachibana_replay_resilience.sh | ✅ | ✅ 必須 | ✗ | test-gui (DEV_IS_DEMO="") |
-| s21_tachibana_error_boundary.sh | ✅ | ✅ 必須 | ✗ | test-gui (DEV_IS_DEMO="") |
-| s22_tachibana_endurance.sh | ✅ | ✅ 必須 | ✗ | test-gui ⚠️ 15-30 分（timeout-minutes: 40 必要） |
-| s29_tachibana_holiday_skip.sh | ✅ | ✅ 必須 | ✗ | test-gui ⚠️ 固定日付（2025-01-07〜15） |
-| s44_order_list.sh | ✅ | ✅ 必須 | ✗ | test-gui (DEV_IS_DEMO="") |
-| s45_order_correct_cancel.sh | ✅ | ✅ + DEV_SECOND_PASSWORD | ✗ | test-gui (DEV_IS_DEMO="") |
-| s46_wrong_password.sh | ✅ | ✅ 必須 | ✗ | test-gui (DEV_IS_DEMO="") |
-| s47_outside_hours.sh | ✅ | ✅ + DEV_SECOND_PASSWORD | ✗ | test-gui (DEV_IS_DEMO="") |
-| s48_invalid_issue.sh | ✅ | ✅ + DEV_SECOND_PASSWORD | ✗ | test-gui (DEV_IS_DEMO="") |
-| s49_account_info.sh | ✅ | ✅ 必須 | ✗ | test-gui (DEV_IS_DEMO="") |
-| s1b_limit_buy.sh | ✅ | ✅ + DEV_SECOND_PASSWORD | ✗ | test-gui (DEV_IS_DEMO="") |
-| s1c_market_sell.sh | ✅ | ✅ + DEV_SECOND_PASSWORD | ✗ | test-gui (DEV_IS_DEMO="") |
-| s1d_limit_sell.sh | ✅ | ✅ + DEV_SECOND_PASSWORD | ✗ | test-gui (DEV_IS_DEMO="") |
-| s30_mixed_sample_loading.sh | ✅ | inject-session + DEV_USER_ID | ✗ | **要調査**（inject-session 依存確認） |
-| s31_replay_end_restart.sh | ✅ | inject-session + DEV_USER_ID | ✗ | **要調査**（inject-session 依存確認） |
+| s7_mid_replay_pane.py | ✅ | ✗ | ✗ | test-headless ✅ |
+| s8_error_boundary.py | ✅ | ✗ | ✗ | test-headless ✅ |
+| s17_error_boundary.py | ✅ | ✗ | ✗ | test-headless ✅ |
+| s23_mid_replay_ticker_change.py | ✅ | ✗ | ✗ | test-headless ✅ |
+| s24_sidebar_select_ticker.py | ✅ | ✗ | ✗ | test-headless ✅ |
+| s28_ticker_change_while_loading.py | ✅ | ✗ | ✗ | test-headless ✅ |
+| s33_sidebar_split_pane.py | ✅ | ✗ | ✗ | test-headless ✅ |
+| s34_virtual_order_basic.py | ✅ | ✗ | ✗ | test-gui ✅ |
+| s36_sidebar_order_pane.py | ✅ | ✗ | ✗ | test-gui ✅ |
+| s37_order_panels_integrated.py | ✅ | ✗ | ✗ | test-gui ✅ |
+| s39_buying_power_portfolio.py | ✅ | ✗ | ✗ | test-gui ✅ |
+| x1_current_time.py | ✅ | ✗ | ✗ | test-headless ✅ |
+| s4_multi_pane_binance.sh | ✅ | ✗ | ✗ | **追加不可**（BinanceLinear ハードコード・CI US IP ブロック） |
+| s6_mixed_timeframes.py | ✅ | ✗ | ✗ | test-gui ✅ |
+| s32_toyota_candlestick_add.py | ✅ | inject-session | ✗ | test-gui-tachibana-session ✅ |
+| s14_autoplay_event_driven.py | ✅ | ✅ 必須 | ✗ | test-gui-tachibana-session ✅ |
+| s20_tachibana_replay_resilience.py | ✅ | ✅ 必須 | ✗ | test-gui-tachibana-session ✅ |
+| s21_tachibana_error_boundary.py | ✅ | ✅ 必須 | ✗ | test-gui-tachibana-session ✅ |
+| s22_tachibana_endurance.py | ✅ | ✅ 必須 | ✗ | test-gui-tachibana-session ✅ timeout-minutes: 45 |
+| s29_tachibana_holiday_skip.py | ✅ | ✅ 必須 | ✗ | test-gui-tachibana-session ✅ |
+| s44_order_list.py | ✅ | ✅ 必須 | ✗ | test-gui-tachibana-session ✅ |
+| s45_order_correct_cancel.py | ✅ | ✅ + DEV_SECOND_PASSWORD | ✗ | test-gui-tachibana-session ✅ |
+| s46_wrong_password.py | ✅ | ✅ 必須 | ✗ | test-gui ✅ |
+| s47_outside_hours.py | ✅ | ✅ + DEV_SECOND_PASSWORD | ✗ | test-gui ✅ |
+| s48_invalid_issue.py | ✅ | ✅ + DEV_SECOND_PASSWORD | ✗ | test-gui ✅ |
+| s49_account_info.py | ✅ | ✅ 必須 | ✗ | test-gui-tachibana-session ✅ |
+| s1b_limit_buy.py | ✅ | ✅ + DEV_SECOND_PASSWORD | ✗ | test-gui ✅ |
+| s1c_market_sell.py | ✅ | ✅ + DEV_SECOND_PASSWORD | ✗ | test-gui ✅ |
+| s1d_limit_sell.py | ✅ | ✅ + DEV_SECOND_PASSWORD | ✗ | test-gui ✅ |
+| s30_mixed_sample_loading.py | ✅ | DEV_USER_ID | ✗ | test-gui ✅ |
+| s31_replay_end_restart.py | ✅ | DEV_USER_ID | ✗ | test-gui ✅ |
 | s15_chart_snapshot.sh | ✅ | ✗ | ✅ chart-snapshot | **追加不可**（GUI 描画依存） |
-| s19_tachibana_chart_snapshot.sh | ✅ | ✅ 必須 | ✅ chart-snapshot | **追加不可**（GUI 描画依存） |
+| s19_tachibana_chart_snapshot.py | ✅ | ✅ 必須 | ✅ chart-snapshot | **CI 外**（GUI 描画依存） |
 | x3_chart_update.sh | ✅ | ✗ | ✅ chart-snapshot | **追加不可**（GUI 描画依存） |
-| s25_screenshot_and_auth.sh | ❌ 未実装 | ✗ | ✅ screenshot | **追加不可**（GUI 描画依存） |
+| s25_screenshot_and_auth.sh | 未移行 | ✗ | ✅ screenshot | **追加不可**（GUI 描画依存） |
 
 ---
 
@@ -547,27 +552,27 @@ Tachibana 実認証を必要とするテストも CI で実行可能。
 
 ```yaml
           - name: S7 Mid-replay pane
-            script: s7_mid_replay_pane.sh
+            script: s7_mid_replay_pane.py
           - name: S17 Error boundary
-            script: s17_error_boundary.sh
+            script: s17_error_boundary.py
           - name: S23 Mid-replay ticker change
-            script: s23_mid_replay_ticker_change.sh
+            script: s23_mid_replay_ticker_change.py
           - name: S24 Sidebar select ticker
-            script: s24_sidebar_select_ticker.sh
+            script: s24_sidebar_select_ticker.py
           - name: S28 Ticker change while loading
-            script: s28_ticker_change_while_loading.sh
+            script: s28_ticker_change_while_loading.py
           - name: S33 Sidebar split pane
-            script: s33_sidebar_split_pane.sh
+            script: s33_sidebar_split_pane.py
           - name: S34 Virtual order basic
-            script: s34_virtual_order_basic.sh
+            script: s34_virtual_order_basic.py
           - name: S36 Sidebar order pane
-            script: s36_sidebar_order_pane.sh
+            script: s36_sidebar_order_pane.py
           - name: S37 Order panels integrated
-            script: s37_order_panels_integrated.sh
+            script: s37_order_panels_integrated.py
           - name: S39 Buying power portfolio
-            script: s39_buying_power_portfolio.sh
+            script: s39_buying_power_portfolio.py
           - name: X1 Current time
-            script: x1_current_time.sh
+            script: x1_current_time.py
 ```
 
 ---
@@ -578,53 +583,53 @@ Tachibana 実認証を必要とするテストも CI で実行可能。
 
 ```yaml
           - name: S20 Tachibana replay resilience
-            script: s20_tachibana_replay_resilience.sh
+            script: s20_tachibana_replay_resilience.py
             dev_is_demo: ""
           - name: S21 Tachibana error boundary
-            script: s21_tachibana_error_boundary.sh
+            script: s21_tachibana_error_boundary.py
             dev_is_demo: ""
           - name: S29 Tachibana holiday skip
-            script: s29_tachibana_holiday_skip.sh
+            script: s29_tachibana_holiday_skip.py
             dev_is_demo: ""
           - name: S44 Order list
-            script: s44_order_list.sh
+            script: s44_order_list.py
             dev_is_demo: ""
           - name: S45 Order correct cancel
-            script: s45_order_correct_cancel.sh
+            script: s45_order_correct_cancel.py
             dev_is_demo: ""
           - name: S46 Wrong password
-            script: s46_wrong_password.sh
+            script: s46_wrong_password.py
             dev_is_demo: ""
           - name: S47 Outside hours
-            script: s47_outside_hours.sh
+            script: s47_outside_hours.py
             dev_is_demo: ""
           - name: S48 Invalid issue
-            script: s48_invalid_issue.sh
+            script: s48_invalid_issue.py
             dev_is_demo: ""
           - name: S49 Account info
-            script: s49_account_info.sh
+            script: s49_account_info.py
             dev_is_demo: ""
           - name: S1b Limit buy
-            script: s1b_limit_buy.sh
+            script: s1b_limit_buy.py
             dev_is_demo: ""
           - name: S1c Market sell
-            script: s1c_market_sell.sh
+            script: s1c_market_sell.py
             dev_is_demo: ""
           - name: S1d Limit sell
-            script: s1d_limit_sell.sh
+            script: s1d_limit_sell.py
             dev_is_demo: ""
 ```
 
-⚠️ `s22_tachibana_endurance.sh` は実行時間 15〜30 分のため、専用ジョブで `timeout-minutes: 40` を設定して追加する。
+⚠️ `s22_tachibana_endurance.py` は実行時間 15〜30 分のため、専用ジョブで `timeout-minutes: 45` を設定して追加する。
 
 ---
 
-### 5-C：要修正スクリプト（修正後に追加）
+### 5-C：修正済みスクリプト
 
 | スクリプト | 修正内容 | 追加先 |
 | :--- | :--- | :--- |
-| s8_error_boundary.sh | `is_headless` 分岐を追加（pane/list は headless で 501 返却） | test-headless |
-| s14_autoplay_event_driven.sh | `is_headless` 分岐を追加（headless ではスキップ or PEND） | test-gui |
+| s8_error_boundary.py | Python 移行時に headless/GUI 両対応実装済み | test-headless ✅ |
+| s14_autoplay_event_driven.py | Python 移行時に IS_HEADLESS 全 TC PEND 分岐追加済み | test-gui-tachibana-session ✅ |
 
 ---
 
@@ -655,9 +660,9 @@ Tachibana 実認証を必要とするテストも CI で実行可能。
 
 - ✅ 5-A: test-headless に 11 本追加（`e2e.yml` 変更）
 - ✅ 5-B: test-gui matrix に 16 本追加（`e2e.yml` 変更）— s14/s20/s21/s29/s30/s31/s32/s44〜s49/s1b/s1c/s1d
-- ✅ 5-B: s22 専用ジョブ追加（timeout-minutes: 40）
+- ✅ 5-B: s22 専用ジョブ追加（timeout-minutes: 45）
 - ✅ 5-C: s8 修正（streams_ready 待機 + TC-S8-08〜11 を `is_headless` 分岐で囲む） → test-headless 追加
-- ✅ 5-C: s14 修正（冒頭に is_headless 全 TC PEND 分岐追加） → test-gui 追加（dev_is_demo: ""）
+- ✅ 5-C: s14 修正（冒頭に is_headless 全 TC PEND 分岐追加） → test-gui-tachibana-session 追加
 - ✅ 5-D: s4/s6 ticker ハードコード調査 → **追加不可**（BinanceLinear ハードコード + CI の US IP Binance ブロック）
 - ✅ 5-D: s30/s31/s32 inject-session 依存調査 → **test-gui 追加済み**（DEV_USER_ID 必須・inject-session 不要）
 - ✅ pane API headless 実装（S11-TC-S11-05 / S18-TC-S18-03 / S26-TC-A/B/C の PEND 解消）
@@ -670,6 +675,7 @@ Tachibana 実認証を必要とするテストも CI で実行可能。
   - s11 TC-S11-05 に headless ブランチ追加（split → set-timeframe M5 → step-forward delta=60000ms）
   - s18 TC-S18-03 の `is_headless` ガード削除（split/close サイクルが headless でも動作）
   - s26 の `is_headless` early-exit ブロック削除（pane/list + set-ticker が headless で動作）
+- ✅ **bash → Python 全移行完了**（2026-04-19）: 全 `tests/*.sh` を `tests/*.py` に移行、CI 全ジョブを `uv run` 対応
 - ❌ CI 緑確認
 
 ---
@@ -684,13 +690,13 @@ Tachibana 実認証を必要とするテストも CI で実行可能。
 
 | スクリプト | 調査結果 | 対応 |
 | :--- | :--- | :--- |
-| s4_multi_pane_binance.sh | BinanceLinear:BTCUSDT/ETHUSDT ハードコード。`E2E_TICKER` 非使用。CI US IP から Binance ブロック（HTTP 451） | **追加不可** |
-| s5_tachibana_mixed.sh | inject-session/master/daily-history でモックデータ注入。実認証不要。inject 404 時は TC-S5-02 等 PEND | **test-gui 追加済み**（dev_is_demo: "true"）2026-04-19 |
-| s6_mixed_timeframes.sh | BinanceLinear:BTCUSDT ハードコード。Replay kline fetch が CI US IP ブロックの影響を受ける可能性あり | **test-gui 追加済み**（dev_is_demo: "true"）2026-04-19 |
-| s34_virtual_order_basic.sh | 仮想注文 API 基本動作（Live ガード・成行/指値注文）。Tachibana 不要・Live モード起動 | **test-gui 追加済み**（dev_is_demo: "true"）2026-04-19 |
-| s30_mixed_sample_loading.sh | DEV_USER_ID 必須（未設定時 SKIP exit 0）。inject-session 不使用（keyring 直接確認）。Binance ETHUSDT M1 のみ Live 依存 | **test-gui 追加済み**（dev_is_demo: ""） |
-| s31_replay_end_restart.sh | 同上パターン | **test-gui 追加済み**（dev_is_demo: ""） |
-| s32_toyota_candlestick_add.sh | inject-session を試行するが HTTP 非 200 でもキーリングフォールバックあり。Tachibana セッションなし時は TC-08〜10 PEND | **test-gui 追加済み**（dev_is_demo: ""） |
+| s4_multi_pane_binance.sh | BinanceLinear:BTCUSDT/ETHUSDT ハードコード。`E2E_TICKER` 非使用。CI US IP から Binance ブロック（HTTP 451） | **追加不可**（.py 移行対象外） |
+| s5_tachibana_mixed.py | inject-session/master/daily-history でモックデータ注入。実認証不要。inject 404 時は TC-S5-02 等 PEND | **test-gui 追加済み**（dev_is_demo: "true"）2026-04-19 |
+| s6_mixed_timeframes.py | BinanceLinear:BTCUSDT ハードコード。Replay kline fetch が CI US IP ブロックの影響を受ける可能性あり | **test-gui 追加済み**（dev_is_demo: "true"）2026-04-19 |
+| s34_virtual_order_basic.py | 仮想注文 API 基本動作（Live ガード・成行/指値注文）。Tachibana 不要・Live モード起動 | **test-gui 追加済み**（dev_is_demo: "true"）2026-04-19 |
+| s30_mixed_sample_loading.py | DEV_USER_ID 必須（未設定時 SKIP exit 0）。inject-session 不使用（keyring 直接確認）。Binance ETHUSDT M1 のみ Live 依存 | **test-gui 追加済み**（dev_is_demo: ""） |
+| s31_replay_end_restart.py | 同上パターン | **test-gui 追加済み**（dev_is_demo: ""） |
+| s32_toyota_candlestick_add.py | inject-session を試行するが HTTP 非 200 でもキーリングフォールバックあり。Tachibana セッションなし時は TC-08〜10 PEND | **test-gui-tachibana-session 追加済み**（dev_is_demo: ""） |
 
 ---
 
@@ -698,21 +704,21 @@ Tachibana 実認証を必要とするテストも CI で実行可能。
 
 ### 背景
 
-`src/headless.rs` の `step_backward()` は Phase 3〜5 の過程で実装済み（`s9_speed_step.sh` TC-S9-04 で PASS 確認済み）。
-各テストスクリプトには過去に「StepBackward headless 未実装」という理由で `is_headless` ガードが残っており、
-該当 TC が全て PEND になっていた。Phase 6 ではこれらのガードを一括削除した。
+`src/headless.rs` の `step_backward()` は Phase 3〜5 の過程で実装済み（`s9_speed_step.py` TC-S9-04 で PASS 確認済み）。
+各テストスクリプトには過去に「StepBackward headless 未実装」という理由で IS_HEADLESS ガードが残っており、
+該当 TC が全て PEND になっていた。Phase 6 ではこれらのガードを一括削除した（bash 版）。Python 移行時にも引き継がれている。
 
 ### 対象 TC と対応内容
 
 | スクリプト | 解除 TC | 対応 |
 | :--- | :--- | :--- |
-| `s10_range_end.sh` | TC-S10-03, TC-S10-04 | `is_headless` ガード削除・headless でも実行 |
-| `s12_pre_start_history.sh` | TC-S12-01, TC-S12-02 | 同上 |
-| `s13_step_backward_quality.sh` | TC-S13-01, TC-S13-04 | 同上 |
-| `s13_step_backward_quality.sh` | TC-S13-02 | PEND 継続（pane/list API 501 → streams_ready 検証不可）。PEND 理由を正確な文言に更新 |
-| `s16_replay_resilience.sh` | TC-S16-02b | `is_headless` ガード削除 |
-| `s18_endurance.sh` | TC-S18-02-bwd | `is_headless` ガード削除（StepBackward × 500 の耐久テスト） |
-| `x2_buttons.sh` | TC-X2-02, TC-X2-03 | `is_headless` ガード削除 |
+| `s10_range_end.py` | TC-S10-03, TC-S10-04 | IS_HEADLESS ガード削除・headless でも実行 |
+| `s12_pre_start_history.py` | TC-S12-01, TC-S12-02 | 同上 |
+| `s13_step_backward_quality.py` | TC-S13-01, TC-S13-04 | 同上 |
+| `s13_step_backward_quality.py` | TC-S13-02 | PEND 継続（pane/list API 501 → streams_ready 検証不可）。PEND 理由を正確な文言に更新 |
+| `s16_replay_resilience.py` | TC-S16-02b | IS_HEADLESS ガード削除 |
+| `s18_endurance.py` | TC-S18-02-bwd | IS_HEADLESS ガード削除（StepBackward × 500 の耐久テスト） |
+| `x2_buttons.py` | TC-X2-02, TC-X2-03 | IS_HEADLESS ガード削除 |
 
 ### TC-S13-02 継続 PEND の理由
 
@@ -722,6 +728,7 @@ StepBackward 実装の問題ではなく pane API の非対応が原因のため
 
 ### 実装ステータス
 
-- ✅ 6 スクリプトの `is_headless` ガード削除（計 11 TC 解除）
-- ✅ `docs/plan/phase3_headless_e2e.md` 更新
+- ✅ 6 スクリプトの IS_HEADLESS ガード削除（計 11 TC 解除）
+- ✅ Python 移行時に同ガード削除を引き継ぎ済み
+- ✅ **bash → Python 全移行完了**（2026-04-19）
 - ❌ CI 緑確認

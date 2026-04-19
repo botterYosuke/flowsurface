@@ -5,6 +5,7 @@ import subprocess
 import time
 import shutil
 import os
+from pathlib import Path
 from typing import Any
 
 import gymnasium as gym
@@ -65,7 +66,7 @@ class FlowsurfaceEnv(gym.Env):
         self.initial_cash = initial_cash
         self.kline_limit = kline_limit
 
-        self._binary = binary_path or shutil.which("flowsurface") or "flowsurface"
+        self._binary = binary_path or self._find_binary()
         self._proc: subprocess.Popen | None = None
         self._base_url = f"http://127.0.0.1:{api_port}"
 
@@ -182,9 +183,30 @@ class FlowsurfaceEnv(gym.Env):
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
+    @staticmethod
+    def _find_binary() -> str:
+        """Locate the flowsurface binary: env var → PATH → repo target dirs."""
+        env_bin = os.environ.get("FLOWSURFACE_BINARY")
+        if env_bin:
+            return env_bin
+        in_path = shutil.which("flowsurface")
+        if in_path:
+            return in_path
+        repo_root = Path(__file__).parent.parent
+        for candidate in (
+            repo_root / "target" / "debug" / "flowsurface.exe",
+            repo_root / "target" / "release" / "flowsurface.exe",
+            repo_root / "target" / "debug" / "flowsurface",
+            repo_root / "target" / "release" / "flowsurface",
+        ):
+            if candidate.exists():
+                return str(candidate)
+        return "flowsurface"
+
     def _start_process(self) -> None:
         env = os.environ.copy()
-        env["DEV_IS_DEMO"] = "true"
+        if "DEV_IS_DEMO" not in env:
+            env["DEV_IS_DEMO"] = "true"
         env["FLOWSURFACE_API_PORT"] = str(self.api_port)
 
         cmd = [self._binary]

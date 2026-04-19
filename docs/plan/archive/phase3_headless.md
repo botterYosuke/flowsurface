@@ -137,10 +137,14 @@ reward = portfolio["unrealized_pnl"] + portfolio["realized_pnl"]  # 簡易実装
 ### E2E テスト（IS_HEADLESS パターン）
 独立スクリプト（s50）を新設するのではなく、既存テストを `IS_HEADLESS=true/false` で両対応化した。
 
-- ✅ `tests/common_helpers.sh` — `headless_play()` / `ensure_replay_mode()` / `pend_if_headless()` / `order_symbol()` / `setup_single_pane()` headless 対応
-- ✅ 18 本のテストスクリプトを headless/GUI 両対応に改修（詳細は `docs/plan/phase3_headless_e2e.md`）
-- ✅ `.github/workflows/e2e.yml` — S1/S3/S9/S10/S11/S12/S13/S16/S18/S26/S27/S35/S40/S41/S42/S43/X2/X4 headless CI ステップ追加（18 本）
-- ✅ `.github/workflows/e2e.yml` — S5/S6/S34 を GUI test-gui matrix に追加（2026-04-19）
+> **[2026-04-19] bash → Python 全移行完了**  
+> `tests/common_helpers.sh` の役割は `tests/helpers.py` に引き継がれた。  
+> 全 E2E スクリプトが `tests/*.py`（`uv run` 実行）に移行済み。  
+> CI の全ジョブで `setup-uv` + `uv run tests/<script>.py` に変更済み。
+
+- ✅ `tests/helpers.py` — `headless_play()` / `setup_single_pane()` / `backup_state()` / `restore_state()` 等 Python 版ヘルパー（`common_helpers.sh` 相当）
+- ✅ 全テストスクリプト（50 本以上）を Python に移行済み（詳細は `docs/plan/phase3_headless_e2e.md`、`docs/plan/archive/e2e_sh_to_py_migration.md`）
+- ✅ `.github/workflows/e2e.yml` — test-headless: 30 本 / test-gui: 24 本 / test-gui-tachibana-session: 11 本（全 `.py`・`uv run` 対応）
 
 ---
 
