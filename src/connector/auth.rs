@@ -93,10 +93,9 @@ pub async fn try_restore_session() -> Option<TachibanaSession> {
             // debug build（E2E CI）のみ: keyring validation 失敗後に DEV_USER_ID/DEV_PASSWORD で自動再ログイン。
             // release build では除外されるため本番環境で env vars が誤設定されても自動ログインは発生しない。
             #[cfg(debug_assertions)]
-            if let (Ok(user_id), Ok(password)) = (
-                std::env::var("DEV_USER_ID"),
-                std::env::var("DEV_PASSWORD"),
-            ) {
+            if let (Ok(user_id), Ok(password)) =
+                (std::env::var("DEV_USER_ID"), std::env::var("DEV_PASSWORD"))
+            {
                 let is_demo = std::env::var("DEV_IS_DEMO")
                     .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
                     .unwrap_or(false);
@@ -143,6 +142,14 @@ fn tachibana_error_to_message(err: TachibanaError) -> String {
     }
 }
 
+/// テスト専用: SESSION グローバルと keyring への並列アクセスを直列化するロック。
+/// auth / fetcher テストが同一バイナリで並列実行される際の競合を防ぐ。
+#[cfg(test)]
+pub(crate) fn session_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 // ── テスト ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -165,6 +172,7 @@ mod tests {
 
     #[test]
     fn get_session_returns_none_when_no_session_stored() {
+        let _guard = super::session_test_lock();
         clear_session();
         assert!(
             get_session().is_none(),
@@ -174,6 +182,7 @@ mod tests {
 
     #[test]
     fn store_session_makes_get_session_return_stored_value() {
+        let _guard = super::session_test_lock();
         clear_session();
         let session = TachibanaSession {
             url_request: "https://req.test/".to_string(),
@@ -192,6 +201,7 @@ mod tests {
 
     #[test]
     fn clear_session_removes_stored_session() {
+        let _guard = super::session_test_lock();
         let session = TachibanaSession {
             url_request: "https://req.test/".to_string(),
             url_master: "https://master.test/".to_string(),
@@ -208,6 +218,7 @@ mod tests {
 
     #[test]
     fn persist_session_saves_to_keyring() {
+        let _guard = super::session_test_lock();
         let session = TachibanaSession {
             url_request: "https://persist.test/request/".to_string(),
             url_master: "https://persist.test/master/".to_string(),

@@ -535,6 +535,7 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_tachibana_klines_returns_error_without_session() {
+        let _guard = super::super::auth::session_test_lock();
         super::super::auth::clear_session();
         let result = fetch_tachibana_daily_klines("6501", None).await;
         let err = result.expect_err("セッション未設定時はエラーが返るべき");
@@ -569,6 +570,7 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_tachibana_klines_converts_daily_history_to_klines() {
+        let _guard = super::super::auth::session_test_lock();
         let mut server = mockito::Server::new_async().await;
         let _mock = server
             .mock("POST", mockito::Matcher::Any)
@@ -599,6 +601,7 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_tachibana_klines_filters_by_range() {
+        let _guard = super::super::auth::session_test_lock();
         let mut server = mockito::Server::new_async().await;
         let _mock = server
             .mock("POST", mockito::Matcher::Any)
@@ -629,6 +632,7 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_tachibana_klines_returns_all_when_range_is_none() {
+        let _guard = super::super::auth::session_test_lock();
         let mut server = mockito::Server::new_async().await;
         let _mock = server
             .mock("POST", mockito::Matcher::Any)
