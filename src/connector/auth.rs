@@ -90,24 +90,28 @@ pub async fn try_restore_session() -> Option<TachibanaSession> {
         Err(e) => {
             log::warn!("Tachibana session restore failed: {e}");
             data::config::tachibana::delete_session();
-            // CI / 開発環境: keyring validation 失敗後に DEV_USER_ID/DEV_PASSWORD で自動再ログイン。
-            // 本番環境では env vars が未設定のため None を返してフォールスルーする。
-            let user_id = std::env::var("DEV_USER_ID").ok()?;
-            let password = std::env::var("DEV_PASSWORD").ok()?;
-            let is_demo = std::env::var("DEV_IS_DEMO")
-                .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
-                .unwrap_or(false);
-            log::info!("Falling back to DEV_USER_ID/DEV_PASSWORD re-login (is_demo={is_demo})");
-            match perform_login(user_id, password, is_demo).await {
-                Ok(session) => {
-                    persist_session(&session);
-                    Some(session)
-                }
-                Err(login_err) => {
-                    log::warn!("Tachibana re-login also failed: {login_err}");
-                    None
+            // debug build（E2E CI）のみ: keyring validation 失敗後に DEV_USER_ID/DEV_PASSWORD で自動再ログイン。
+            // release build では除外されるため本番環境で env vars が誤設定されても自動ログインは発生しない。
+            #[cfg(debug_assertions)]
+            if let (Ok(user_id), Ok(password)) = (
+                std::env::var("DEV_USER_ID"),
+                std::env::var("DEV_PASSWORD"),
+            ) {
+                let is_demo = std::env::var("DEV_IS_DEMO")
+                    .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+                    .unwrap_or(false);
+                log::info!("Falling back to DEV_USER_ID/DEV_PASSWORD re-login (is_demo={is_demo})");
+                match perform_login(user_id, password, is_demo).await {
+                    Ok(session) => {
+                        persist_session(&session);
+                        return Some(session);
+                    }
+                    Err(login_err) => {
+                        log::warn!("Tachibana re-login also failed: {login_err}");
+                    }
                 }
             }
+            None
         }
     }
 }

@@ -151,6 +151,7 @@ CLOSED=$(jqn "$PORTFOLIO" "d.closed_positions.length")
 
 # VirtualOrderFilled task が iced メッセージループで処理され realized_pnl に反映されるまで待機
 # (最大 5s @ 200ms ポーリング — sleep 固定値では CI 負荷次第でも失敗するため同期バリアで置換)
+# 初回は TC-I で取得済みの $PORTFOLIO を再利用し、未反映なら sleep → ループ末尾で fresh fetch。
 for _poll in $(seq 1 25); do
   REALIZED=$(jqn "$PORTFOLIO" "d.realized_pnl")
   node -e "process.exit(parseFloat('$REALIZED') !== 0 ? 0 : 1)" 2>/dev/null && break
