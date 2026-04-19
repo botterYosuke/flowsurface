@@ -71,8 +71,17 @@ jobs:
           - name: S27 CycleSpeed no side-effects
             script: s27_cyclespeed_reset.sh
             dev_is_demo: "true"
+          - name: S34 Virtual order basic
+            script: s34_virtual_order_basic.sh
+            dev_is_demo: "true"
           - name: S35 Virtual portfolio
             script: s35_virtual_portfolio.sh
+            dev_is_demo: "true"
+          - name: S5 Tachibana mixed
+            script: s5_tachibana_mixed.sh
+            dev_is_demo: "true"
+          - name: S6 Mixed timeframes
+            script: s6_mixed_timeframes.sh
             dev_is_demo: "true"
           # Sidebar API を使うため GUI のみ対応（headless では 501）
           - name: S24 Sidebar select ticker
