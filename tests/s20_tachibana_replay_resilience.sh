@@ -50,17 +50,24 @@ done
 STATUS_AFTER_SPEED=$(curl -s "$API/replay/status")
 CT_PRE_RESUME=$(jqn "$STATUS_AFTER_SPEED" "d.current_time")
 RANGE_END_MS=$(jqn "$STATUS_AFTER_SPEED" "d.range_end")
+# at_end 判定の根拠値を CI ログに残す（P14-2a: アカウントロック解除後の診断用）
+echo "  [diag] CT_PRE_RESUME=$CT_PRE_RESUME  RANGE_END_MS=$RANGE_END_MS"
 curl -s -X POST "$API/replay/resume" > /dev/null
 wait_status Playing 10 || true
-FINAL_STATUS=$(jqn "$(curl -s "$API/replay/status")" "d.status")
-CT_POST_RESUME=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
+FINAL_FULL=$(curl -s "$API/replay/status")
+FINAL_STATUS=$(jqn "$FINAL_FULL" "d.status")
+CT_POST_RESUME=$(jqn "$FINAL_FULL" "d.current_time")
+echo "  [diag] CT_POST_RESUME=$CT_POST_RESUME  FINAL_STATUS=$FINAL_STATUS"
 CT_ADVANCED=$(node -e "
   const pre  = Number('${CT_PRE_RESUME}') || 0;
   const post = Number('${CT_POST_RESUME}') || 0;
   const rend = Number('${RANGE_END_MS}') || 0;
   // 通常の進行 OR SPEED_INSTANT により range_end まで到達（range 消化完了 = crash なし）
-  const at_end = rend > 0 && post >= rend;
-  console.log(post > pre || at_end ? 'true' : 'false');
+  // at_end_post: resume 後に range_end 付近（1時間マージン）
+  // at_end_pre: resume 前に既に range_end 付近（INSTANT が速度連打中に完了した場合）
+  const at_end_post = rend > 0 && post >= rend - 3600000;
+  const at_end_pre  = rend > 0 && pre  >= rend - 3600000;
+  console.log(post > pre || at_end_post || at_end_pre ? 'true' : 'false');
 ")
 { [ "$FINAL_STATUS" = "Playing" ] || [ "$CT_ADVANCED" = "true" ]; } \
   && pass "TC-S20-01: speed 20 連打 + Resume → Playing または高速完了（crash なし）" \

@@ -99,16 +99,6 @@ jobs:
           - name: S39 Buying power portfolio
             script: s39_buying_power_portfolio.sh
             dev_is_demo: "true"
-          # Tachibana 実ログイン（DEV_USER_ID / DEV_PASSWORD 使用）
-          - name: S40 Virtual order fill cycle
-            script: s40_virtual_order_fill_cycle.sh
-            dev_is_demo: ""
-          - name: S41 Limit order round trip
-            script: s41_limit_order_round_trip.sh
-            dev_is_demo: ""
-          - name: S42 Naked short cycle
-            script: s42_naked_short_cycle.sh
-            dev_is_demo: ""
           - name: S30 Mixed sample loading
             script: s30_mixed_sample_loading.sh
             dev_is_demo: ""
@@ -260,10 +250,11 @@ jobs:
           name: log-headless-${{ matrix.script }}
           path: ${{ runner.temp }}/e2e_headless_debug.log
 
-  # ── S22 Tachibana Endurance（専用・長時間）────────────────────────────────────
   # ── Tachibana セッション直列（デモ・実チャンネル共通）────────────────────────
-  # S44/S45/S49/S21/S22 は同じ DEV_USER_ID で Tachibana 認証を行う。
+  # 同一 DEV_USER_ID で Tachibana 認証を行うジョブをすべて集約。
   # Tachibana は同一アカウントの同時セッションを無効化するため max-parallel: 1 で直列実行する。
+  # S40/S41/S42 は実チャンネル認証（DEV_IS_DEMO=""）のため test-gui 並列実行から除外し
+  # ここで直列化することでブローカー側アカウントロック（sResultCode=10033/10088）を防ぐ。
   # S22 は 15〜30 分かかるため timeout-minutes を 45 に設定する。
   test-gui-tachibana-session:
     name: "GUI Tachibana Session: ${{ matrix.name }}"
@@ -301,6 +292,16 @@ jobs:
             dev_is_demo: "true"
           - name: S32 Toyota candlestick add
             script: s32_toyota_candlestick_add.sh
+            dev_is_demo: ""
+          # 実チャンネル認証（DEV_IS_DEMO=""）— test-gui 並列実行から移動して直列化
+          - name: S40 Virtual order fill cycle
+            script: s40_virtual_order_fill_cycle.sh
+            dev_is_demo: ""
+          - name: S41 Limit order round trip
+            script: s41_limit_order_round_trip.sh
+            dev_is_demo: ""
+          - name: S42 Naked short cycle
+            script: s42_naked_short_cycle.sh
             dev_is_demo: ""
 
     steps:

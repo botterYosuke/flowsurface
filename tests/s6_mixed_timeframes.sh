@@ -14,6 +14,13 @@
 #   Live モード起動 → 手動 toggle/play
 source "$(dirname "$0")/common_helpers.sh"
 
+# CI US IP から Binance が到達不能の場合は PEND 扱いでスキップ（HTTP 451/403）
+BINANCE_PROBE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "https://fapi.binance.com/fapi/v1/ping" 2>/dev/null || echo "000")
+if [ "$BINANCE_PROBE" != "200" ]; then
+  echo "  PEND: Binance unreachable (HTTP $BINANCE_PROBE) — S6 は Binance IP ブロック環境では実行不可"
+  exit 0
+fi
+
 echo "=== S6: 異なる時間軸混在 ==="
 backup_state
 
