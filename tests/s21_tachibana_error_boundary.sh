@@ -67,7 +67,7 @@ HEREDOC
 
 # ── TC-S21-01〜03: 不正 pane_id に対する各エンドポイント ────────────────
 echo "  [TC-S21-01/03] 不正 pane_id テスト..."
-tachibana_replay_setup "$(utc_offset -96)" "$(utc_offset -24)"
+tachibana_replay_setup "$(utc_offset -1440)" "$(utc_offset -24)"
 
 if ! wait_playing 120; then
   fail "TC-S21-precond" "Playing 到達せず"
@@ -178,7 +178,7 @@ stop_app
 
 # ── TC-S21-06: StepForward 連打 50 回 (Paused 状態) ─────────────────────
 echo "  [TC-S21-06] StepForward 連打 50 回..."
-tachibana_replay_setup "$(utc_offset -96)" "$(utc_offset -24)"
+tachibana_replay_setup "$(utc_offset -1440)" "$(utc_offset -24)"
 
 if ! wait_playing 120; then
   fail "TC-S21-06-pre" "Playing 到達せず"
@@ -214,7 +214,7 @@ stop_app
 
 # ── TC-S21-07: split 上限テスト ──────────────────────────────────────────
 echo "  [TC-S21-07] split 上限テスト..."
-tachibana_replay_setup "$(utc_offset -96)" "$(utc_offset -24)"
+tachibana_replay_setup "$(utc_offset -1440)" "$(utc_offset -24)"
 
 if ! wait_playing 120; then
   fail "TC-S21-07-pre" "Playing 到達せず"

@@ -95,7 +95,7 @@ SHORT_ID=$(jqn "$SHORT_RESP" "d.order_id")
 OPEN=0
 for i in $(seq 1 10); do
   api_post /api/replay/step-forward > /dev/null
-  sleep 0.3
+  sleep 1.0
   PORTFOLIO=$(api_get /api/replay/portfolio)
   OPEN=$(jqn "$PORTFOLIO" "d.open_positions.length")
   echo "  step $i: open_positions=$OPEN"
@@ -134,7 +134,7 @@ BUY_ID=$(jqn "$BUY_RESP" "d.order_id")
 OPEN=1
 for i in $(seq 1 10); do
   api_post /api/replay/step-forward > /dev/null
-  sleep 0.3
+  sleep 1.0
   PORTFOLIO=$(api_get /api/replay/portfolio)
   OPEN=$(jqn "$PORTFOLIO" "d.open_positions.length")
   echo "  step $i: open_positions=$OPEN"

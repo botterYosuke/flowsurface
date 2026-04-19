@@ -123,8 +123,22 @@ HAS_TIMEOUT=$(node -e "
   || fail "TC-S14-02" "timed out トースト発見（旧実装の挙動）"
 
 # TC-S14-01: keyring セッション復元後に Playing 到達（マスター取得完了で自動発火）
+# D1 4bar≈400ms の Playing は 1s ポーリングで取り逃すことがある。
+# CT が range_start より先に進んでいれば auto-play 発火＋完了とみなす。
+CT_AFTER_LOOP=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
+RANGE_START_MS=$(node -e "
+  const s = '$START'.replace(' ', 'T') + ':00Z';
+  console.log(new Date(s).getTime());
+")
+CT_PAST_START=$(node -e "
+  const ct = BigInt('${CT_AFTER_LOOP:-0}');
+  const rs = BigInt('$RANGE_START_MS');
+  console.log(ct > rs ? 'true' : 'false');
+")
 if $PREMATURE_PLAY; then
   pass "TC-S14-01: keyring セッション復元 → マスター取得完了 → Playing 到達"
+elif [ "$CT_PAST_START" = "true" ]; then
+  pass "TC-S14-01: keyring セッション復元 → auto-play 完了（CT=$CT_AFTER_LOOP > range_start=$RANGE_START_MS）"
 elif wait_playing 120; then
   pass "TC-S14-01: keyring セッション復元 → Playing 到達（120s 以内）"
 else

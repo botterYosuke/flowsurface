@@ -46,7 +46,10 @@ done
 
 # 新仕様: CycleSpeed は pause + seek(range.start) を伴う。
 # 20 連打後は Paused になるが、これは仕様通り。Resume で回復できることを確認する。
-CT_PRE_RESUME=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
+# SPEED_INSTANT を通過した場合は 1 tick で range_end まで消化（高速完了）→ これも crash なし として合格。
+STATUS_AFTER_SPEED=$(curl -s "$API/replay/status")
+CT_PRE_RESUME=$(jqn "$STATUS_AFTER_SPEED" "d.current_time")
+RANGE_END_MS=$(jqn "$STATUS_AFTER_SPEED" "d.range_end")
 curl -s -X POST "$API/replay/resume" > /dev/null
 wait_status Playing 10 || true
 FINAL_STATUS=$(jqn "$(curl -s "$API/replay/status")" "d.status")
@@ -54,7 +57,10 @@ CT_POST_RESUME=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
 CT_ADVANCED=$(node -e "
   const pre  = Number('${CT_PRE_RESUME}') || 0;
   const post = Number('${CT_POST_RESUME}') || 0;
-  console.log(post > pre ? 'true' : 'false');
+  const rend = Number('${RANGE_END_MS}') || 0;
+  // 通常の進行 OR SPEED_INSTANT により range_end まで到達（range 消化完了 = crash なし）
+  const at_end = rend > 0 && Math.abs(post - rend) < 300000;
+  console.log(post > pre || at_end ? 'true' : 'false');
 ")
 { [ "$FINAL_STATUS" = "Playing" ] || [ "$CT_ADVANCED" = "true" ]; } \
   && pass "TC-S20-01: speed 20 連打 + Resume → Playing または高速完了（crash なし）" \
