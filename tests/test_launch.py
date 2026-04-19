@@ -7,7 +7,7 @@ import time
 import requests
 
 BINARY = os.path.join(
-    os.path.dirname(__file__), "..", "target", "release", "flowsurface.exe"
+    os.path.dirname(__file__), "target", "release", "flowsurface.exe"
 )
 API_BASE = "http://127.0.0.1:9876"
 STARTUP_TIMEOUT = 30

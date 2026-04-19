@@ -12,7 +12,7 @@ export FLOWSURFACE_EXE="$EXE"
 
 # 実行対象スクリプト（順番通り、Tachibana 除外）
 SCRIPTS=(
-  s1_basic_lifecycle.sh
+  s1_basic_lifecycle.py
   s2_persistence.sh
   s3_autoplay.sh
   s4_multi_pane_binance.sh
@@ -80,7 +80,11 @@ for script in "${SCRIPTS[@]}"; do
   sleep 1
 
   set +e
-  bash "$path" 2>&1 | tee -a "$MASTER_LOG"
+  if [[ "$script" == *.py ]]; then
+    FLOWSURFACE_BINARY="$(cygpath -w "$EXE")" uv run "$path" 2>&1 | tee -a "$MASTER_LOG"
+  else
+    bash "$path" 2>&1 | tee -a "$MASTER_LOG"
+  fi
   exit_code=${PIPESTATUS[0]}
   set -e
 
