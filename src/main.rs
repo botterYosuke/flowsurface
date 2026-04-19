@@ -331,316 +331,32 @@ impl Flowsurface {
 
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::Login(msg) => {
-                match msg {
-                    login::Message::LoginSubmit => {
-                        // ログインエラーをクリアして非同期ログインを開始
-                        self.login_screen.set_error(None);
-                        let user_id = self.login_screen.user_id.clone();
-                        let password = self.login_screen.password.clone();
-                        let is_demo = self.login_screen.is_demo;
-
-                        return Task::perform(
-                            connector::auth::perform_login(user_id, password, is_demo),
-                            Message::LoginCompleted,
-                        );
-                    }
-                    other => self.login_screen.update(other),
-                }
-                return Task::none();
-            }
-            Message::LoginCompleted(result) => {
-                match result {
-                    Ok(session) => {
-                        connector::auth::store_session(session.clone());
-                        connector::auth::persist_session(&session);
-                        let dashboard_task = self.transition_to_dashboard();
-                        let master_task = Self::start_master_download(session);
-                        let disk_cache_task = Self::make_disk_cache_task();
-                        return Task::batch([dashboard_task, disk_cache_task, master_task]);
-                    }
-                    Err(error_msg) => {
-                        log::warn!("Login failed: {error_msg}");
-                        self.login_screen.set_error(Some(error_msg));
-                    }
-                }
-                return Task::none();
-            }
+            Message::Login(msg) => return self.handle_login(msg),
+            Message::LoginCompleted(result) => return self.handle_login_completed(result),
             Message::SessionRestoreResult(result) => {
-                if let Some(session) = result {
-                    // 再ログイン成功 → メイン画面を直接表示
-                    connector::auth::store_session(session.clone());
-                    let dashboard_task = self.transition_to_dashboard();
-                    let master_task = Self::start_master_download(session);
-                    // ディスクキャッシュが存在する場合、ダウンロード完了前に即座に metadata を供給する
-                    let disk_cache_task = Self::make_disk_cache_task();
-                    return Task::batch([dashboard_task, disk_cache_task, master_task]);
-                }
-                // 再ログイン失敗 → ログイン画面を表示（e2e-mock ではスキップ）
-                let main_window_id = self.main_window.id;
-                if self.replay.is_auto_play_pending()
-                    && self
-                        .active_dashboard()
-                        .has_tachibana_stream_pane(main_window_id)
-                {
-                    self.replay.on_session_unavailable();
-                    log::info!(
-                        "[auto-play] session unavailable — auto-play deferred (Tachibana login required)"
-                    );
-                    self.notifications.push(Toast::info(
-                        "Replay auto-play was deferred: please log in to resume",
-                    ));
-                }
-                let (login_window_id, open_login_window) = window::open(window::Settings {
-                    size: iced::Size::new(900.0, 560.0),
-                    position: window::Position::Centered,
-                    resizable: false,
-                    exit_on_close_request: true,
-                    ..Default::default()
-                });
-                self.login_window = Some(login_window_id);
-                #[cfg(debug_assertions)]
-                {
-                    // DEV AUTO-LOGIN: DEV_USER_ID が設定されている場合のみ自動送信
-                    if !self.login_screen.user_id.is_empty() {
-                        return Task::batch([
-                            open_login_window.discard(),
-                            Task::done(Message::Login(login::Message::LoginSubmit)),
-                        ]);
-                    }
-                }
-                #[cfg(not(debug_assertions))]
-                return open_login_window.discard();
+                return self.handle_session_restore_result(result);
             }
             Message::BuyingPowerApiResult { reply, result } => {
-                let body = match result {
-                    Ok((cash, margin)) => serde_json::json!({
-                        "cash_buying_power": cash.cash_buying_power,
-                        "nisa_growth_buying_power": cash.nisa_growth_buying_power,
-                        "shortage_flag": cash.shortage_flag,
-                        "margin_new_order_power": margin.margin_new_order_power,
-                        "maintenance_margin_rate": margin.maintenance_margin_rate,
-                        "margin_call_flag": margin.margin_call_flag,
-                    })
-                    .to_string(),
-                    Err(e) => serde_json::json!({ "error": e }).to_string(),
-                };
-                reply.send(body);
+                self.handle_api_buying_power(reply, result);
             }
             Message::TachibanaOrderApiResult { reply, result } => {
-                let body = match result {
-                    Ok(resp) => serde_json::json!({
-                        "order_number": resp.order_number,
-                        "eig_day": resp.eig_day,
-                        "delivery_amount": resp.delivery_amount,
-                        "commission": resp.commission,
-                        "consumption_tax": resp.consumption_tax,
-                        "order_datetime": resp.order_datetime,
-                        "warning_code": resp.warning_code,
-                        "warning_text": resp.warning_text,
-                    })
-                    .to_string(),
-                    Err(e) => serde_json::json!({ "error": e }).to_string(),
-                };
-                reply.send(body);
+                self.handle_api_tachibana_order(reply, result);
             }
             Message::FetchOrdersApiResult { reply, result } => {
-                let body = match result {
-                    Ok(orders) => serde_json::to_string(&serde_json::json!({ "orders": orders
-                        .iter()
-                        .map(|o| serde_json::json!({
-                            "order_num": o.order_num,
-                            "issue_code": o.issue_code,
-                            "order_qty": o.order_qty,
-                            "current_qty": o.current_qty,
-                            "order_price": o.order_price,
-                            "order_datetime": o.order_datetime,
-                            "status_text": o.status_text,
-                            "executed_qty": o.executed_qty,
-                            "executed_price": o.executed_price,
-                            "eig_day": o.eig_day,
-                        }))
-                        .collect::<Vec<_>>()
-                    }))
-                    .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string()),
-                    Err(e) => serde_json::json!({ "error": e }).to_string(),
-                };
-                reply.send(body);
+                self.handle_api_fetch_orders(reply, result);
             }
             Message::FetchOrderDetailApiResult { reply, result } => {
-                let body = match result {
-                    Ok(executions) => {
-                        serde_json::to_string(&serde_json::json!({ "executions": executions
-                            .iter()
-                            .map(|e| serde_json::json!({
-                                "exec_qty": e.exec_qty,
-                                "exec_price": e.exec_price,
-                                "exec_datetime": e.exec_datetime,
-                            }))
-                            .collect::<Vec<_>>()
-                        }))
-                        .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string())
-                    }
-                    Err(e) => serde_json::json!({ "error": e }).to_string(),
-                };
-                reply.send(body);
+                self.handle_api_fetch_order_detail(reply, result);
             }
             Message::ModifyOrderApiResult { reply, result } => {
-                let body = match result {
-                    Ok(resp) => serde_json::json!({
-                        "order_number": resp.order_number,
-                        "eig_day": resp.eig_day,
-                        "order_datetime": resp.order_datetime,
-                    })
-                    .to_string(),
-                    Err(e) => serde_json::json!({ "error": e }).to_string(),
-                };
-                reply.send(body);
+                self.handle_api_modify_order(reply, result);
             }
             Message::FetchHoldingsApiResult { reply, result } => {
-                let body = match result {
-                    Ok(qty) => serde_json::json!({ "holdings_qty": qty }).to_string(),
-                    Err(e) => serde_json::json!({ "error": e }).to_string(),
-                };
-                reply.send(body);
+                self.handle_api_fetch_holdings(reply, result);
             }
-            Message::MarketWsEvent(event) => {
-                let main_window_id = self.main_window.id;
-                let dashboard = self.active_dashboard_mut();
-
-                match event {
-                    exchange::Event::Connected(exchange) => {
-                        log::info!("a stream connected to {exchange} WS");
-                    }
-                    exchange::Event::Disconnected(exchange, reason) => {
-                        log::info!("a stream disconnected from {exchange} WS: {reason:?}");
-                    }
-                    exchange::Event::DepthReceived(stream, depth_update_t, depth) => {
-                        let task = dashboard
-                            .ingest_depth(&stream, depth_update_t, &depth, main_window_id)
-                            .map(move |msg| Message::Dashboard {
-                                layout_id: None,
-                                event: msg,
-                            });
-
-                        return task;
-                    }
-                    exchange::Event::TradesReceived(stream, update_t, buffer) => {
-                        let task = dashboard
-                            .ingest_trades(&stream, &buffer, update_t, main_window_id)
-                            .map(move |msg| Message::Dashboard {
-                                layout_id: None,
-                                event: msg,
-                            });
-
-                        if let Some(msg) = self.audio_stream.try_play_sound(&stream, &buffer)
-                            && !self.is_headless
-                        {
-                            self.notifications.push(Toast::error(msg));
-                        }
-
-                        return task;
-                    }
-                    exchange::Event::KlineReceived(stream, kline) => {
-                        return dashboard
-                            .update_latest_klines(&stream, &kline, main_window_id)
-                            .map(move |msg| Message::Dashboard {
-                                layout_id: None,
-                                event: msg,
-                            });
-                    }
-                }
-            }
-            Message::Tick(now) => {
-                let main_window_id = self.main_window.id;
-                let mut all_tasks: Vec<Task<Message>> = Vec::new();
-
-                // リプレイ再生中: tick() でイベントを抽出してチャートに注入する
-                if self.replay.is_replay() {
-                    // layout_manager と replay は別フィールドなので同時可変借用が成立する
-                    let Some(active_id) = self.layout_manager.active_layout_id().map(|l| l.unique)
-                    else {
-                        return Task::none();
-                    };
-                    let Some(dashboard) = self
-                        .layout_manager
-                        .get_mut(active_id)
-                        .map(|l| &mut l.dashboard)
-                    else {
-                        return Task::none();
-                    };
-                    let outcome = self.replay.tick(now, dashboard, main_window_id);
-
-                    // trades を heatmap 等に注入（Task が必要なため呼び出し側で処理）
-                    // 同時に VirtualExchangeEngine の on_tick も呼ぶ
-                    for (stream, trades, update_t) in outcome.trade_events {
-                        // 仮想エンジンへの tick 通知
-                        if let Some(engine) = &mut self.virtual_engine {
-                            let ticker = stream.ticker_info().ticker.to_string();
-                            let clock_ms = self.replay.current_time_ms().unwrap_or(0);
-                            let fills = engine.on_tick(&ticker, &trades, clock_ms);
-                            for fill in fills {
-                                let fill_msg = dashboard::Message::VirtualOrderFilled(fill);
-                                all_tasks.push(Task::done(Message::Dashboard {
-                                    layout_id: None,
-                                    event: fill_msg,
-                                }));
-                            }
-                        }
-
-                        let task = self
-                            .active_dashboard_mut()
-                            .ingest_trades(&stream, &trades, update_t, main_window_id)
-                            .map(move |msg| Message::Dashboard {
-                                layout_id: None,
-                                event: msg,
-                            });
-                        all_tasks.push(task);
-                    }
-
-                    // C-2: リプレイ終端に到達したら Toast で通知する
-                    if outcome.reached_end {
-                        self.notifications.push(Toast::info("Replay reached end"));
-                    }
-                }
-
-                // 通常 tick() でアニメーション更新
-                let tick_task =
-                    self.active_dashboard_mut()
-                        .tick(now, main_window_id)
-                        .map(move |msg| Message::Dashboard {
-                            layout_id: None,
-                            event: msg,
-                        });
-                all_tasks.push(tick_task);
-
-                return Task::batch(all_tasks);
-            }
-            Message::WindowEvent(event) => match event {
-                window::Event::CloseRequested(window) => {
-                    // ログインウィンドウが閉じられたら終了
-                    if Some(window) == self.login_window {
-                        return iced::exit();
-                    }
-
-                    let main_window = self.main_window.id;
-                    let dashboard = self.active_dashboard_mut();
-
-                    if window != main_window {
-                        dashboard.popout.remove(&window);
-                        return window::close(window);
-                    }
-
-                    let mut active_windows = dashboard
-                        .popout
-                        .keys()
-                        .copied()
-                        .collect::<Vec<window::Id>>();
-                    active_windows.push(main_window);
-
-                    return window::collect_window_specs(active_windows, Message::ExitRequested);
-                }
-            },
+            Message::MarketWsEvent(event) => return self.handle_market_ws_event(event),
+            Message::Tick(now) => return self.handle_tick(now),
+            Message::WindowEvent(event) => return self.handle_window_event(event),
             Message::ExitRequested(windows) => {
                 self.save_state_to_disk(&windows);
                 return iced::exit();
@@ -652,236 +368,12 @@ impl Flowsurface {
                 self.save_state_to_disk(&windows);
                 return self.restart();
             }
-            Message::GoBack => {
-                let main_window = self.main_window.id;
-
-                if self.confirm_dialog.is_some() {
-                    self.confirm_dialog = None;
-                } else if self.sidebar.active_menu().is_some() {
-                    self.sidebar.set_menu(None);
-                } else {
-                    let dashboard = self.active_dashboard_mut();
-
-                    if dashboard.go_back(main_window) {
-                        return Task::none();
-                    } else if dashboard.focus.is_some() {
-                        dashboard.focus = None;
-                    } else {
-                        self.sidebar.hide_tickers_table();
-                    }
-                }
-            }
-            Message::ThemeSelected(theme) => {
-                self.theme = data::Theme(theme.clone());
-
-                let main_window = self.main_window.id;
-                self.active_dashboard_mut()
-                    .theme_updated(main_window, &theme);
-            }
+            Message::GoBack => self.handle_go_back(),
+            Message::ThemeSelected(theme) => self.handle_theme_selected(theme),
             Message::Dashboard {
                 layout_id: id,
                 event: msg,
-            } => {
-                let Some(active_layout) = self.layout_manager.active_layout_id() else {
-                    log::error!("No active layout to handle dashboard message");
-                    return Task::none();
-                };
-
-                let main_window = self.main_window;
-                let layout_id = id.unwrap_or(active_layout.unique);
-
-                if let Some(dashboard) = self.layout_manager.mut_dashboard(layout_id) {
-                    let (main_task, event) = dashboard.update(msg, &main_window, &layout_id);
-
-                    let additional_task = match event {
-                        Some(dashboard::Event::DistributeFetchedData {
-                            layout_id,
-                            pane_id,
-                            data,
-                            stream,
-                        }) => dashboard
-                            .distribute_fetched_data(main_window.id, pane_id, data, stream)
-                            .map(move |msg| Message::Dashboard {
-                                layout_id: Some(layout_id),
-                                event: msg,
-                            }),
-                        Some(dashboard::Event::Notification(toast)) => {
-                            self.notifications.push(toast);
-                            Task::none()
-                        }
-                        Some(dashboard::Event::ResolveStreams { pane_id, streams }) => {
-                            let tickers_info = self.sidebar.tickers_info();
-
-                            let has_any_ticker_info =
-                                tickers_info.values().any(|opt| opt.is_some());
-                            log::info!(
-                                "[e2e-live] ResolveStreams pane={pane_id} streams={} has_ticker_info={has_any_ticker_info}",
-                                streams.len()
-                            );
-                            if !has_any_ticker_info {
-                                log::debug!(
-                                    "Deferring persisted stream resolution for pane {pane_id}: ticker metadata not loaded yet"
-                                );
-                                return Task::none();
-                            }
-
-                            let resolved_streams =
-                                streams.into_iter().try_fold(vec![], |mut acc, persist| {
-                                    let resolver = |t: &exchange::Ticker| {
-                                        tickers_info.get(t).and_then(|opt| *opt)
-                                    };
-
-                                    match persist.into_stream_kinds(resolver) {
-                                        Ok(mut resolved) => {
-                                            acc.append(&mut resolved);
-                                            Ok(acc)
-                                        }
-                                        Err(err) => Err(format!(
-                                            "Persisted stream still not resolvable: {err}"
-                                        )),
-                                    }
-                                });
-
-                            match resolved_streams {
-                                Ok(resolved) => {
-                                    log::info!(
-                                        "[e2e-live] Streams resolved: {} streams for pane={pane_id}",
-                                        resolved.len()
-                                    );
-                                    if resolved.is_empty() {
-                                        return Task::none();
-                                    }
-
-                                    // (1) pane を Ready に昇格させる（別スコープで借用解放）
-                                    let resolve_task = {
-                                        let dashboard = self.active_dashboard_mut();
-                                        dashboard
-                                            .resolve_streams(main_window.id, pane_id, resolved)
-                                            .map(move |msg| Message::Dashboard {
-                                                layout_id: None,
-                                                event: msg,
-                                            })
-                                    };
-
-                                    // (2) 全ペイン Ready かつ pending_auto_play が立っているか判定
-                                    if self.replay.is_auto_play_pending()
-                                        && self.replay.is_replay()
-                                        && self
-                                            .active_dashboard()
-                                            .all_panes_have_ready_streams(main_window.id)
-                                    {
-                                        log::info!(
-                                            "[auto-play] All panes ready — firing ReplayMessage::Play"
-                                        );
-                                        self.replay.clear_pending_auto_play();
-                                        let play_task = Task::done(Message::Replay(
-                                            ReplayMessage::User(ReplayUserMessage::Play),
-                                        ));
-                                        return Task::batch([resolve_task, play_task]);
-                                    }
-
-                                    resolve_task
-                                }
-                                Err(err) => {
-                                    // This is typically a transient state (e.g. partial metadata, stale symbol)
-                                    log::info!("[e2e-live] Stream resolution failed: {err}");
-                                    Task::none()
-                                }
-                            }
-                        }
-                        Some(dashboard::Event::RequestPalette) => {
-                            let theme = self.theme.0.clone();
-
-                            let main_window = self.main_window.id;
-                            self.active_dashboard_mut()
-                                .theme_updated(main_window, &theme);
-
-                            Task::none()
-                        }
-                        Some(dashboard::Event::ReloadReplayKlines {
-                            old_stream,
-                            new_stream,
-                        }) => Task::done(Message::Replay(ReplayMessage::System(
-                            ReplaySystemEvent::ReloadKlineStream {
-                                old_stream,
-                                new_stream,
-                            },
-                        ))),
-                        Some(dashboard::Event::SwitchTickersInGroup { ticker_info }) => {
-                            let is_replay = self.replay.is_replay();
-                            let old_kline_streams: Vec<exchange::adapter::StreamKind> = if is_replay
-                            {
-                                self.replay.active_kline_streams()
-                            } else {
-                                vec![]
-                            };
-
-                            let switch_task = self
-                                .active_dashboard_mut()
-                                .switch_tickers_in_group(main_window.id, ticker_info, is_replay)
-                                .map(move |msg| Message::Dashboard {
-                                    layout_id: Some(layout_id),
-                                    event: msg,
-                                });
-
-                            let reload_tasks: Vec<Task<Message>> = old_kline_streams
-                                .into_iter()
-                                .filter_map(|old| {
-                                    old.as_kline_stream().map(|(_, tf)| {
-                                        Task::done(Message::Replay(ReplayMessage::System(
-                                            ReplaySystemEvent::ReloadKlineStream {
-                                                old_stream: Some(old),
-                                                new_stream: exchange::adapter::StreamKind::Kline {
-                                                    ticker_info,
-                                                    timeframe: tf,
-                                                },
-                                            },
-                                        )))
-                                    })
-                                })
-                                .collect();
-
-                            let replay_task = if reload_tasks.is_empty() {
-                                Task::done(Message::Replay(ReplayMessage::System(
-                                    ReplaySystemEvent::SyncReplayBuffers,
-                                )))
-                            } else {
-                                Task::batch(reload_tasks)
-                            };
-
-                            // switch_task と replay_task は並列実行。
-                            // .chain() だと認証待ちタスクが clock.seek をブロックする
-                            // 既知の不具合があるため Task::batch を使う。
-                            // outer の main_task は Task::none() のため chain 不要。
-                            return Task::batch([switch_task, replay_task]);
-                        }
-                        Some(dashboard::Event::SubmitVirtualOrder(vo)) => {
-                            if let Some(engine) = &mut self.virtual_engine {
-                                let _order_id = engine.place_order(vo);
-                            } else {
-                                log::warn!(
-                                    "仮想注文が来たが VirtualExchangeEngine が初期化されていません"
-                                );
-                            }
-                            Task::none()
-                        }
-                        None => Task::none(),
-                    };
-
-                    // mid-replay で stream 構成変更の可能性があれば SyncReplayBuffers を chain する。
-                    // §2.6.5 集約点: refresh_streams() を呼ぶ全入口を dashboard::update 経由で
-                    // カバーする。Replay モードでなければハンドラ側で no-op になる。
-                    return main_task
-                        .map(move |msg| Message::Dashboard {
-                            layout_id: Some(layout_id),
-                            event: msg,
-                        })
-                        .chain(additional_task)
-                        .chain(Task::done(Message::Replay(ReplayMessage::System(
-                            ReplaySystemEvent::SyncReplayBuffers,
-                        ))));
-                }
-            }
+            } => return self.handle_dashboard_message(id, msg),
             Message::RemoveNotification(index) => {
                 self.notifications.remove(index);
             }
@@ -891,111 +383,12 @@ impl Flowsurface {
             Message::ScaleFactorChanged(value) => {
                 self.ui_scale_factor = value;
             }
-            Message::ToggleTradeFetch(checked) => {
-                self.layout_manager
-                    .iter_dashboards_mut()
-                    .for_each(|dashboard| {
-                        dashboard.toggle_trade_fetch(checked, &self.main_window);
-                    });
-
-                if checked {
-                    self.confirm_dialog = None;
-                }
-            }
+            Message::ToggleTradeFetch(checked) => self.handle_toggle_trade_fetch(checked),
             Message::ToggleDialogModal(dialog) => {
                 self.confirm_dialog = dialog;
             }
-            Message::Layouts(message) => {
-                let action = self.layout_manager.update(message);
-
-                match action {
-                    Some(modal::layout_manager::Action::Select(layout)) => {
-                        let active_popout_keys = self
-                            .active_dashboard()
-                            .popout
-                            .keys()
-                            .copied()
-                            .collect::<Vec<_>>();
-
-                        let window_tasks = Task::batch(
-                            active_popout_keys
-                                .iter()
-                                .map(|&popout_id| window::close::<window::Id>(popout_id))
-                                .collect::<Vec<_>>(),
-                        )
-                        .discard();
-
-                        let old_layout_id = self
-                            .layout_manager
-                            .active_layout_id()
-                            .as_ref()
-                            .map(|layout| layout.unique);
-
-                        return window::collect_window_specs(
-                            active_popout_keys,
-                            dashboard::Message::SavePopoutSpecs,
-                        )
-                        .map(move |msg| Message::Dashboard {
-                            layout_id: old_layout_id,
-                            event: msg,
-                        })
-                        .chain(window_tasks)
-                        .chain(self.load_layout(layout, self.main_window.id));
-                    }
-                    Some(modal::layout_manager::Action::Clone(id)) => {
-                        let manager = &mut self.layout_manager;
-
-                        let source_data = manager.get(id).map(|layout| {
-                            (
-                                layout.id.name.clone(),
-                                layout.id.unique,
-                                data::Dashboard::from(&layout.dashboard),
-                            )
-                        });
-
-                        if let Some((name, old_id, ser_dashboard)) = source_data {
-                            let new_uid = uuid::Uuid::new_v4();
-                            let new_layout = LayoutId {
-                                unique: new_uid,
-                                name: manager.ensure_unique_name(&name, new_uid),
-                            };
-
-                            let mut popout_windows = Vec::new();
-
-                            for (pane, window_spec) in &ser_dashboard.popout {
-                                let configuration = configuration(pane.clone());
-                                popout_windows.push((configuration, *window_spec));
-                            }
-
-                            let dashboard = Dashboard::from_config(
-                                configuration(ser_dashboard.pane.clone()),
-                                popout_windows,
-                                old_id,
-                            );
-
-                            manager.insert_layout(new_layout.clone(), dashboard);
-                        }
-                    }
-                    None => {}
-                }
-            }
-            Message::AudioStream(message) => {
-                if let Some(event) = self.audio_stream.update(message)
-                    && !self.is_headless
-                {
-                    match event {
-                        modal::audio::UpdateEvent::RetryFailed(err) => {
-                            self.notifications
-                                .push(Toast::error(format!("Audio still unavailable: {err}")));
-                        }
-                        modal::audio::UpdateEvent::RetrySucceeded => {
-                            self.notifications.push(Toast::info(
-                                "Audio output re-initialized successfully".to_string(),
-                            ));
-                        }
-                    }
-                }
-            }
+            Message::Layouts(message) => return self.handle_layouts(message),
+            Message::AudioStream(message) => self.handle_audio_stream(message),
             Message::DataFolderRequested => {
                 if let Err(err) = data::open_data_folder() {
                     self.notifications
@@ -1008,186 +401,9 @@ impl Flowsurface {
                         .push(Toast::error(format!("Failed to open link: {err}")));
                 }
             }
-            Message::ThemeEditor(msg) => {
-                let action = self.theme_editor.update(msg, &self.theme.clone().into());
-
-                match action {
-                    Some(modal::theme_editor::Action::Exit) => {
-                        self.sidebar.set_menu(Some(sidebar::Menu::Settings));
-                    }
-                    Some(modal::theme_editor::Action::UpdateTheme(theme)) => {
-                        self.theme = data::Theme(theme.clone());
-
-                        let main_window = self.main_window.id;
-                        self.active_dashboard_mut()
-                            .theme_updated(main_window, &theme);
-                    }
-                    None => {}
-                }
-            }
-            Message::NetworkManager(msg) => {
-                let action = self.network.update(msg);
-
-                match action {
-                    Some(network_manager::Action::ApplyProxy) => {
-                        if let Some(proxy) = self.network.proxy_cfg() {
-                            data::config::proxy::save_proxy_auth(&proxy);
-                        }
-
-                        let main_window = self.main_window.id;
-                        let dashboard = self.active_dashboard_mut();
-
-                        let mut active_windows = dashboard
-                            .popout
-                            .keys()
-                            .copied()
-                            .collect::<Vec<window::Id>>();
-                        active_windows.push(main_window);
-
-                        return window::collect_window_specs(
-                            active_windows,
-                            Message::SaveStateRequested,
-                        );
-                    }
-                    Some(network_manager::Action::Exit) => {
-                        self.sidebar.set_menu(Some(sidebar::Menu::Settings));
-                    }
-                    None => {}
-                }
-            }
-            Message::Sidebar(message) => {
-                let is_metadata_update = matches!(
-                    &message,
-                    dashboard::sidebar::Message::TickersTable(
-                        dashboard::tickers_table::Message::UpdateMetadata(..)
-                    )
-                );
-
-                let (task, action) = self.sidebar.update(message);
-
-                match action {
-                    Some(dashboard::sidebar::Action::TickerSelected(ticker_info, content)) => {
-                        let main_window_id = self.main_window.id;
-
-                        if let Some(kind) = content {
-                            // チャート種類付き選択: フォーカスペインを Split して新ペインに表示する。
-                            // 新ペインを追加するだけなので既存ストリームを reload しない。
-                            // SyncReplayBuffers のみ発火してバッファを同期する。
-                            match self.active_dashboard_mut().split_focused_and_init(
-                                main_window_id,
-                                ticker_info,
-                                kind,
-                            ) {
-                                Some(task) => {
-                                    let replay_task = Task::done(Message::Replay(
-                                        ReplayMessage::System(ReplaySystemEvent::SyncReplayBuffers),
-                                    ));
-                                    return Task::batch([
-                                        task.map(move |msg| Message::Dashboard {
-                                            layout_id: None,
-                                            event: msg,
-                                        }),
-                                        replay_task,
-                                    ]);
-                                }
-                                None => {
-                                    // フォーカスなし（ペイン複数）: テーブルを閉じる
-                                    self.sidebar.hide_tickers_table();
-                                    return Task::none();
-                                }
-                            }
-                        }
-
-                        // content = None: 銘柄のみ切り替え（既存フロー）
-                        // mid-replay での銘柄変更: active_streams にある旧 kline stream を取得してから
-                        // switch を実行し、ReloadKlineStream で pause + active_streams 更新 + 再ロードする。
-                        // Live モードでは空 Vec になり、末尾で SyncReplayBuffers にフォールバックする。
-                        let is_replay = self.replay.is_replay();
-                        let old_kline_streams: Vec<exchange::adapter::StreamKind> = if is_replay {
-                            self.replay.active_kline_streams()
-                        } else {
-                            vec![]
-                        };
-
-                        let task = self.active_dashboard_mut().switch_tickers_in_group(
-                            main_window_id,
-                            ticker_info,
-                            is_replay,
-                        );
-
-                        // mid-replay で kline stream がある場合は ReloadKlineStream を即時発火する。
-                        // これにより: clock.pause() → active_streams 更新 → clock.seek(start) →
-                        // reset_charts_for_seek() → 新銘柄の klines 再ロードが行われる。
-                        // kline stream が無い場合（Heatmap only 等）は SyncReplayBuffers にフォールバック。
-                        //
-                        // NOTE: replay_task は dashboard の非同期タスク（kline フェッチ）完了を待たず
-                        // 並列で即時実行する。.chain() だと Tachibana 等の認証待ちタスクが長期ブロック
-                        // した場合に clock.seek(start) が実行されず current_time が変わらない不具合が
-                        // 発生するため Task::batch で並列実行に変更した。
-                        let reload_tasks: Vec<Task<Message>> = old_kline_streams
-                            .into_iter()
-                            .filter_map(|old| {
-                                old.as_kline_stream().map(|(_, tf)| {
-                                    Task::done(Message::Replay(ReplayMessage::System(
-                                        ReplaySystemEvent::ReloadKlineStream {
-                                            old_stream: Some(old),
-                                            new_stream: exchange::adapter::StreamKind::Kline {
-                                                ticker_info,
-                                                timeframe: tf,
-                                            },
-                                        },
-                                    )))
-                                })
-                            })
-                            .collect();
-
-                        let replay_task = if reload_tasks.is_empty() {
-                            Task::done(Message::Replay(ReplayMessage::System(
-                                ReplaySystemEvent::SyncReplayBuffers,
-                            )))
-                        } else {
-                            Task::batch(reload_tasks)
-                        };
-
-                        return Task::batch([
-                            task.map(move |msg| Message::Dashboard {
-                                layout_id: None,
-                                event: msg,
-                            }),
-                            replay_task,
-                        ]);
-                    }
-                    Some(dashboard::sidebar::Action::OpenOrderPane(content_kind)) => {
-                        let main_window_id = self.main_window.id;
-                        return self
-                            .active_dashboard_mut()
-                            .split_focused_and_init_order(main_window_id, content_kind)
-                            .map(move |msg| Message::Dashboard {
-                                layout_id: None,
-                                event: msg,
-                            });
-                    }
-                    Some(dashboard::sidebar::Action::ErrorOccurred(err)) => {
-                        if !self.is_headless {
-                            self.notifications.push(Toast::error(err.to_string()));
-                        }
-                    }
-                    None => {}
-                }
-
-                if is_metadata_update {
-                    let main_window_id = self.main_window.id;
-                    self.active_dashboard_mut()
-                        .refresh_waiting_panes(main_window_id);
-                    if self.replay.is_auto_play_pending() {
-                        log::info!(
-                            "[auto-play] metadata updated — refreshed waiting panes for stream resolution"
-                        );
-                    }
-                }
-
-                return task.map(Message::Sidebar);
-            }
+            Message::ThemeEditor(msg) => self.handle_theme_editor(msg),
+            Message::NetworkManager(msg) => return self.handle_network_manager(msg),
+            Message::Sidebar(message) => return self.handle_sidebar(message),
             Message::ApplyVolumeSizeUnit(pref) => {
                 self.volume_size_unit = pref;
                 self.confirm_dialog = None;
@@ -1198,433 +414,9 @@ impl Flowsurface {
 
                 return window::collect_window_specs(active_windows, Message::RestartRequested);
             }
-            Message::Replay(msg) => {
-                let main_window_id = self.main_window.id;
-                // layout_manager と replay は別フィールドなので同時可変借用が成立する
-                let Some(active_id) = self.layout_manager.active_layout_id().map(|l| l.unique)
-                else {
-                    return Task::none();
-                };
-                let Some(dashboard) = self
-                    .layout_manager
-                    .get_mut(active_id)
-                    .map(|l| &mut l.dashboard)
-                else {
-                    return Task::none();
-                };
-                let was_replay = self.replay.is_replay();
-                let time_before = self.replay.current_time_ms();
-                // StepForward では engine をリセットしない（注文の pending 状態を維持する）
-                let is_step_forward = matches!(
-                    msg,
-                    replay::ReplayMessage::User(replay::ReplayUserMessage::StepForward)
-                );
-                let (task, toast) = self.replay.handle_message(msg, dashboard, main_window_id);
-                let time_after = self.replay.current_time_ms();
-                if let Some(t) = toast {
-                    self.notifications.push(t);
-                }
-                // replay 状態が切り替わった可能性があるため is_replay をシンクする
-                let is_replay_now = self.replay.is_replay();
-                self.active_dashboard_mut().is_replay = is_replay_now;
-                self.active_dashboard_mut()
-                    .sync_virtual_mode(main_window_id);
-
-                // 仮想エンジンのライフサイクル管理:
-                // Live→Replay (Play): エンジンを生成/リセット
-                // Replay→Live: エンジンをリセット
-                // StepBackward / range 変更: 時刻が後退したためリセット
-                // StepForward: リセットしない（注文の pending 状態を維持し on_tick で約定させる）
-                if !was_replay && is_replay_now {
-                    // Replay 開始 → エンジンを初期化
-                    if self.virtual_engine.is_none() {
-                        self.virtual_engine = Some(
-                            replay::virtual_exchange::VirtualExchangeEngine::new(1_000_000.0),
-                        );
-                        log::info!(
-                            "VirtualExchangeEngine を初期化しました（初期 cash: 1,000,000）"
-                        );
-                    } else if let Some(engine) = &mut self.virtual_engine {
-                        engine.reset();
-                        log::info!("VirtualExchangeEngine をリセットしました（再プレイ）");
-                    }
-                } else if was_replay && !is_replay_now {
-                    // Replay 終了 → エンジンを破棄（Live モードでは存在しない）
-                    if self.virtual_engine.is_some() {
-                        self.virtual_engine = None;
-                        log::info!("VirtualExchangeEngine を破棄しました（Live へ切替）");
-                    }
-                } else if is_replay_now
-                    && time_before != time_after
-                    && !is_step_forward
-                    && let Some(engine) = &mut self.virtual_engine
-                {
-                    // StepBackward / range 変更 → 時刻が変化したためリセット
-                    // （StepForward は除外: pending 注文を約定させるため状態を維持する）
-                    engine.reset();
-                    log::info!(
-                        "VirtualExchangeEngine をリセットしました（seek: {:?} → {:?}）",
-                        time_before,
-                        time_after
-                    );
-                }
-
-                // StepForward: kline close から合成 Trade を生成して on_tick() を呼ぶ
-                // これにより Trades EventStore が空でも成行注文が約定する
-                if is_replay_now && is_step_forward {
-                    let mut fill_tasks = Vec::new();
-                    if let Some(engine) = &mut self.virtual_engine {
-                        let clock_ms = self.replay.current_time_ms().unwrap_or(0);
-                        for (stream, trades) in self.replay.synthetic_trades_at_current_time() {
-                            let ticker = stream.ticker_info().ticker.to_string();
-                            let fills = engine.on_tick(&ticker, &trades, clock_ms);
-                            for fill in fills {
-                                let fill_msg =
-                                    crate::screen::dashboard::Message::VirtualOrderFilled(fill);
-                                fill_tasks.push(iced::Task::done(Message::Dashboard {
-                                    layout_id: None,
-                                    event: fill_msg,
-                                }));
-                            }
-                        }
-                    }
-                    if fill_tasks.is_empty() {
-                        return task.map(Message::Replay);
-                    }
-                    fill_tasks.push(task.map(Message::Replay));
-                    return iced::Task::batch(fill_tasks);
-                }
-
-                return task.map(Message::Replay);
-            }
+            Message::Replay(msg) => return self.handle_replay(msg),
             Message::ReplayApi((command, reply_tx)) => {
-                use replay::ReplayCommand;
-                use replay_api::ApiCommand;
-
-                // ヘルパー: self.replay.to_status() を JSON 文字列化
-                let reply_replay_status = |this: &Self| {
-                    serde_json::to_string(&this.replay.to_status()).unwrap_or_else(|_| {
-                        r#"{"error":"failed to serialize replay status"}"#.to_string()
-                    })
-                };
-
-                match command {
-                    ApiCommand::Replay(cmd) => match cmd {
-                        ReplayCommand::GetStatus => {
-                            // headless CI 対応: iced::time::every が発火しない環境でも
-                            // API ポーリング毎に clock を前進させる。
-                            if self.replay.is_playing() {
-                                let now = std::time::Instant::now();
-                                let main_window_id = self.main_window.id;
-                                if let Some(id) =
-                                    self.layout_manager.active_layout_id().map(|l| l.unique)
-                                    && let Some(dash) =
-                                        self.layout_manager.get_mut(id).map(|l| &mut l.dashboard)
-                                {
-                                    let _ = self.replay.tick(now, dash, main_window_id);
-                                }
-                            }
-                            reply_tx.send(reply_replay_status(self));
-                        }
-                        ReplayCommand::Toggle => {
-                            let task = self.update(Message::Replay(ReplayMessage::User(
-                                ReplayUserMessage::ToggleMode,
-                            )));
-                            reply_tx.send(reply_replay_status(self));
-                            return task;
-                        }
-                        ReplayCommand::Play { start, end } => {
-                            let main_window_id = self.main_window.id;
-                            let Some(active_id) =
-                                self.layout_manager.active_layout_id().map(|l| l.unique)
-                            else {
-                                reply_tx.send_status(
-                                    500,
-                                    r#"{"error":"no active layout"}"#.to_string(),
-                                );
-                                return Task::none();
-                            };
-                            let Some(dashboard) = self
-                                .layout_manager
-                                .get_mut(active_id)
-                                .map(|l| &mut l.dashboard)
-                            else {
-                                reply_tx.send_status(
-                                    500,
-                                    r#"{"error":"no active dashboard"}"#.to_string(),
-                                );
-                                return Task::none();
-                            };
-                            let (task, toast) =
-                                self.replay
-                                    .play_with_range(start, end, dashboard, main_window_id);
-                            if let Some(t) = toast {
-                                self.notifications.push(t);
-                            }
-                            reply_tx.send(reply_replay_status(self));
-                            return task.map(Message::Replay);
-                        }
-                        ReplayCommand::Pause => {
-                            let task = self.update(Message::Replay(ReplayMessage::User(
-                                ReplayUserMessage::Pause,
-                            )));
-                            reply_tx.send(reply_replay_status(self));
-                            return task;
-                        }
-                        ReplayCommand::Resume => {
-                            let task = self.update(Message::Replay(ReplayMessage::User(
-                                ReplayUserMessage::Resume,
-                            )));
-                            reply_tx.send(reply_replay_status(self));
-                            return task;
-                        }
-                        ReplayCommand::StepForward => {
-                            let task = self.update(Message::Replay(ReplayMessage::User(
-                                ReplayUserMessage::StepForward,
-                            )));
-                            reply_tx.send(reply_replay_status(self));
-                            return task;
-                        }
-                        ReplayCommand::StepBackward => {
-                            let task = self.update(Message::Replay(ReplayMessage::User(
-                                ReplayUserMessage::StepBackward,
-                            )));
-                            reply_tx.send(reply_replay_status(self));
-                            return task;
-                        }
-                        ReplayCommand::CycleSpeed => {
-                            let task = self.update(Message::Replay(ReplayMessage::User(
-                                ReplayUserMessage::CycleSpeed,
-                            )));
-                            reply_tx.send(reply_replay_status(self));
-                            return task;
-                        }
-                        ReplayCommand::SaveState => {
-                            let empty_windows = HashMap::new();
-                            self.save_state_to_disk(&empty_windows);
-                            reply_tx.send(reply_replay_status(self));
-                        }
-                    },
-                    ApiCommand::Pane(cmd) => {
-                        let (status, body, task) = self.handle_pane_api(cmd);
-                        reply_tx.send_status(status, body);
-                        return task;
-                    }
-                    ApiCommand::Auth(cmd) => {
-                        let body = self.handle_auth_api(cmd);
-                        reply_tx.send(body);
-                    }
-                    ApiCommand::FetchBuyingPower => {
-                        return Task::perform(
-                            connector::order::fetch_buying_power(),
-                            move |result| Message::BuyingPowerApiResult {
-                                reply: reply_tx,
-                                result,
-                            },
-                        );
-                    }
-                    ApiCommand::TachibanaNewOrder { req } => {
-                        return Task::perform(
-                            connector::order::submit_new_order(*req),
-                            move |result| Message::TachibanaOrderApiResult {
-                                reply: reply_tx,
-                                result,
-                            },
-                        );
-                    }
-                    ApiCommand::FetchTachibanaOrders { eig_day } => {
-                        return Task::perform(
-                            connector::order::fetch_orders(eig_day),
-                            move |result| Message::FetchOrdersApiResult {
-                                reply: reply_tx,
-                                result,
-                            },
-                        );
-                    }
-                    ApiCommand::FetchTachibanaOrderDetail { order_num, eig_day } => {
-                        return Task::perform(
-                            connector::order::fetch_order_detail(order_num, eig_day),
-                            move |result| Message::FetchOrderDetailApiResult {
-                                reply: reply_tx,
-                                result,
-                            },
-                        );
-                    }
-                    ApiCommand::TachibanaCorrectOrder { req } => {
-                        return Task::perform(
-                            connector::order::submit_correct_order(*req),
-                            move |result| Message::ModifyOrderApiResult {
-                                reply: reply_tx,
-                                result,
-                            },
-                        );
-                    }
-                    ApiCommand::TachibanaOrderCancel { req } => {
-                        return Task::perform(
-                            connector::order::submit_cancel_order(*req),
-                            move |result| Message::ModifyOrderApiResult {
-                                reply: reply_tx,
-                                result,
-                            },
-                        );
-                    }
-                    ApiCommand::FetchTachibanaHoldings { issue_code } => {
-                        return Task::perform(
-                            connector::order::fetch_holdings(issue_code),
-                            move |result| Message::FetchHoldingsApiResult {
-                                reply: reply_tx,
-                                result,
-                            },
-                        );
-                    }
-                    ApiCommand::VirtualExchange(cmd) => {
-                        use replay::virtual_exchange::{
-                            PositionSide, VirtualOrder, VirtualOrderStatus, VirtualOrderType,
-                        };
-                        use replay_api::VirtualExchangeCommand;
-
-                        match cmd {
-                            VirtualExchangeCommand::PlaceOrder {
-                                ticker,
-                                side,
-                                qty,
-                                order_type,
-                                limit_price,
-                            } => {
-                                if let Some(engine) = &mut self.virtual_engine {
-                                    let order_side = if side == "buy" {
-                                        PositionSide::Long
-                                    } else {
-                                        PositionSide::Short
-                                    };
-                                    let vo_type = if order_type == "limit" {
-                                        let Some(price) = limit_price.filter(|p| *p > 0.0) else {
-                                            reply_tx.send_status(
-                                                400,
-                                                r#"{"error":"limit order requires limit_price > 0"}"#.to_string(),
-                                            );
-                                            return Task::none();
-                                        };
-                                        VirtualOrderType::Limit { price }
-                                    } else {
-                                        VirtualOrderType::Market
-                                    };
-                                    let now_ms = self.replay.current_time_ms().unwrap_or(0);
-                                    let vo = VirtualOrder {
-                                        order_id: uuid::Uuid::new_v4().to_string(),
-                                        ticker,
-                                        side: order_side,
-                                        qty,
-                                        order_type: vo_type,
-                                        placed_time_ms: now_ms,
-                                        status: VirtualOrderStatus::Pending,
-                                    };
-                                    let order_id = engine.place_order(vo);
-                                    reply_tx.send(
-                                        serde_json::json!({
-                                            "order_id": order_id,
-                                            "status": "pending"
-                                        })
-                                        .to_string(),
-                                    );
-                                } else {
-                                    reply_tx.send_status(
-                                        400,
-                                        r#"{"error":"REPLAY mode only. Start replay first."}"#
-                                            .to_string(),
-                                    );
-                                }
-                            }
-                            VirtualExchangeCommand::GetPortfolio => {
-                                if let Some(engine) = &self.virtual_engine {
-                                    let current_price =
-                                        self.replay.last_close_price().unwrap_or(0.0);
-                                    let snap = engine.portfolio_snapshot(current_price);
-                                    reply_tx.send(serde_json::to_string(&snap).unwrap_or_else(
-                                        |_| r#"{"error":"serialization failed"}"#.to_string(),
-                                    ));
-                                } else {
-                                    reply_tx.send_status(
-                                        400,
-                                        r#"{"error":"REPLAY mode only. Start replay first."}"#
-                                            .to_string(),
-                                    );
-                                }
-                            }
-                            VirtualExchangeCommand::GetState => {
-                                if let Some(data) = self.replay.get_api_state(50) {
-                                    let klines: Vec<KlineStateItem> = data
-                                        .klines
-                                        .into_iter()
-                                        .flat_map(|(stream, ks)| {
-                                            ks.into_iter().map(move |k| KlineStateItem {
-                                                stream: stream.clone(),
-                                                time: k.time,
-                                                open: k.open.to_f64(),
-                                                high: k.high.to_f64(),
-                                                low: k.low.to_f64(),
-                                                close: k.close.to_f64(),
-                                                volume: k.volume.total().to_f64(),
-                                            })
-                                        })
-                                        .collect();
-                                    let trades: Vec<TradeStateItem> = data
-                                        .trades
-                                        .into_iter()
-                                        .flat_map(|(stream, ts)| {
-                                            ts.into_iter().map(move |t| TradeStateItem {
-                                                stream: stream.clone(),
-                                                time: t.time,
-                                                price: t.price.to_f64(),
-                                                qty: t.qty.to_f64(),
-                                                is_sell: t.is_sell,
-                                            })
-                                        })
-                                        .collect();
-                                    reply_tx.send(
-                                        serde_json::json!({
-                                            "current_time_ms": data.current_time_ms,
-                                            "klines": klines,
-                                            "trades": trades,
-                                        })
-                                        .to_string(),
-                                    );
-                                } else if self.replay.is_loading() {
-                                    reply_tx.send_status(
-                                        503,
-                                        r#"{"error":"replay is loading, try again shortly"}"#
-                                            .to_string(),
-                                    );
-                                } else {
-                                    reply_tx.send_status(
-                                        400,
-                                        r#"{"error":"REPLAY mode only. Start replay first."}"#
-                                            .to_string(),
-                                    );
-                                }
-                            }
-                            VirtualExchangeCommand::GetOrders => {
-                                if let Some(engine) = &self.virtual_engine {
-                                    let orders = engine.get_orders();
-                                    reply_tx
-                                        .send(serde_json::json!({ "orders": orders }).to_string());
-                                } else {
-                                    reply_tx.send_status(
-                                        400,
-                                        r#"{"error":"REPLAY mode only. Start replay first."}"#
-                                            .to_string(),
-                                    );
-                                }
-                            }
-                        }
-                    }
-                    #[cfg(debug_assertions)]
-                    ApiCommand::Test(cmd) => {
-                        let (body, task) = self.handle_test_api(cmd);
-                        reply_tx.send(body);
-                        return task;
-                    }
-                }
+                return self.handle_replay_api(command, reply_tx);
             }
         }
         Task::none()
@@ -1932,6 +724,1268 @@ impl Flowsurface {
             .get_mut(active_layout.unique)
             .map(|layout| &mut layout.dashboard)
             .expect("No active dashboard")
+    }
+
+    fn handle_go_back(&mut self) {
+        let main_window = self.main_window.id;
+
+        if self.confirm_dialog.is_some() {
+            self.confirm_dialog = None;
+        } else if self.sidebar.active_menu().is_some() {
+            self.sidebar.set_menu(None);
+        } else {
+            let dashboard = self.active_dashboard_mut();
+
+            if !dashboard.go_back(main_window) {
+                if dashboard.focus.is_some() {
+                    dashboard.focus = None;
+                } else {
+                    self.sidebar.hide_tickers_table();
+                }
+            }
+        }
+    }
+
+    fn handle_theme_selected(&mut self, theme: iced_core::Theme) {
+        self.theme = data::Theme(theme.clone());
+        let main_window = self.main_window.id;
+        self.active_dashboard_mut()
+            .theme_updated(main_window, &theme);
+    }
+
+    fn handle_toggle_trade_fetch(&mut self, checked: bool) {
+        self.layout_manager
+            .iter_dashboards_mut()
+            .for_each(|dashboard| {
+                dashboard.toggle_trade_fetch(checked, &self.main_window);
+            });
+
+        if checked {
+            self.confirm_dialog = None;
+        }
+    }
+
+    fn handle_layouts(&mut self, message: modal::layout_manager::Message) -> Task<Message> {
+        let action = self.layout_manager.update(message);
+
+        match action {
+            Some(modal::layout_manager::Action::Select(layout)) => {
+                let active_popout_keys = self
+                    .active_dashboard()
+                    .popout
+                    .keys()
+                    .copied()
+                    .collect::<Vec<_>>();
+
+                let window_tasks = Task::batch(
+                    active_popout_keys
+                        .iter()
+                        .map(|&popout_id| window::close::<window::Id>(popout_id))
+                        .collect::<Vec<_>>(),
+                )
+                .discard();
+
+                let old_layout_id = self
+                    .layout_manager
+                    .active_layout_id()
+                    .as_ref()
+                    .map(|layout| layout.unique);
+
+                return window::collect_window_specs(
+                    active_popout_keys,
+                    dashboard::Message::SavePopoutSpecs,
+                )
+                .map(move |msg| Message::Dashboard {
+                    layout_id: old_layout_id,
+                    event: msg,
+                })
+                .chain(window_tasks)
+                .chain(self.load_layout(layout, self.main_window.id));
+            }
+            Some(modal::layout_manager::Action::Clone(id)) => {
+                let manager = &mut self.layout_manager;
+
+                let source_data = manager.get(id).map(|layout| {
+                    (
+                        layout.id.name.clone(),
+                        layout.id.unique,
+                        data::Dashboard::from(&layout.dashboard),
+                    )
+                });
+
+                if let Some((name, old_id, ser_dashboard)) = source_data {
+                    let new_uid = uuid::Uuid::new_v4();
+                    let new_layout = LayoutId {
+                        unique: new_uid,
+                        name: manager.ensure_unique_name(&name, new_uid),
+                    };
+
+                    let mut popout_windows = Vec::new();
+
+                    for (pane, window_spec) in &ser_dashboard.popout {
+                        let configuration = configuration(pane.clone());
+                        popout_windows.push((configuration, *window_spec));
+                    }
+
+                    let dashboard = Dashboard::from_config(
+                        configuration(ser_dashboard.pane.clone()),
+                        popout_windows,
+                        old_id,
+                    );
+
+                    manager.insert_layout(new_layout.clone(), dashboard);
+                }
+            }
+            None => {}
+        }
+        Task::none()
+    }
+
+    fn handle_audio_stream(&mut self, message: modal::audio::Message) {
+        if let Some(event) = self.audio_stream.update(message)
+            && !self.is_headless
+        {
+            match event {
+                modal::audio::UpdateEvent::RetryFailed(err) => {
+                    self.notifications
+                        .push(Toast::error(format!("Audio still unavailable: {err}")));
+                }
+                modal::audio::UpdateEvent::RetrySucceeded => {
+                    self.notifications.push(Toast::info(
+                        "Audio output re-initialized successfully".to_string(),
+                    ));
+                }
+            }
+        }
+    }
+
+    fn handle_theme_editor(&mut self, msg: modal::theme_editor::Message) {
+        let action = self.theme_editor.update(msg, &self.theme.clone().into());
+
+        match action {
+            Some(modal::theme_editor::Action::Exit) => {
+                self.sidebar.set_menu(Some(sidebar::Menu::Settings));
+            }
+            Some(modal::theme_editor::Action::UpdateTheme(theme)) => {
+                self.theme = data::Theme(theme.clone());
+                let main_window = self.main_window.id;
+                self.active_dashboard_mut()
+                    .theme_updated(main_window, &theme);
+            }
+            None => {}
+        }
+    }
+
+    fn handle_network_manager(&mut self, msg: modal::network_manager::Message) -> Task<Message> {
+        let action = self.network.update(msg);
+
+        match action {
+            Some(network_manager::Action::ApplyProxy) => {
+                if let Some(proxy) = self.network.proxy_cfg() {
+                    data::config::proxy::save_proxy_auth(&proxy);
+                }
+
+                let main_window = self.main_window.id;
+                let dashboard = self.active_dashboard_mut();
+
+                let mut active_windows = dashboard
+                    .popout
+                    .keys()
+                    .copied()
+                    .collect::<Vec<window::Id>>();
+                active_windows.push(main_window);
+
+                return window::collect_window_specs(active_windows, Message::SaveStateRequested);
+            }
+            Some(network_manager::Action::Exit) => {
+                self.sidebar.set_menu(Some(sidebar::Menu::Settings));
+            }
+            None => {}
+        }
+        Task::none()
+    }
+
+    fn handle_dashboard_message(
+        &mut self,
+        id: Option<uuid::Uuid>,
+        msg: dashboard::Message,
+    ) -> Task<Message> {
+        let Some(active_layout) = self.layout_manager.active_layout_id() else {
+            log::error!("No active layout to handle dashboard message");
+            return Task::none();
+        };
+
+        let main_window = self.main_window;
+        let layout_id = id.unwrap_or(active_layout.unique);
+
+        if let Some(dashboard) = self.layout_manager.mut_dashboard(layout_id) {
+            let (main_task, event) = dashboard.update(msg, &main_window, &layout_id);
+
+            let additional_task = match event {
+                Some(dashboard::Event::DistributeFetchedData {
+                    layout_id,
+                    pane_id,
+                    data,
+                    stream,
+                }) => dashboard
+                    .distribute_fetched_data(main_window.id, pane_id, data, stream)
+                    .map(move |msg| Message::Dashboard {
+                        layout_id: Some(layout_id),
+                        event: msg,
+                    }),
+                Some(dashboard::Event::Notification(toast)) => {
+                    self.notifications.push(toast);
+                    Task::none()
+                }
+                Some(dashboard::Event::ResolveStreams { pane_id, streams }) => {
+                    let tickers_info = self.sidebar.tickers_info();
+
+                    let has_any_ticker_info = tickers_info.values().any(|opt| opt.is_some());
+                    log::info!(
+                        "[e2e-live] ResolveStreams pane={pane_id} streams={} has_ticker_info={has_any_ticker_info}",
+                        streams.len()
+                    );
+                    if !has_any_ticker_info {
+                        log::debug!(
+                            "Deferring persisted stream resolution for pane {pane_id}: ticker metadata not loaded yet"
+                        );
+                        return Task::none();
+                    }
+
+                    let resolved_streams =
+                        streams.into_iter().try_fold(vec![], |mut acc, persist| {
+                            let resolver =
+                                |t: &exchange::Ticker| tickers_info.get(t).and_then(|opt| *opt);
+
+                            match persist.into_stream_kinds(resolver) {
+                                Ok(mut resolved) => {
+                                    acc.append(&mut resolved);
+                                    Ok(acc)
+                                }
+                                Err(err) => {
+                                    Err(format!("Persisted stream still not resolvable: {err}"))
+                                }
+                            }
+                        });
+
+                    match resolved_streams {
+                        Ok(resolved) => {
+                            log::info!(
+                                "[e2e-live] Streams resolved: {} streams for pane={pane_id}",
+                                resolved.len()
+                            );
+                            if resolved.is_empty() {
+                                return Task::none();
+                            }
+
+                            // (1) pane を Ready に昇格させる（別スコープで借用解放）
+                            let resolve_task = {
+                                let dashboard = self.active_dashboard_mut();
+                                dashboard
+                                    .resolve_streams(main_window.id, pane_id, resolved)
+                                    .map(move |msg| Message::Dashboard {
+                                        layout_id: None,
+                                        event: msg,
+                                    })
+                            };
+
+                            // (2) 全ペイン Ready かつ pending_auto_play が立っているか判定
+                            if self.replay.is_auto_play_pending()
+                                && self.replay.is_replay()
+                                && self
+                                    .active_dashboard()
+                                    .all_panes_have_ready_streams(main_window.id)
+                            {
+                                log::info!(
+                                    "[auto-play] All panes ready — firing ReplayMessage::Play"
+                                );
+                                self.replay.clear_pending_auto_play();
+                                let play_task = Task::done(Message::Replay(ReplayMessage::User(
+                                    ReplayUserMessage::Play,
+                                )));
+                                return Task::batch([resolve_task, play_task]);
+                            }
+
+                            resolve_task
+                        }
+                        Err(err) => {
+                            // This is typically a transient state (e.g. partial metadata, stale symbol)
+                            log::info!("[e2e-live] Stream resolution failed: {err}");
+                            Task::none()
+                        }
+                    }
+                }
+                Some(dashboard::Event::RequestPalette) => {
+                    let theme = self.theme.0.clone();
+
+                    let main_window = self.main_window.id;
+                    self.active_dashboard_mut()
+                        .theme_updated(main_window, &theme);
+
+                    Task::none()
+                }
+                Some(dashboard::Event::ReloadReplayKlines {
+                    old_stream,
+                    new_stream,
+                }) => Task::done(Message::Replay(ReplayMessage::System(
+                    ReplaySystemEvent::ReloadKlineStream {
+                        old_stream,
+                        new_stream,
+                    },
+                ))),
+                Some(dashboard::Event::SwitchTickersInGroup { ticker_info }) => {
+                    let is_replay = self.replay.is_replay();
+                    let old_kline_streams: Vec<exchange::adapter::StreamKind> = if is_replay {
+                        self.replay.active_kline_streams()
+                    } else {
+                        vec![]
+                    };
+
+                    let switch_task = self
+                        .active_dashboard_mut()
+                        .switch_tickers_in_group(main_window.id, ticker_info, is_replay)
+                        .map(move |msg| Message::Dashboard {
+                            layout_id: Some(layout_id),
+                            event: msg,
+                        });
+
+                    let reload_tasks: Vec<Task<Message>> = old_kline_streams
+                        .into_iter()
+                        .filter_map(|old| {
+                            old.as_kline_stream().map(|(_, tf)| {
+                                Task::done(Message::Replay(ReplayMessage::System(
+                                    ReplaySystemEvent::ReloadKlineStream {
+                                        old_stream: Some(old),
+                                        new_stream: exchange::adapter::StreamKind::Kline {
+                                            ticker_info,
+                                            timeframe: tf,
+                                        },
+                                    },
+                                )))
+                            })
+                        })
+                        .collect();
+
+                    let replay_task = if reload_tasks.is_empty() {
+                        Task::done(Message::Replay(ReplayMessage::System(
+                            ReplaySystemEvent::SyncReplayBuffers,
+                        )))
+                    } else {
+                        Task::batch(reload_tasks)
+                    };
+
+                    // switch_task と replay_task は並列実行。
+                    // .chain() だと認証待ちタスクが clock.seek をブロックする
+                    // 既知の不具合があるため Task::batch を使う。
+                    // outer の main_task は Task::none() のため chain 不要。
+                    return Task::batch([switch_task, replay_task]);
+                }
+                Some(dashboard::Event::SubmitVirtualOrder(vo)) => {
+                    if let Some(engine) = &mut self.virtual_engine {
+                        let _order_id = engine.place_order(vo);
+                    } else {
+                        log::warn!("仮想注文が来たが VirtualExchangeEngine が初期化されていません");
+                    }
+                    Task::none()
+                }
+                None => Task::none(),
+            };
+
+            // mid-replay で stream 構成変更の可能性があれば SyncReplayBuffers を chain する。
+            // §2.6.5 集約点: refresh_streams() を呼ぶ全入口を dashboard::update 経由で
+            // カバーする。Replay モードでなければハンドラ側で no-op になる。
+            return main_task
+                .map(move |msg| Message::Dashboard {
+                    layout_id: Some(layout_id),
+                    event: msg,
+                })
+                .chain(additional_task)
+                .chain(Task::done(Message::Replay(ReplayMessage::System(
+                    ReplaySystemEvent::SyncReplayBuffers,
+                ))));
+        }
+        Task::none()
+    }
+
+    fn handle_sidebar(&mut self, message: dashboard::sidebar::Message) -> Task<Message> {
+        let is_metadata_update = matches!(
+            &message,
+            dashboard::sidebar::Message::TickersTable(
+                dashboard::tickers_table::Message::UpdateMetadata(..)
+            )
+        );
+
+        let (task, action) = self.sidebar.update(message);
+
+        match action {
+            Some(dashboard::sidebar::Action::TickerSelected(ticker_info, content)) => {
+                let main_window_id = self.main_window.id;
+
+                if let Some(kind) = content {
+                    // チャート種類付き選択: フォーカスペインを Split して新ペインに表示する。
+                    // 新ペインを追加するだけなので既存ストリームを reload しない。
+                    // SyncReplayBuffers のみ発火してバッファを同期する。
+                    match self.active_dashboard_mut().split_focused_and_init(
+                        main_window_id,
+                        ticker_info,
+                        kind,
+                    ) {
+                        Some(task) => {
+                            let replay_task = Task::done(Message::Replay(ReplayMessage::System(
+                                ReplaySystemEvent::SyncReplayBuffers,
+                            )));
+                            return Task::batch([
+                                task.map(move |msg| Message::Dashboard {
+                                    layout_id: None,
+                                    event: msg,
+                                }),
+                                replay_task,
+                            ]);
+                        }
+                        None => {
+                            self.sidebar.hide_tickers_table();
+                            return Task::none();
+                        }
+                    }
+                }
+
+                // content = None: 銘柄のみ切り替え（既存フロー）
+                // mid-replay での銘柄変更: active_streams にある旧 kline stream を取得してから
+                // switch を実行し、ReloadKlineStream で pause + active_streams 更新 + 再ロードする。
+                // Live モードでは空 Vec になり、末尾で SyncReplayBuffers にフォールバックする。
+                let is_replay = self.replay.is_replay();
+                let old_kline_streams: Vec<exchange::adapter::StreamKind> = if is_replay {
+                    self.replay.active_kline_streams()
+                } else {
+                    vec![]
+                };
+
+                let task = self.active_dashboard_mut().switch_tickers_in_group(
+                    main_window_id,
+                    ticker_info,
+                    is_replay,
+                );
+
+                // mid-replay で kline stream がある場合は ReloadKlineStream を即時発火する。
+                // これにより: clock.pause() → active_streams 更新 → clock.seek(start) →
+                // reset_charts_for_seek() → 新銘柄の klines 再ロードが行われる。
+                // kline stream が無い場合（Heatmap only 等）は SyncReplayBuffers にフォールバック。
+                //
+                // NOTE: replay_task は dashboard の非同期タスク（kline フェッチ）完了を待たず
+                // 並列で即時実行する。.chain() だと Tachibana 等の認証待ちタスクが長期ブロック
+                // した場合に clock.seek(start) が実行されず current_time が変わらない不具合が
+                // 発生するため Task::batch で並列実行に変更した。
+                let reload_tasks: Vec<Task<Message>> = old_kline_streams
+                    .into_iter()
+                    .filter_map(|old| {
+                        old.as_kline_stream().map(|(_, tf)| {
+                            Task::done(Message::Replay(ReplayMessage::System(
+                                ReplaySystemEvent::ReloadKlineStream {
+                                    old_stream: Some(old),
+                                    new_stream: exchange::adapter::StreamKind::Kline {
+                                        ticker_info,
+                                        timeframe: tf,
+                                    },
+                                },
+                            )))
+                        })
+                    })
+                    .collect();
+
+                let replay_task = if reload_tasks.is_empty() {
+                    Task::done(Message::Replay(ReplayMessage::System(
+                        ReplaySystemEvent::SyncReplayBuffers,
+                    )))
+                } else {
+                    Task::batch(reload_tasks)
+                };
+
+                return Task::batch([
+                    task.map(move |msg| Message::Dashboard {
+                        layout_id: None,
+                        event: msg,
+                    }),
+                    replay_task,
+                ]);
+            }
+            Some(dashboard::sidebar::Action::OpenOrderPane(content_kind)) => {
+                let main_window_id = self.main_window.id;
+                return self
+                    .active_dashboard_mut()
+                    .split_focused_and_init_order(main_window_id, content_kind)
+                    .map(move |msg| Message::Dashboard {
+                        layout_id: None,
+                        event: msg,
+                    });
+            }
+            Some(dashboard::sidebar::Action::ErrorOccurred(err)) => {
+                if !self.is_headless {
+                    self.notifications.push(Toast::error(err.to_string()));
+                }
+            }
+            None => {}
+        }
+
+        if is_metadata_update {
+            let main_window_id = self.main_window.id;
+            self.active_dashboard_mut()
+                .refresh_waiting_panes(main_window_id);
+            if self.replay.is_auto_play_pending() {
+                log::info!(
+                    "[auto-play] metadata updated — refreshed waiting panes for stream resolution"
+                );
+            }
+        }
+
+        task.map(Message::Sidebar)
+    }
+
+    fn handle_replay(&mut self, msg: ReplayMessage) -> Task<Message> {
+        let main_window_id = self.main_window.id;
+        // layout_manager と replay は別フィールドなので同時可変借用が成立する
+        let Some(active_id) = self.layout_manager.active_layout_id().map(|l| l.unique) else {
+            return Task::none();
+        };
+        let Some(dashboard) = self
+            .layout_manager
+            .get_mut(active_id)
+            .map(|l| &mut l.dashboard)
+        else {
+            return Task::none();
+        };
+        let was_replay = self.replay.is_replay();
+        let time_before = self.replay.current_time_ms();
+        // StepForward では engine をリセットしない（注文の pending 状態を維持する）
+        let is_step_forward = matches!(
+            msg,
+            replay::ReplayMessage::User(replay::ReplayUserMessage::StepForward)
+        );
+        let (task, toast) = self.replay.handle_message(msg, dashboard, main_window_id);
+        let time_after = self.replay.current_time_ms();
+        if let Some(t) = toast {
+            self.notifications.push(t);
+        }
+        // replay 状態が切り替わった可能性があるため is_replay をシンクする
+        let is_replay_now = self.replay.is_replay();
+        self.active_dashboard_mut().is_replay = is_replay_now;
+        self.active_dashboard_mut()
+            .sync_virtual_mode(main_window_id);
+
+        // 仮想エンジンのライフサイクル管理:
+        // Live→Replay (Play): エンジンを生成/リセット
+        // Replay→Live: エンジンをリセット
+        // StepBackward / range 変更: 時刻が後退したためリセット
+        // StepForward: リセットしない（注文の pending 状態を維持し on_tick で約定させる）
+        if !was_replay && is_replay_now {
+            if self.virtual_engine.is_none() {
+                self.virtual_engine = Some(replay::virtual_exchange::VirtualExchangeEngine::new(
+                    1_000_000.0,
+                ));
+                log::info!("VirtualExchangeEngine を初期化しました（初期 cash: 1,000,000）");
+            } else if let Some(engine) = &mut self.virtual_engine {
+                engine.reset();
+                log::info!("VirtualExchangeEngine をリセットしました（再プレイ）");
+            }
+        } else if was_replay && !is_replay_now {
+            if self.virtual_engine.is_some() {
+                self.virtual_engine = None;
+                log::info!("VirtualExchangeEngine を破棄しました（Live へ切替）");
+            }
+        } else if is_replay_now
+            && time_before != time_after
+            && !is_step_forward
+            && let Some(engine) = &mut self.virtual_engine
+        {
+            // StepBackward / range 変更 → 時刻が変化したためリセット
+            // （StepForward は除外: pending 注文を約定させるため状態を維持する）
+            engine.reset();
+            log::info!(
+                "VirtualExchangeEngine をリセットしました（seek: {:?} → {:?}）",
+                time_before,
+                time_after
+            );
+        }
+
+        // StepForward: kline close から合成 Trade を生成して on_tick() を呼ぶ
+        // これにより Trades EventStore が空でも成行注文が約定する
+        if is_replay_now && is_step_forward {
+            let mut fill_tasks = Vec::new();
+            if let Some(engine) = &mut self.virtual_engine {
+                let clock_ms = self.replay.current_time_ms().unwrap_or(0);
+                for (stream, trades) in self.replay.synthetic_trades_at_current_time() {
+                    let ticker = stream.ticker_info().ticker.to_string();
+                    let fills = engine.on_tick(&ticker, &trades, clock_ms);
+                    for fill in fills {
+                        let fill_msg = crate::screen::dashboard::Message::VirtualOrderFilled(fill);
+                        fill_tasks.push(iced::Task::done(Message::Dashboard {
+                            layout_id: None,
+                            event: fill_msg,
+                        }));
+                    }
+                }
+            }
+            if fill_tasks.is_empty() {
+                return task.map(Message::Replay);
+            }
+            fill_tasks.push(task.map(Message::Replay));
+            return iced::Task::batch(fill_tasks);
+        }
+
+        task.map(Message::Replay)
+    }
+
+    fn handle_replay_api(
+        &mut self,
+        command: replay_api::ApiCommand,
+        reply_tx: replay_api::ReplySender,
+    ) -> Task<Message> {
+        use replay::ReplayCommand;
+        use replay_api::ApiCommand;
+
+        let reply_replay_status = |this: &Self| {
+            serde_json::to_string(&this.replay.to_status())
+                .unwrap_or_else(|_| r#"{"error":"failed to serialize replay status"}"#.to_string())
+        };
+
+        match command {
+            ApiCommand::Replay(cmd) => match cmd {
+                ReplayCommand::GetStatus => {
+                    // headless CI 対応: iced::time::every が発火しない環境でも
+                    // API ポーリング毎に clock を前進させる。
+                    if self.replay.is_playing() {
+                        let now = std::time::Instant::now();
+                        let main_window_id = self.main_window.id;
+                        if let Some(id) = self.layout_manager.active_layout_id().map(|l| l.unique)
+                            && let Some(dash) =
+                                self.layout_manager.get_mut(id).map(|l| &mut l.dashboard)
+                        {
+                            let _ = self.replay.tick(now, dash, main_window_id);
+                        }
+                    }
+                    reply_tx.send(reply_replay_status(self));
+                }
+                ReplayCommand::Toggle => {
+                    let task =
+                        self.handle_replay(ReplayMessage::User(ReplayUserMessage::ToggleMode));
+                    reply_tx.send(reply_replay_status(self));
+                    return task;
+                }
+                ReplayCommand::Play { start, end } => {
+                    let main_window_id = self.main_window.id;
+                    let Some(active_id) = self.layout_manager.active_layout_id().map(|l| l.unique)
+                    else {
+                        reply_tx.send_status(500, r#"{"error":"no active layout"}"#.to_string());
+                        return Task::none();
+                    };
+                    let Some(dashboard) = self
+                        .layout_manager
+                        .get_mut(active_id)
+                        .map(|l| &mut l.dashboard)
+                    else {
+                        reply_tx.send_status(500, r#"{"error":"no active dashboard"}"#.to_string());
+                        return Task::none();
+                    };
+                    let (task, toast) =
+                        self.replay
+                            .play_with_range(start, end, dashboard, main_window_id);
+                    if let Some(t) = toast {
+                        self.notifications.push(t);
+                    }
+                    reply_tx.send(reply_replay_status(self));
+                    return task.map(Message::Replay);
+                }
+                ReplayCommand::Pause => {
+                    let task = self.handle_replay(ReplayMessage::User(ReplayUserMessage::Pause));
+                    reply_tx.send(reply_replay_status(self));
+                    return task;
+                }
+                ReplayCommand::Resume => {
+                    let task = self.handle_replay(ReplayMessage::User(ReplayUserMessage::Resume));
+                    reply_tx.send(reply_replay_status(self));
+                    return task;
+                }
+                ReplayCommand::StepForward => {
+                    let task =
+                        self.handle_replay(ReplayMessage::User(ReplayUserMessage::StepForward));
+                    reply_tx.send(reply_replay_status(self));
+                    return task;
+                }
+                ReplayCommand::StepBackward => {
+                    let task =
+                        self.handle_replay(ReplayMessage::User(ReplayUserMessage::StepBackward));
+                    reply_tx.send(reply_replay_status(self));
+                    return task;
+                }
+                ReplayCommand::CycleSpeed => {
+                    let task =
+                        self.handle_replay(ReplayMessage::User(ReplayUserMessage::CycleSpeed));
+                    reply_tx.send(reply_replay_status(self));
+                    return task;
+                }
+                ReplayCommand::SaveState => {
+                    let empty_windows = HashMap::new();
+                    self.save_state_to_disk(&empty_windows);
+                    reply_tx.send(reply_replay_status(self));
+                }
+            },
+            ApiCommand::Pane(cmd) => {
+                let (status, body, task) = self.handle_pane_api(cmd);
+                reply_tx.send_status(status, body);
+                return task;
+            }
+            ApiCommand::Auth(cmd) => {
+                let body = self.handle_auth_api(cmd);
+                reply_tx.send(body);
+            }
+            ApiCommand::FetchBuyingPower => {
+                return Task::perform(connector::order::fetch_buying_power(), move |result| {
+                    Message::BuyingPowerApiResult {
+                        reply: reply_tx,
+                        result,
+                    }
+                });
+            }
+            ApiCommand::TachibanaNewOrder { req } => {
+                return Task::perform(connector::order::submit_new_order(*req), move |result| {
+                    Message::TachibanaOrderApiResult {
+                        reply: reply_tx,
+                        result,
+                    }
+                });
+            }
+            ApiCommand::FetchTachibanaOrders { eig_day } => {
+                return Task::perform(connector::order::fetch_orders(eig_day), move |result| {
+                    Message::FetchOrdersApiResult {
+                        reply: reply_tx,
+                        result,
+                    }
+                });
+            }
+            ApiCommand::FetchTachibanaOrderDetail { order_num, eig_day } => {
+                return Task::perform(
+                    connector::order::fetch_order_detail(order_num, eig_day),
+                    move |result| Message::FetchOrderDetailApiResult {
+                        reply: reply_tx,
+                        result,
+                    },
+                );
+            }
+            ApiCommand::TachibanaCorrectOrder { req } => {
+                return Task::perform(
+                    connector::order::submit_correct_order(*req),
+                    move |result| Message::ModifyOrderApiResult {
+                        reply: reply_tx,
+                        result,
+                    },
+                );
+            }
+            ApiCommand::TachibanaOrderCancel { req } => {
+                return Task::perform(connector::order::submit_cancel_order(*req), move |result| {
+                    Message::ModifyOrderApiResult {
+                        reply: reply_tx,
+                        result,
+                    }
+                });
+            }
+            ApiCommand::FetchTachibanaHoldings { issue_code } => {
+                return Task::perform(
+                    connector::order::fetch_holdings(issue_code),
+                    move |result| Message::FetchHoldingsApiResult {
+                        reply: reply_tx,
+                        result,
+                    },
+                );
+            }
+            ApiCommand::VirtualExchange(cmd) => {
+                use replay::virtual_exchange::{
+                    PositionSide, VirtualOrder, VirtualOrderStatus, VirtualOrderType,
+                };
+                use replay_api::VirtualExchangeCommand;
+
+                match cmd {
+                    VirtualExchangeCommand::PlaceOrder {
+                        ticker,
+                        side,
+                        qty,
+                        order_type,
+                        limit_price,
+                    } => {
+                        if let Some(engine) = &mut self.virtual_engine {
+                            let order_side = if side == "buy" {
+                                PositionSide::Long
+                            } else {
+                                PositionSide::Short
+                            };
+                            let vo_type = if order_type == "limit" {
+                                let Some(price) = limit_price.filter(|p| *p > 0.0) else {
+                                    reply_tx.send_status(
+                                        400,
+                                        r#"{"error":"limit order requires limit_price > 0"}"#
+                                            .to_string(),
+                                    );
+                                    return Task::none();
+                                };
+                                VirtualOrderType::Limit { price }
+                            } else {
+                                VirtualOrderType::Market
+                            };
+                            let now_ms = self.replay.current_time_ms().unwrap_or(0);
+                            let vo = VirtualOrder {
+                                order_id: uuid::Uuid::new_v4().to_string(),
+                                ticker,
+                                side: order_side,
+                                qty,
+                                order_type: vo_type,
+                                placed_time_ms: now_ms,
+                                status: VirtualOrderStatus::Pending,
+                            };
+                            let order_id = engine.place_order(vo);
+                            reply_tx.send(
+                                serde_json::json!({
+                                    "order_id": order_id,
+                                    "status": "pending"
+                                })
+                                .to_string(),
+                            );
+                        } else {
+                            reply_tx.send_status(
+                                400,
+                                r#"{"error":"REPLAY mode only. Start replay first."}"#.to_string(),
+                            );
+                        }
+                    }
+                    VirtualExchangeCommand::GetPortfolio => {
+                        if let Some(engine) = &self.virtual_engine {
+                            let current_price = self.replay.last_close_price().unwrap_or(0.0);
+                            let snap = engine.portfolio_snapshot(current_price);
+                            reply_tx.send(serde_json::to_string(&snap).unwrap_or_else(|_| {
+                                r#"{"error":"serialization failed"}"#.to_string()
+                            }));
+                        } else {
+                            reply_tx.send_status(
+                                400,
+                                r#"{"error":"REPLAY mode only. Start replay first."}"#.to_string(),
+                            );
+                        }
+                    }
+                    VirtualExchangeCommand::GetState => {
+                        if let Some(data) = self.replay.get_api_state(50) {
+                            let klines: Vec<KlineStateItem> = data
+                                .klines
+                                .into_iter()
+                                .flat_map(|(stream, ks)| {
+                                    ks.into_iter().map(move |k| KlineStateItem {
+                                        stream: stream.clone(),
+                                        time: k.time,
+                                        open: k.open.to_f64(),
+                                        high: k.high.to_f64(),
+                                        low: k.low.to_f64(),
+                                        close: k.close.to_f64(),
+                                        volume: k.volume.total().to_f64(),
+                                    })
+                                })
+                                .collect();
+                            let trades: Vec<TradeStateItem> = data
+                                .trades
+                                .into_iter()
+                                .flat_map(|(stream, ts)| {
+                                    ts.into_iter().map(move |t| TradeStateItem {
+                                        stream: stream.clone(),
+                                        time: t.time,
+                                        price: t.price.to_f64(),
+                                        qty: t.qty.to_f64(),
+                                        is_sell: t.is_sell,
+                                    })
+                                })
+                                .collect();
+                            reply_tx.send(
+                                serde_json::json!({
+                                    "current_time_ms": data.current_time_ms,
+                                    "klines": klines,
+                                    "trades": trades,
+                                })
+                                .to_string(),
+                            );
+                        } else if self.replay.is_loading() {
+                            reply_tx.send_status(
+                                503,
+                                r#"{"error":"replay is loading, try again shortly"}"#.to_string(),
+                            );
+                        } else {
+                            reply_tx.send_status(
+                                400,
+                                r#"{"error":"REPLAY mode only. Start replay first."}"#.to_string(),
+                            );
+                        }
+                    }
+                    VirtualExchangeCommand::GetOrders => {
+                        if let Some(engine) = &self.virtual_engine {
+                            let orders = engine.get_orders();
+                            reply_tx.send(serde_json::json!({ "orders": orders }).to_string());
+                        } else {
+                            reply_tx.send_status(
+                                400,
+                                r#"{"error":"REPLAY mode only. Start replay first."}"#.to_string(),
+                            );
+                        }
+                    }
+                }
+            }
+            #[cfg(debug_assertions)]
+            ApiCommand::Test(cmd) => {
+                let (body, task) = self.handle_test_api(cmd);
+                reply_tx.send(body);
+                return task;
+            }
+        }
+        Task::none()
+    }
+
+    fn handle_market_ws_event(&mut self, event: exchange::Event) -> Task<Message> {
+        let main_window_id = self.main_window.id;
+        let dashboard = self.active_dashboard_mut();
+
+        match event {
+            exchange::Event::Connected(exchange) => {
+                log::info!("a stream connected to {exchange} WS");
+            }
+            exchange::Event::Disconnected(exchange, reason) => {
+                log::info!("a stream disconnected from {exchange} WS: {reason:?}");
+            }
+            exchange::Event::DepthReceived(stream, depth_update_t, depth) => {
+                return dashboard
+                    .ingest_depth(&stream, depth_update_t, &depth, main_window_id)
+                    .map(move |msg| Message::Dashboard {
+                        layout_id: None,
+                        event: msg,
+                    });
+            }
+            exchange::Event::TradesReceived(stream, update_t, buffer) => {
+                let task = dashboard
+                    .ingest_trades(&stream, &buffer, update_t, main_window_id)
+                    .map(move |msg| Message::Dashboard {
+                        layout_id: None,
+                        event: msg,
+                    });
+
+                if let Some(msg) = self.audio_stream.try_play_sound(&stream, &buffer)
+                    && !self.is_headless
+                {
+                    self.notifications.push(Toast::error(msg));
+                }
+
+                return task;
+            }
+            exchange::Event::KlineReceived(stream, kline) => {
+                return dashboard
+                    .update_latest_klines(&stream, &kline, main_window_id)
+                    .map(move |msg| Message::Dashboard {
+                        layout_id: None,
+                        event: msg,
+                    });
+            }
+        }
+        Task::none()
+    }
+
+    fn handle_tick(&mut self, now: std::time::Instant) -> Task<Message> {
+        let main_window_id = self.main_window.id;
+        let mut all_tasks: Vec<Task<Message>> = Vec::new();
+
+        if self.replay.is_replay() {
+            // layout_manager と replay は別フィールドなので同時可変借用が成立する
+            let Some(active_id) = self.layout_manager.active_layout_id().map(|l| l.unique) else {
+                return Task::none();
+            };
+            let Some(dashboard) = self
+                .layout_manager
+                .get_mut(active_id)
+                .map(|l| &mut l.dashboard)
+            else {
+                return Task::none();
+            };
+            let outcome = self.replay.tick(now, dashboard, main_window_id);
+
+            for (stream, trades, update_t) in outcome.trade_events {
+                if let Some(engine) = &mut self.virtual_engine {
+                    let ticker = stream.ticker_info().ticker.to_string();
+                    let clock_ms = self.replay.current_time_ms().unwrap_or(0);
+                    let fills = engine.on_tick(&ticker, &trades, clock_ms);
+                    for fill in fills {
+                        let fill_msg = dashboard::Message::VirtualOrderFilled(fill);
+                        all_tasks.push(Task::done(Message::Dashboard {
+                            layout_id: None,
+                            event: fill_msg,
+                        }));
+                    }
+                }
+
+                let task = self
+                    .active_dashboard_mut()
+                    .ingest_trades(&stream, &trades, update_t, main_window_id)
+                    .map(move |msg| Message::Dashboard {
+                        layout_id: None,
+                        event: msg,
+                    });
+                all_tasks.push(task);
+            }
+
+            if outcome.reached_end {
+                self.notifications.push(Toast::info("Replay reached end"));
+            }
+        }
+
+        let tick_task = self
+            .active_dashboard_mut()
+            .tick(now, main_window_id)
+            .map(move |msg| Message::Dashboard {
+                layout_id: None,
+                event: msg,
+            });
+        all_tasks.push(tick_task);
+
+        Task::batch(all_tasks)
+    }
+
+    fn handle_window_event(&mut self, event: window::Event) -> Task<Message> {
+        match event {
+            window::Event::CloseRequested(window) => {
+                if Some(window) == self.login_window {
+                    return iced::exit();
+                }
+
+                let main_window = self.main_window.id;
+                let dashboard = self.active_dashboard_mut();
+
+                if window != main_window {
+                    dashboard.popout.remove(&window);
+                    return window::close(window);
+                }
+
+                let mut active_windows = dashboard
+                    .popout
+                    .keys()
+                    .copied()
+                    .collect::<Vec<window::Id>>();
+                active_windows.push(main_window);
+
+                window::collect_window_specs(active_windows, Message::ExitRequested)
+            }
+        }
+    }
+
+    fn handle_login(&mut self, msg: login::Message) -> Task<Message> {
+        match msg {
+            login::Message::LoginSubmit => {
+                self.login_screen.set_error(None);
+                let user_id = self.login_screen.user_id.clone();
+                let password = self.login_screen.password.clone();
+                let is_demo = self.login_screen.is_demo;
+                Task::perform(
+                    connector::auth::perform_login(user_id, password, is_demo),
+                    Message::LoginCompleted,
+                )
+            }
+            other => {
+                self.login_screen.update(other);
+                Task::none()
+            }
+        }
+    }
+
+    fn handle_login_completed(
+        &mut self,
+        result: Result<exchange::adapter::tachibana::TachibanaSession, String>,
+    ) -> Task<Message> {
+        match result {
+            Ok(session) => {
+                connector::auth::store_session(session.clone());
+                connector::auth::persist_session(&session);
+                let dashboard_task = self.transition_to_dashboard();
+                let master_task = Self::start_master_download(session);
+                let disk_cache_task = Self::make_disk_cache_task();
+                Task::batch([dashboard_task, disk_cache_task, master_task])
+            }
+            Err(error_msg) => {
+                log::warn!("Login failed: {error_msg}");
+                self.login_screen.set_error(Some(error_msg));
+                Task::none()
+            }
+        }
+    }
+
+    fn handle_session_restore_result(
+        &mut self,
+        result: Option<exchange::adapter::tachibana::TachibanaSession>,
+    ) -> Task<Message> {
+        if let Some(session) = result {
+            connector::auth::store_session(session.clone());
+            let dashboard_task = self.transition_to_dashboard();
+            let master_task = Self::start_master_download(session);
+            let disk_cache_task = Self::make_disk_cache_task();
+            return Task::batch([dashboard_task, disk_cache_task, master_task]);
+        }
+        let main_window_id = self.main_window.id;
+        if self.replay.is_auto_play_pending()
+            && self
+                .active_dashboard()
+                .has_tachibana_stream_pane(main_window_id)
+        {
+            self.replay.on_session_unavailable();
+            log::info!(
+                "[auto-play] session unavailable — auto-play deferred (Tachibana login required)"
+            );
+            self.notifications.push(Toast::info(
+                "Replay auto-play was deferred: please log in to resume",
+            ));
+        }
+        let (login_window_id, open_login_window) = window::open(window::Settings {
+            size: iced::Size::new(900.0, 560.0),
+            position: window::Position::Centered,
+            resizable: false,
+            exit_on_close_request: true,
+            ..Default::default()
+        });
+        self.login_window = Some(login_window_id);
+        #[cfg(debug_assertions)]
+        {
+            if !self.login_screen.user_id.is_empty() {
+                return Task::batch([
+                    open_login_window.discard(),
+                    Task::done(Message::Login(login::Message::LoginSubmit)),
+                ]);
+            }
+        }
+        #[cfg(not(debug_assertions))]
+        return open_login_window.discard();
+        #[cfg(debug_assertions)]
+        open_login_window.discard()
+    }
+
+    fn handle_api_buying_power(
+        &self,
+        reply: replay_api::ReplySender,
+        result: Result<
+            (
+                exchange::adapter::tachibana::BuyingPowerResponse,
+                exchange::adapter::tachibana::MarginPowerResponse,
+            ),
+            String,
+        >,
+    ) {
+        let body = match result {
+            Ok((cash, margin)) => serde_json::json!({
+                "cash_buying_power": cash.cash_buying_power,
+                "nisa_growth_buying_power": cash.nisa_growth_buying_power,
+                "shortage_flag": cash.shortage_flag,
+                "margin_new_order_power": margin.margin_new_order_power,
+                "maintenance_margin_rate": margin.maintenance_margin_rate,
+                "margin_call_flag": margin.margin_call_flag,
+            })
+            .to_string(),
+            Err(e) => serde_json::json!({ "error": e }).to_string(),
+        };
+        reply.send(body);
+    }
+
+    fn handle_api_tachibana_order(
+        &self,
+        reply: replay_api::ReplySender,
+        result: Result<exchange::adapter::tachibana::NewOrderResponse, String>,
+    ) {
+        let body = match result {
+            Ok(resp) => serde_json::json!({
+                "order_number": resp.order_number,
+                "eig_day": resp.eig_day,
+                "delivery_amount": resp.delivery_amount,
+                "commission": resp.commission,
+                "consumption_tax": resp.consumption_tax,
+                "order_datetime": resp.order_datetime,
+                "warning_code": resp.warning_code,
+                "warning_text": resp.warning_text,
+            })
+            .to_string(),
+            Err(e) => serde_json::json!({ "error": e }).to_string(),
+        };
+        reply.send(body);
+    }
+
+    fn handle_api_fetch_orders(
+        &self,
+        reply: replay_api::ReplySender,
+        result: Result<Vec<exchange::adapter::tachibana::OrderRecord>, String>,
+    ) {
+        let body = match result {
+            Ok(orders) => serde_json::to_string(&serde_json::json!({ "orders": orders
+                .iter()
+                .map(|o| serde_json::json!({
+                    "order_num": o.order_num,
+                    "issue_code": o.issue_code,
+                    "order_qty": o.order_qty,
+                    "current_qty": o.current_qty,
+                    "order_price": o.order_price,
+                    "order_datetime": o.order_datetime,
+                    "status_text": o.status_text,
+                    "executed_qty": o.executed_qty,
+                    "executed_price": o.executed_price,
+                    "eig_day": o.eig_day,
+                }))
+                .collect::<Vec<_>>()
+            }))
+            .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string()),
+            Err(e) => serde_json::json!({ "error": e }).to_string(),
+        };
+        reply.send(body);
+    }
+
+    fn handle_api_fetch_order_detail(
+        &self,
+        reply: replay_api::ReplySender,
+        result: Result<Vec<exchange::adapter::tachibana::ExecutionRecord>, String>,
+    ) {
+        let body = match result {
+            Ok(executions) => serde_json::to_string(&serde_json::json!({ "executions": executions
+                .iter()
+                .map(|e| serde_json::json!({
+                    "exec_qty": e.exec_qty,
+                    "exec_price": e.exec_price,
+                    "exec_datetime": e.exec_datetime,
+                }))
+                .collect::<Vec<_>>()
+            }))
+            .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string()),
+            Err(e) => serde_json::json!({ "error": e }).to_string(),
+        };
+        reply.send(body);
+    }
+
+    fn handle_api_modify_order(
+        &self,
+        reply: replay_api::ReplySender,
+        result: Result<exchange::adapter::tachibana::ModifyOrderResponse, String>,
+    ) {
+        let body = match result {
+            Ok(resp) => serde_json::json!({
+                "order_number": resp.order_number,
+                "eig_day": resp.eig_day,
+                "order_datetime": resp.order_datetime,
+            })
+            .to_string(),
+            Err(e) => serde_json::json!({ "error": e }).to_string(),
+        };
+        reply.send(body);
+    }
+
+    fn handle_api_fetch_holdings(
+        &self,
+        reply: replay_api::ReplySender,
+        result: Result<u64, String>,
+    ) {
+        let body = match result {
+            Ok(qty) => serde_json::json!({ "holdings_qty": qty }).to_string(),
+            Err(e) => serde_json::json!({ "error": e }).to_string(),
+        };
+        reply.send(body);
     }
 
     /// 認証状態確認 API コマンドを処理する（本番ビルドにも含まれる）。
