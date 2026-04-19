@@ -57,8 +57,7 @@ class FlowsurfaceEnv(gym.Env):
         headless: bool = True,
     ) -> None:
         super().__init__()
-        if not headless:
-            raise ValueError("FlowsurfaceEnv only supports headless=True")
+        self.headless = headless
 
         self.ticker = ticker
         self.timeframe = timeframe
@@ -188,14 +187,10 @@ class FlowsurfaceEnv(gym.Env):
         env["DEV_IS_DEMO"] = "true"
         env["FLOWSURFACE_API_PORT"] = str(self.api_port)
 
-        cmd = [
-            self._binary,
-            "--headless",
-            "--ticker",
-            self.ticker,
-            "--timeframe",
-            self.timeframe,
-        ]
+        cmd = [self._binary]
+        if self.headless:
+            cmd.append("--headless")
+        cmd += ["--ticker", self.ticker, "--timeframe", self.timeframe]
         self._proc = subprocess.Popen(
             cmd,
             env=env,

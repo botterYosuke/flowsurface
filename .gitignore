@@ -8,3 +8,8 @@
 node_modules/
 docs/.vitepress/dist
 docs/.vitepress/cache
+
+# Python
+__pycache__/
+*.egg-info/
+python/.venv/

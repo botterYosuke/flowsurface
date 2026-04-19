@@ -10,9 +10,14 @@ from flowsurface_sdk.env import FlowsurfaceEnv
 
 # ── constructor ───────────────────────────────────────────────────────────────
 
-def test_env_raises_if_headless_false():
-    with pytest.raises(ValueError, match="headless"):
-        FlowsurfaceEnv(headless=False)
+def test_env_gui_mode_allowed():
+    env = FlowsurfaceEnv(headless=False)
+    assert env.headless is False
+
+
+def test_env_headless_flag_default_true():
+    env = FlowsurfaceEnv()
+    assert env.headless is True
 
 
 def test_env_default_observation_space_shape():
@@ -35,6 +40,36 @@ def test_env_action_space_qty_box():
     assert env.action_space["qty"].shape == (1,)
     assert env.action_space["qty"].low[0] == pytest.approx(0.0)
     assert env.action_space["qty"].high[0] == pytest.approx(1.0)
+
+
+# ── _start_process command construction ──────────────────────────────────────
+
+def _make_popen_mock(env: FlowsurfaceEnv):
+    """Patch Popen and requests so _start_process returns without a real binary."""
+    import requests as req
+
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+
+    with patch("subprocess.Popen") as mock_popen, \
+         patch("requests.get", return_value=mock_response):
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = None
+        mock_popen.return_value = mock_proc
+        env._start_process()
+        return mock_popen.call_args[0][0]  # the cmd list
+
+
+def test_start_process_includes_headless_flag():
+    env = FlowsurfaceEnv(headless=True)
+    cmd = _make_popen_mock(env)
+    assert "--headless" in cmd
+
+
+def test_start_process_excludes_headless_flag_in_gui_mode():
+    env = FlowsurfaceEnv(headless=False)
+    cmd = _make_popen_mock(env)
+    assert "--headless" not in cmd
 
 
 # ── _observe helper ───────────────────────────────────────────────────────────
@@ -91,8 +126,9 @@ def test_observe_truncates_to_kline_limit():
 
 
 def test_observe_returns_zeros_on_connection_error():
+    import requests as req
     env = _make_env_no_proc()
-    with patch.object(env, "_get", side_effect=Exception("connection refused")):
+    with patch.object(env, "_get", side_effect=req.ConnectionError("connection refused")):
         obs = env._observe()
     assert obs.shape == (12,)
     assert np.all(obs == 0.0)
