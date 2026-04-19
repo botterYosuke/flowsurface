@@ -16,6 +16,16 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8", "pytest-asyncio>=0.23"]
 
-[tool.setuptools.packages.find]
-where = ["python"]
-include = ["flowsurface*"]
+[tool.setuptools]
+packages = ["flowsurface"]
+
+[tool.setuptools.package-dir]
+"flowsurface" = "python"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--ignore=tests/test_launch.py"
+python_files = ["test_*.py", "s*.py", "x*.py"]
+markers = [
+    "e2e: requires a running flowsurface server on port 9876",
+]

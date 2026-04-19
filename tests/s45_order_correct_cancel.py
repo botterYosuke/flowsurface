@@ -42,18 +42,6 @@ DEV_USER_ID = os.environ.get("DEV_USER_ID", "")
 DEV_PASSWORD = os.environ.get("DEV_PASSWORD", "")
 DEV_SECOND_PASSWORD = os.environ.get("DEV_SECOND_PASSWORD", "")
 
-if DEV_IS_DEMO != "true":
-    print("ERROR: DEV_IS_DEMO=true を設定してください（本番誤発注防止）")
-    sys.exit(1)
-if not DEV_USER_ID or not DEV_PASSWORD:
-    pend("全TC", "DEV_USER_ID / DEV_PASSWORD が未設定")
-    print_summary()
-    sys.exit(0)
-if not DEV_SECOND_PASSWORD:
-    pend("全TC", "DEV_SECOND_PASSWORD が未設定")
-    print_summary()
-    sys.exit(0)
-
 
 def run_s45(env) -> None:
     print("=== 訂正→取消 round-trip E2E テスト ===")
@@ -190,6 +178,13 @@ def run_s45(env) -> None:
 
 
 def test_s45_order_correct_cancel() -> None:
+    import pytest
+    if DEV_IS_DEMO != "true":
+        pytest.skip("DEV_IS_DEMO=true が未設定（本番誤発注防止）")
+    if not DEV_USER_ID or not DEV_PASSWORD:
+        pytest.skip("DEV_USER_ID / DEV_PASSWORD が未設定")
+    if not DEV_SECOND_PASSWORD:
+        pytest.skip("DEV_SECOND_PASSWORD が未設定")
     backup_state()
     write_live_fixture("TachibanaSpot:7203", "D1", "Toyota-Live")
     env = FlowsurfaceEnv(ticker="TachibanaSpot:7203", timeframe="D1", headless=False)
