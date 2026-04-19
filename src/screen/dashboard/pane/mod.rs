@@ -424,7 +424,7 @@ impl State {
                 chart.insert_open_interest(req_id, oi);
             }
             _ => {
-                log::error!(
+                log::warn!(
                     "insert_hist_oi: unexpected content kind {:?}",
                     self.content.kind()
                 );
@@ -554,7 +554,7 @@ impl State {
                 }
             }
             _ => {
-                log::error!(
+                log::warn!(
                     "insert_hist_klines: unexpected content kind {:?}",
                     self.content.kind()
                 );
