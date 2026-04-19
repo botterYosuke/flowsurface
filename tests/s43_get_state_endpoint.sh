@@ -57,6 +57,15 @@ else
   [ "$CODE_A" = "400" ] \
     && pass "TC-A: LIVE 中 GET /api/replay/state → HTTP 400" \
     || fail "TC-A" "HTTP=$CODE_A (expected 400)"
+
+  # Replay に入る前に TickerInfo（metadata）の解決を待つ。
+  # 未解決のままだと EventStore に kline が格納されず TC-K2 が失敗する。
+  _S43_PANE_ID=$(node -e "const ps=(JSON.parse(process.argv[1]).panes||[]); console.log(ps[0]?ps[0].id:'');" \
+    "$(curl -s "$API/pane/list")")
+  if [ -n "$_S43_PANE_ID" ] && [ "$_S43_PANE_ID" != "null" ] && [ "$_S43_PANE_ID" != "undefined" ]; then
+    echo "  waiting for streams_ready (pane=$_S43_PANE_ID, max 30s)..."
+    wait_for_streams_ready "$_S43_PANE_ID" 30 || echo "  WARN: streams_ready timeout (continuing)"
+  fi
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────

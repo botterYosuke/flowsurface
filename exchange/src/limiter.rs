@@ -84,12 +84,12 @@ pub async fn http_request_with_limiter<L: RateLimiter>(
 
     if limiter_guard.should_exit_on_response(&response) {
         let status = response.status();
-        log::error!(
-            "HTTP error {} for: {}. Exiting. (This may be a rate limit, geo-block, or other access issue.)",
-            status,
-            url
+        let msg = format!(
+            "HTTP error {} for: {}. (This may be a rate limit, geo-block, or other access issue.)",
+            status, url
         );
-        std::process::exit(1);
+        log::error!("{}", msg);
+        return Err(AdapterError::http_status_failed(status, msg));
     }
 
     limiter_guard.update_from_response(&response, weight);

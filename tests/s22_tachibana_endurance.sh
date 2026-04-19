@@ -65,10 +65,12 @@ HEREDOC
     -d "{\"start\":\"$start\",\"end\":\"$end\"}" > /dev/null
 }
 
-# ── TC-S22-01: 4 日 range を 10x 速度で再生し終了 → Paused ───────────────
-# D1 データ（~4 バー）は少ないため Paused 到達を 180 秒で待つ
-echo "  [TC-S22-01] 10x 速度 4 日 range 完走テスト..."
-START_LONG=$(utc_offset -192)
+# ── TC-S22-01: 60 日 range を 10x 速度で再生し終了 → Paused ───────────────
+# -1440h(-24h) ≈ 59 calendar days ≈ 42 trading bars
+# wait_playing は speed_to_10x より前（1x 速度）で実行される
+# 42 bars × 100ms/bar (1x) = 4200ms → 1s ポーリングで確実に検出可能
+echo "  [TC-S22-01] 10x 速度 60 日 range 完走テスト..."
+START_LONG=$(utc_offset -1440)
 END_LONG=$(utc_offset -24)
 tachibana_replay_setup "$START_LONG" "$END_LONG"
 
@@ -80,7 +82,7 @@ fi
 speed_to_10x
 echo "  10x 速度で再生中（最大 180 秒待機）..."
 if wait_status Paused 180; then
-  pass "TC-S22-01: 4 日 range 10x 完走 → Paused 到達"
+  pass "TC-S22-01: 60 日 range 10x 完走 → Paused 到達"
 else
   STATUS=$(jqn "$(curl -s "$API/replay/status")" "d.status")
   fail "TC-S22-01" "180 秒経過後も status=$STATUS（Paused 未到達）"

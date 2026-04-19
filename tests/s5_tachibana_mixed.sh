@@ -51,8 +51,15 @@ EOF
 
 start_app
 
+# inject-session が 404 の場合は e2e-mock feature なし → PEND
+_probe=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$API/test/tachibana/inject-session" 2>/dev/null || echo "000")
+if [ "$_probe" = "404" ]; then
+  echo "  PEND: inject-session エンドポイント未実装（HTTP 404）— e2e-mock feature が必要"
+  exit 0
+fi
+
 # TC-S5-01: Tachibana セッション注入 → session=present
-curl -s -X POST "$API/test/tachibana/inject-session" > /dev/null
+# 上記プローブで inject-session は既に呼ばれているため、ステータスのみ確認
 STATUS=$(curl -s "$API/auth/tachibana/status")
 SESSION=$(jqn "$STATUS" "d.session")
 [ "$SESSION" = "present" ] \

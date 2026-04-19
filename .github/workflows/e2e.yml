@@ -4,9 +4,9 @@ name: E2E Tests (Hyperliquid)
 # Hyperliquid は geo-restriction なしで US IP からアクセス可能なため採用。
 on:
   push:
-    branches: [sasa/develop]
+    branches: [main]
   pull_request:
-    branches: [sasa/develop]
+    branches: [main]
   workflow_dispatch:
 
 concurrency:
