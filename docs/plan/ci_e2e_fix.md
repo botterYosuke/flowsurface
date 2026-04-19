@@ -1,4 +1,4 @@
-# CI E2E 修正計画 — 2026-04-18
+# CI E2E 修正計画 — 2026-04-19
 
 ## 背景
 
@@ -9,18 +9,51 @@
 
 ## ラン間の進捗サマリ
 
-| | Run 1 (logs_65161082968)<br>Phase 1〜3 前 | Run 2 (logs_65183917351)<br>Phase 1〜3 後 | main 参照ラン (main_logs_65183649746) | Run 3 (logs_65185455856)<br>Phase 5 後 | Run 4 (logs_65187341736)<br>Phase 6 後 | Run 5 (logs_65188251004)<br>Phase 7 後 | Run 6 (logs_65191053658)<br>Phase 8 後 | Run 7 (logs_65193176416)<br>Phase 9 後 |
-|:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| 総テスト数 | 112 | 110 | 110 | 110 | 110 | 110 | 110 | 110 |
-| PASS | 85 | 95 | ~93 | ~98 | **~98** | **~98** | **~99** | **~105** |
-| FAIL | 27 | 15 | ~17 | **11スクリプト/17TC** | **10スクリプト/~13TC** | **10スクリプト/~13TC** | **9スクリプト/~13TC** | **8スクリプト/~7TC** |
-| 合格率 | 75.9% | 86.4% | ~84.5% | ~89.1% | **~89.1%** | **~89.1%** | **~90%** | **~95.5%** |
+| | Run 1 (logs_65161082968)<br>Phase 1〜3 前 | Run 2 (logs_65183917351)<br>Phase 1〜3 後 | main 参照ラン (main_logs_65183649746) | Run 3 (logs_65185455856)<br>Phase 5 後 | Run 4 (logs_65187341736)<br>Phase 6 後 | Run 5 (logs_65188251004)<br>Phase 7 後 | Run 6 (logs_65191053658)<br>Phase 8 後 | Run 7 (logs_65193176416)<br>Phase 9 後 | Run 8 (logs_65217707443)<br>Phase 10 後 |
+|:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| 総テスト数 | 112 | 110 | 110 | 110 | 110 | 110 | 110 | 110 | 110 |
+| PASS | 85 | 95 | ~93 | ~98 | **~98** | **~98** | **~99** | **~105** | **~101** |
+| FAIL | 27 | 15 | ~17 | **11スクリプト/17TC** | **10スクリプト/~13TC** | **10スクリプト/~13TC** | **9スクリプト/~13TC** | **8スクリプト/~16TC** | **6スクリプト/~9TC** |
+| 合格率 | 75.9% | 86.4% | ~84.5% | ~89.1% | **~89.1%** | **~89.1%** | **~90%** | **~95.5%** | **~91.8%** |
 
 ※ Run 3 は計画書記載の「12件」より正確には 11 スクリプト失敗（S17・S21 は Run 3 時点で PASS 済み）。  
 ※ Run 4 は S7/S23/S49 が解消したが S32/S20 でリグレッションが発生し、合格率は横ばい。  
 ※ Run 5 は S32 TC-03 の set-ticker 404 が解消（9TC → 2TC 改善）したが、S44/S49 がセッション切断でリグレッション。合格率は横ばい。  
 ※ Run 6 は S21・S44 が PASS に転換、S49 が改善（3/7 → 6/7）したが S32 TC-03 が再び 404 リグレッション・S45 が新規セッション切断 FAIL。  
-※ Run 7 は S45・S49 が PASS 転換（P9-2b 直列化）、S32 が PASS:3→7 に大幅改善（TC-03 PASS）。S32 TC-05/06/09/10 は Tachibana daily history セッション切断が根本原因として残存。
+※ Run 7 は S45・S49 が PASS 転換（P9-2b 直列化）、S32 が PASS:3→7 に大幅改善（TC-03 PASS）。S32 TC-05/06/09/10 は Tachibana daily history セッション切断が根本原因として残存。  
+※ Run 8（Phase 10 後）は S32/S33/S36/S37/S39/S24/Headless-S42 が完全 PASS 転換（P10-1b/2b 効果大）。一方 S22 が新規リグレッション・S29 が 2→4TC に悪化。スクリプト数は 11→6 に改善したが TC 合計は増加。
+
+**Run 7 → Run 8 で解消したもの（Phase 10 の修正効果）**
+
+| テスト | Run 7 | Run 8 | 解消内容 |
+|:---|:---:|:---:|:---|
+| GUI S32 Toyota candlestick add | FAIL:4 | **PASS:11** ✅ | P10-1b: `test-gui-tachibana-session` 移動 + 重複 daily fetch 排除 |
+| GUI S33 Sidebar split pane | FAIL:1 (TC-D) | **PASS** ✅ | P10-2b: `is_headless` ガードでエラートースト抑制 |
+| GUI S36 Sidebar order pane | FAIL:1 (TC-D) | **PASS** ✅ | 同上 |
+| GUI S37 Order panels integrated | FAIL:2 (TC-B/J) | **PASS** ✅ | 同上 |
+| GUI S39 Buying power portfolio | FAIL:1 (TC-H) | **PASS** ✅ | 同上 |
+| GUI S24 Sidebar select ticker | FAIL:1 (TC-D2) | **PASS** ✅ | 同上 |
+| Headless S42 Naked short cycle | FAIL:1 (TC-J) | **PASS** ✅ | 同上 |
+
+**Run 7 → Run 8 で新たに壊れたもの（Phase 10 リグレッション）**
+
+| テスト | Run 7 | Run 8 | 推定原因 |
+|:---|:---:|:---:|:---|
+| GUI S22 Tachibana endurance | PASS | **FAIL:1** (TC-S22-01-pre) | `Tachibana daily history fetch failed: code=2` → Playing 未到達。P10-3b で他スクリプトを tachibana-session 直列化した結果、並列 GUI job 内のセッション競合が変化し S22 が影響を受けた可能性。 |
+| GUI S29 TC-B | PASS | **FAIL** | P10-4b の `wait_for_streams_ready` 追加後、D1 klines Ready 到達時点で current_time が前進しすぎ（≈ 2025-01-15）→ range 末尾付近にいるため StepForward が変化なし |
+| GUI S29 TC-D2 | PASS | **FAIL** | 同上（current_time が 2025-01-09 の期待から大幅乖離） |
+
+**Run 7 → Run 8 で継続している失敗**
+
+| テスト | TC | 失敗内容 | 注記 |
+|:---|:---|:---|:---|
+| GUI S21 Tachibana error boundary | TC-S21-precond | Playing 到達せず（セッション切断 code=2） | P10-3b で直列化対象に含めたが効果なし |
+| GUI Tachibana Session S14 Autoplay event driven | TC-S14-01 | Playing に到達せず（120s タイムアウト） | P10-3b 後も継続 |
+| GUI Tachibana Session S20 Tachibana replay resilience | TC-S20-01 | status=Paused（Playing 期待） | P10-3b 後も継続 |
+| GUI Tachibana Session S29 Tachibana holiday skip | TC-A / TC-C2 | current_time が 2025-01-10 から 2 日以上ズレ | P10-4b 後も継続、さらに TC-B/D2 が新規追加で悪化 |
+| GUI Tachibana Session S44 Order list | Step 3 | `GET /api/tachibana/orders` → code=2 セッション切断 | P10-1b で直列化・dev_is_demo 設定後も継続 |
+
+---
 
 **Run 4 → Run 5 で解消したもの（Phase 7 の修正効果）**
 
@@ -728,20 +761,140 @@ Run 7 でも変化なし。
 
 ---
 
+---
+
+## Phase 11: Run 8 残存失敗の解消（2026-04-19）
+
+残失敗: **6 スクリプト / ~9 TC**
+
+| スクリプト | job | TC | 失敗内容 | カテゴリ |
+|:---|:---|:---|:---|:---|
+| GUI S21 Tachibana error boundary | `test-gui` (並列) | TC-S21-precond | Playing 到達せず（セッション切断 code=2） | M |
+| GUI S22 Tachibana endurance | `test-s22-endurance` (独立専用 job) | TC-S22-01-pre | Playing 到達せず（セッション切断 code=2） | M |
+| GUI Tachibana Session S14 Autoplay | `test-gui-tachibana-session` (直列) | TC-S14-01 | Playing 未到達（120s タイムアウト） | M |
+| GUI Tachibana Session S20 Replay resilience | `test-gui-tachibana-session` (直列) | TC-S20-01 | status=Paused（Playing 期待） | M |
+| GUI Tachibana Session S29 Holiday skip | `test-gui-tachibana-session` (直列) | TC-A/B/C2/D2 | current_time が range_end（2025-01-15）に到達済み | J |
+| GUI Tachibana Session S44 Order list | `test-gui-tachibana-session` (直列) | Step 3 | `GET /api/tachibana/orders` → セッション切断 code=2 | N |
+
+---
+
+### P11-1: カテゴリ M — S21/S22 Tachibana Playing 未到達（セッション切断）
+
+**症状**: 両者とも `Tachibana daily history fetch failed: API エラー: code=2, message=セッションが切断しました。` がログに出現し、Playing 到達前にタイムアウト。
+
+**job 構成の実態**（ログ `Complete job name:` で確認済み）:
+- S21: `test-gui` 並列 matrix 内（他の Tachibana 認証ジョブと競合）
+- S22: `test-s22-endurance` という独立専用 job（並列競合とは別の原因）
+
+**根本原因**:
+- **S21**: `test-gui` 並列 matrix の他ジョブが同一 `DEV_USER_ID` で認証するたびにセッションが無効化される（P10-3b 直列化の対象外のまま）。
+- **S22**: 独立 job にもかかわらず失敗。S22 のセッション確立（00:28:04）から ~6 秒後（00:28:10）に code=2 発生。同時刻帯に S21（`test-gui`）も実チャンネル認証を試みており、**S21 の認証が S22 のセッションを無効化**している。Run 7 では偶発的にタイミングがズレて PASS していた。
+
+**対処**:
+- [ ] **P11-1a** `e2e.yml` の `test-gui-tachibana-session` job（`max-parallel: 1`）に S21 と S22 を追加（`dev_is_demo: ""` で実チャンネル接続）。S21 は `test-gui` matrix から削除、S22 は `test-s22-endurance` job を廃止。直列化により同時認証を排除する。
+
+---
+
+### P11-2: カテゴリ M — S14 Autoplay Playing 未到達（継続）
+
+**症状**: TC-S14-01 — keyring セッション復元後 Playing に到達せず（120 秒タイムアウト）。TC-S14-02/03 は PASS。
+
+**根本原因（ISSUE_MASTER 仮説は誤りと判明）**:
+- ログ確認で ISSUE_MASTER は認証後 **約 8 秒**で取得完了・キャッシュ保存済み（4562 records）。
+- 実際のボトルネックは **ticker info の stream resolution 遅延**:
+  - `TickerInfo not found for 7203` が複数回ログ出力される。
+  - `pending_auto_play = true` のまま → TickerInfo が解決されるまで Playing 遷移ゲートが開かない。
+  - 120 秒以内に TickerInfo が解決されなければタイムアウト。
+
+**調査方針**:
+- [ ] **P11-2a** S14 ログで `TickerInfo not found` が何秒続くか、120 秒後に解決されているかを確認。
+- [ ] **P11-2b** `src/replay/` で `pending_auto_play` の発火条件を確認。TickerInfo 解決イベント到着時に auto_play を発火させるパスが存在するか、またはタイムアウトが設定されているかを確認。
+- [ ] **P11-2c** 対処候補:
+  - A) ticker info 解決をトリガーに auto_play を発火させる（app 側修正）
+  - B) テスト側で Playing 待機ループを 120s→240s に延長（暫定）
+
+---
+
+### P11-3: カテゴリ M — S20 Replay resilience status=Paused（継続）
+
+**症状**: TC-S20-01 のみ FAIL（status=Paused。Playing 期待）。TC-S20-02〜05 は PASS。
+
+**根本原因（daily history fetch 仮説は誤りと判明）**:
+- S20 ログに `daily history fetch failed` は出現しない。
+- S20 は既に `test-gui-tachibana-session` 直列 job → セッション競合でもない。
+- TC-S20-01 は replay 開始直後の **最初の Playing 遷移**が失敗。その後の TC-S20-02〜05 はステップ操作（StepForward/Backward/toggle）が正常に動作。
+- 推定: `play` API コール後に Playing に遷移するはずが Paused のまま → `prepare_replay` の kline 読み込みタイミング問題、または P10-1b の `skip_kline_fetch` 変更が S20 の replay 開始シーケンスに副作用を与えた可能性。
+
+**調査方針**:
+- [ ] **P11-3a** S20 テストスクリプトで `play` コマンド直前に `wait_for_streams_ready` を追加（S29 と同様の問題であれば解消するか確認）。ただし P11-4 との整合性に注意。
+- [ ] **P11-3b** `src/replay/` の `play` → Playing 遷移ロジックを確認。`prepare_replay` の `pending_count = 0` 分岐（即 Playing）と kline 待機分岐の条件を精査。
+
+---
+
+### P11-4: カテゴリ J — S29 Tachibana 休場日スキップ（悪化・4 TC FAIL）
+
+**症状**:
+- TC-A: Pause 後の `current_time=1736899200000`（= range_end の 2025-01-15）。期待 ≈ 2025-01-07（range_start）から 8 日ズレ。
+- TC-B: StepForward しても current_time が変化しない（= range 末尾に達済みで進めない）
+- TC-C2/D2: 同じ原因の連鎖失敗
+
+**根本原因（ログ証拠で確定・信頼度 98%）**:
+- range は固定日付 `RANGE_START="2025-01-07 00:00"` / `RANGE_END="2025-01-15 00:00"`（utc_offset ではない）。
+- P10-4b で追加した `wait_for_streams_ready` 完了時点で D1 klines（205 本）がすべてメモリに展開済みの状態になる。
+- その後 `play` コマンドで Playing 開始 → リプレイエンジンがロード済み klines を約 **1.1 秒**で一括消化し、range_end（2025-01-15 00:00）まで自動進行。
+- Pause した時点では current_time が range_end と一致 → StepForward は変化なし。
+- Run 7 では `wait_for_streams_ready` がなく klines 未ロード状態で play → fallback step_size 60s で進んだため current_time = range_start + 数分（TC-A/C2 は 2 日内 NG だが TC-B/D2 は PASS）。
+
+**タイムライン比較**:
+
+| | Run 7（wait なし） | Run 8（wait あり） |
+|:---|:---|:---|
+| Playing 到達までの時間 | ~0.17s | ~3.5s（klines フェッチ含む） |
+| Playing → Pause の経過 | ~0.68s | ~1.1s |
+| Pause 時の current_time | 1736208120000（range_start +2分） | 1736899200000（= range_end） |
+| TC-B（StepForward 変化） | PASS | FAIL（range_end で詰まり） |
+
+**対処（確定）**:
+- [ ] **P11-4a** `wait_for_streams_ready` を **削除しない**（ないと step_size fallback で別失敗）。代わりに Playing → Pause の直後に `replay/status` で `current_time` を確認し、`range_end` 付近なら **追加の StepBackward を複数回発行**して range_start 付近に巻き戻す処理を s29 スクリプトに追加する。
+  - または: `wait_for_streams_ready` 後、`play` を送らずに Paused 状態のまま StepForward を直接発行できるか検証（API 仕様確認）。
+  - ※「range を固定日付に変更」は既に固定済みのため効果なし（×）。
+
+---
+
+### P11-5: カテゴリ N — S44 Order list セッション切断（継続）
+
+**症状**: `GET /api/tachibana/orders` → `{"error":"API エラー: code=2, message=セッションが切断しました。"}` (Step 3, セッション確立から ~2 秒後)
+
+**実態（ログ確認済み）**:
+- S44 は `DEV_IS_DEMO: "true"`（デモチャンネル）。
+- セッション確立直後に **ISSUE_MASTER が 0 records** で保存される（`Tachibana master stream ended without CLMEventDownloadComplete`）。
+- Step 3 の orders API コール時にセッション切断 code=2。
+
+**根本原因**:
+- セッション確立自体は成功するが、master stream が `CLMEventDownloadComplete` を受信せずに終了している。これは Tachibana デモ API の不安定な挙動か、セッション状態が途中でリセットされたことを示す。
+- デモチャンネルのセッション有効期限が非常に短い可能性（master download 完了前に期限切れ）。
+
+**調査方針**:
+- [ ] **P11-5a** `exchange/src/adapter/tachibana.rs` で master stream 終了処理を確認。`CLMEventDownloadComplete` 未受信の場合のフォールバック動作（0 records 保存）が正しいか。
+- [ ] **P11-5b** デモセッション用の keepalive 送信タイミングを確認。master download 中もセッション維持されているか。
+- [ ] **P11-5c** 対処候補:
+  - A) `s44_order_list.sh` の Step 1 でセッション確立後、master download 完了まで待機（`wait_for_master_cache` のような helper を追加）してから orders を取得
+  - B) master stream 未完了時のリトライを `exchange/src/adapter/tachibana.rs` に追加
+
+---
+
 ## 調査対象ファイル
 
 ```
-.github/workflows/e2e.yml             # P10-1 (S32 を test-gui-tachibana-session に移動)
-src/connector/                        # P10-2 (エラートースト抑制), P10-3 (Tachibana auth)
-src/replay/                           # P10-3 (Tachibana auto-play), P10-4 (holiday skip)
-tests/s32_toyota_candlestick_add.sh   # P10-1 (TC-05/06/09/10 daily history 失敗)
-tests/s20_tachibana_replay_resilience.sh # P10-3
-tests/s14_autoplay_event_driven.sh    # P10-3
-tests/s29_tachibana_holiday_skip.sh   # P10-4
-tests/s33_sidebar_split_pane.sh       # P10-2
-tests/s36_sidebar_order_pane.sh       # P10-2
-tests/s37_order_panels_integrated.sh  # P10-2
-tests/s39_buying_power_portfolio.sh   # P10-2
+.github/workflows/e2e.yml                    # P11-1 (S21 を test-gui から削除, S22 の専用 job を廃止し tachibana-session に統合)
+src/replay/                                  # P11-2 (TickerInfo → auto_play 発火パス), P11-3 (prepare_replay 条件)
+exchange/src/adapter/tachibana.rs            # P11-5 (CLMEventDownloadComplete 未受信時のフォールバック, keepalive)
+tests/s21_tachibana_error_boundary.sh        # P11-1
+tests/s22_tachibana_endurance.sh             # P11-1
+tests/s14_autoplay_event_driven.sh           # P11-2
+tests/s20_tachibana_replay_resilience.sh     # P11-3
+tests/s29_tachibana_holiday_skip.sh          # P11-4 (巻き戻し処理追加)
+tests/s44_order_list.sh                      # P11-5 (master cache 完了待機)
 ```
 
 ---

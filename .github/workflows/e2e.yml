@@ -100,9 +100,6 @@ jobs:
           - name: S42 Naked short cycle
             script: s42_naked_short_cycle.sh
             dev_is_demo: ""
-          - name: S21 Tachibana error boundary
-            script: s21_tachibana_error_boundary.sh
-            dev_is_demo: ""
           - name: S30 Mixed sample loading
             script: s30_mixed_sample_loading.sh
             dev_is_demo: ""
@@ -255,14 +252,15 @@ jobs:
           path: ${{ runner.temp }}/e2e_headless_debug.log
 
   # ── S22 Tachibana Endurance（専用・長時間）────────────────────────────────────
-  # ── Tachibana デモセッション（直列）─────────────────────────────────────────
-  # S44/S45/S49 は同じ DEV_USER_ID で Tachibana デモ認証を行う。
+  # ── Tachibana セッション直列（デモ・実チャンネル共通）────────────────────────
+  # S44/S45/S49/S21/S22 は同じ DEV_USER_ID で Tachibana 認証を行う。
   # Tachibana は同一アカウントの同時セッションを無効化するため max-parallel: 1 で直列実行する。
+  # S22 は 15〜30 分かかるため timeout-minutes を 45 に設定する。
   test-gui-tachibana-session:
     name: "GUI Tachibana Session: ${{ matrix.name }}"
     needs: build
     runs-on: windows-latest
-    timeout-minutes: 15
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       max-parallel: 1
@@ -282,6 +280,12 @@ jobs:
             dev_is_demo: ""
           - name: S20 Tachibana replay resilience
             script: s20_tachibana_replay_resilience.sh
+            dev_is_demo: ""
+          - name: S21 Tachibana error boundary
+            script: s21_tachibana_error_boundary.sh
+            dev_is_demo: ""
+          - name: S22 Tachibana endurance
+            script: s22_tachibana_endurance.sh
             dev_is_demo: ""
           - name: S29 Tachibana holiday skip
             script: s29_tachibana_holiday_skip.sh
@@ -325,42 +329,3 @@ jobs:
           name: log-gui-${{ matrix.script }}
           path: ${{ runner.temp }}/e2e_debug.log
 
-  test-s22-endurance:
-    name: "GUI: S22 Tachibana endurance"
-    needs: build
-    runs-on: windows-latest
-    timeout-minutes: 40
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-
-      - name: Download exe artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: flowsurface-exe
-          path: target/debug/
-
-      - name: Prepare data directory
-        shell: bash
-        run: mkdir -p "$APPDATA/flowsurface/market_data"
-
-      - name: Run S22 Tachibana endurance
-        shell: bash
-        env:
-          FLOWSURFACE_EXE: ${{ github.workspace }}/target/debug/flowsurface.exe
-          E2E_TICKER: HyperliquidLinear:BTC
-          DEV_IS_DEMO: ""
-          DEV_USER_ID: ${{ secrets.DEV_USER_ID }}
-          DEV_PASSWORD: ${{ secrets.DEV_PASSWORD }}
-          DEV_SECOND_PASSWORD: ${{ secrets.DEV_SECOND_PASSWORD }}
-        run: bash tests/s22_tachibana_endurance.sh
-
-      - name: Upload debug log on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: log-gui-s22_tachibana_endurance.sh
-          path: ${{ runner.temp }}/e2e_debug.log

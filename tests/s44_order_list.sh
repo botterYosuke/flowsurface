@@ -63,11 +63,20 @@ HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "$API/tachibana/orders")
   && pass "Step 2: GET /api/tachibana/orders → HTTP 200" \
   || fail "Step 2" "HTTP=$HTTP_CODE (expected 200)"
 
-# ── Step 3: レスポンス形式確認 ────────────────────────────────────────────────
+# ── Step 3: レスポンス形式確認（code=2 はセッション期限切れのためリトライ）────────
 echo ""
 echo "── Step 3: レスポンス JSON 形式確認"
 
-RESP=$(curl -s "$API/tachibana/orders")
+RESP=""
+RETRY=0
+while [ $RETRY -lt 5 ]; do
+  RESP=$(curl -s "$API/tachibana/orders")
+  RESP_CODE=$(node -e "try{const d=JSON.parse(process.argv[1]);console.log(d.error?'2':'0');}catch(e){console.log('0');}" "$RESP")
+  [ "$RESP_CODE" != "2" ] && break
+  echo "  API エラー (セッション切断など) — 3s 待機後リトライ ($((RETRY+1))/5)..."
+  sleep 3
+  RETRY=$((RETRY + 1))
+done
 echo "  response: $RESP"
 
 HAS_ORDERS=$(node -e "

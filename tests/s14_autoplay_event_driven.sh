@@ -105,8 +105,8 @@ while [ $ELAPSED -lt 35 ]; do
     PREMATURE_PLAY=true
     break
   fi
-  sleep 5
-  ELAPSED=$((ELAPSED + 5))
+  sleep 1
+  ELAPSED=$((ELAPSED + 1))
 done
 
 # TC-S14-02: 35 秒時点で timed out トーストがないことを確認

@@ -144,6 +144,39 @@ sleep 0.5
 CT_INIT=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
 echo "  Pause 後 current_time=$CT_INIT (expected ≈ $MS_JAN07)"
 
+# P10-4b の wait_for_streams_ready により D1 全件キャッシュ済み。
+# play 後 ~1s で range_end に到達することがある。
+# CT_INIT が range_start より 3 日以上先にあれば StepBackward で巻き戻す。
+CT_IS_FAR=$(node -e "
+  const ctRaw = '$CT_INIT';
+  const ct    = ctRaw === 'null' || ctRaw === '' ? BigInt(0) : BigInt(ctRaw);
+  const start = BigInt('$MS_JAN07');
+  const tol   = BigInt('259200000'); // 3 days
+  const diff  = ct > start ? ct - start : start - ct;
+  console.log(diff > tol ? 'true' : 'false');
+")
+if [ "$CT_IS_FAR" = "true" ]; then
+  echo "  CT_INIT が range_start から 3 日超 — StepBackward で range_start 付近まで巻き戻す..."
+  # JAN15(range_end) から JAN07 まで StepBackward は 6 ステップ必要（土日スキップで JAN10→JAN09 飛びあり）。
+  # 余裕をもって 10 回まで試行し、JAN07 から 1 日以内（43200000ms=12h）に入ったら停止。
+  for _i in $(seq 1 10); do
+    curl -s -X POST "$API/replay/step-backward" > /dev/null
+    sleep 0.5
+    CT_BACK=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
+    echo "  StepBackward: current_time=$CT_BACK"
+    AT_START=$(node -e "
+      const ctRaw = '${CT_BACK}';
+      const ct    = ctRaw === 'null' || ctRaw === '' ? BigInt(0) : BigInt(ctRaw);
+      const start = BigInt('$MS_JAN07');
+      const diff  = ct > start ? ct - start : start - ct;
+      console.log(diff <= BigInt('43200000') ? 'true' : 'false');
+    ")
+    [ "$AT_START" = "true" ] && break
+  done
+  CT_INIT=$(jqn "$(curl -s "$API/replay/status")" "d.current_time")
+  echo "  調整後 CT_INIT=$CT_INIT"
+fi
+
 # ─────────────────────────────────────────────────────────────────────────────
 # TC-A: StepForward ×3 で 2025-01-10 (金) 付近まで進める
 #
