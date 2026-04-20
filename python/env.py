@@ -227,7 +227,7 @@ class FlowsurfaceEnv(gym.Env):
                 r = requests.get(f"{self._base_url}/api/replay/status", timeout=1)
                 if r.status_code == 200:
                     return
-            except requests.ConnectionError:
+            except (requests.ConnectionError, requests.Timeout):
                 pass
             time.sleep(0.2)
 

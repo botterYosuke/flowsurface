@@ -147,6 +147,7 @@ jobs:
           DEV_USER_ID: ${{ secrets.DEV_USER_ID }}
           DEV_PASSWORD: ${{ secrets.DEV_PASSWORD }}
           DEV_SECOND_PASSWORD: ${{ secrets.DEV_SECOND_PASSWORD }}
+          PYTHONUTF8: "1"
         run: |
           if [[ "${{ matrix.script }}" == *.py ]]; then
             FLOWSURFACE_BINARY="$(cygpath -w "$FLOWSURFACE_EXE")" uv run tests/${{ matrix.script }}
@@ -244,6 +245,7 @@ jobs:
           FLOWSURFACE_EXE: ${{ github.workspace }}/target/debug/flowsurface.exe
           E2E_TICKER: HyperliquidLinear:BTC
           IS_HEADLESS: "true"
+          PYTHONUTF8: "1"
         run: |
           if [[ "${{ matrix.script }}" == *.py ]]; then
             FLOWSURFACE_BINARY="$(cygpath -w "$FLOWSURFACE_EXE")" uv run tests/${{ matrix.script }}
@@ -339,6 +341,7 @@ jobs:
           DEV_USER_ID: ${{ secrets.DEV_USER_ID }}
           DEV_PASSWORD: ${{ secrets.DEV_PASSWORD }}
           DEV_SECOND_PASSWORD: ${{ secrets.DEV_SECOND_PASSWORD }}
+          PYTHONUTF8: "1"
         run: |
           if [[ "${{ matrix.script }}" == *.py ]]; then
             FLOWSURFACE_BINARY="$(cygpath -w "$FLOWSURFACE_EXE")" uv run tests/${{ matrix.script }}
