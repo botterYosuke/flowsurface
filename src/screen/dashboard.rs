@@ -1832,85 +1832,21 @@ impl Dashboard {
     }
 
     pub fn market_subscriptions(&self) -> Subscription<exchange::Event> {
-        let unique_streams = self
+        let subs = self
             .streams
             .combined_used()
             .flat_map(|(exchange, specs)| {
-                let mut subs = vec![];
-
-                if !specs.depth.is_empty() {
-                    let depth_subs = specs
-                        .depth
-                        .iter()
-                        .map(|(ticker, aggr, push_freq)| {
-                            let tick_mltp = match aggr {
-                                StreamTicksize::Client => None,
-                                StreamTicksize::ServerSide(tick_mltp) => Some(*tick_mltp),
-                            };
-
-                            let config = StreamConfig::new(
-                                *ticker,
-                                ticker.exchange(),
-                                tick_mltp,
-                                *push_freq,
-                            );
-
-                            Subscription::run_with(config, exchange::connect::depth_stream)
-                        })
-                        .collect::<Vec<_>>();
-
-                    if !depth_subs.is_empty() {
-                        subs.push(Subscription::batch(depth_subs));
-                    }
-                }
-
-                if !specs.trade.is_empty() {
-                    let trade_subs = specs
-                        .trade
-                        .chunks(MAX_TRADE_TICKERS_PER_STREAM)
-                        .map(|tickers| {
-                            let config = StreamConfig::new(
-                                tickers.to_vec(),
-                                exchange,
-                                None,
-                                PushFrequency::ServerDefault,
-                            );
-
-                            Subscription::run_with(config, exchange::connect::trade_stream)
-                        })
-                        .collect::<Vec<_>>();
-
-                    if !trade_subs.is_empty() {
-                        subs.push(Subscription::batch(trade_subs));
-                    }
-                }
-
-                if !specs.kline.is_empty() {
-                    let kline_subs = specs
-                        .kline
-                        .chunks(MAX_KLINE_STREAMS_PER_STREAM)
-                        .map(|streams| {
-                            let config = StreamConfig::new(
-                                streams.to_vec(),
-                                exchange,
-                                None,
-                                PushFrequency::ServerDefault,
-                            );
-
-                            Subscription::run_with(config, exchange::connect::kline_stream)
-                        })
-                        .collect::<Vec<_>>();
-
-                    if !kline_subs.is_empty() {
-                        subs.push(Subscription::batch(kline_subs));
-                    }
-                }
-
-                subs
+                [
+                    build_depth_subs(exchange, specs),
+                    build_trade_subs(exchange, specs),
+                    build_kline_subs(exchange, specs),
+                ]
+                .into_iter()
+                .flatten()
             })
-            .collect::<Vec<Subscription<exchange::Event>>>();
+            .collect::<Vec<_>>();
 
-        Subscription::batch(unique_streams)
+        Subscription::batch(subs)
     }
 
     pub fn theme_updated(&mut self, main_window: window::Id, theme: &iced_core::Theme) {
@@ -2035,6 +1971,80 @@ impl From<fetcher::FetchUpdate> for Message {
             }
         }
     }
+}
+
+fn build_depth_subs(
+    _exchange: exchange::adapter::Exchange,
+    specs: &exchange::adapter::StreamSpecs,
+) -> Option<Subscription<exchange::Event>> {
+    if specs.depth.is_empty() {
+        return None;
+    }
+
+    let subs = specs
+        .depth
+        .iter()
+        .map(|(ticker, aggr, push_freq)| {
+            let tick_mltp = match aggr {
+                StreamTicksize::Client => None,
+                StreamTicksize::ServerSide(tick_mltp) => Some(*tick_mltp),
+            };
+            let config = StreamConfig::new(*ticker, ticker.exchange(), tick_mltp, *push_freq);
+            Subscription::run_with(config, exchange::connect::depth_stream)
+        })
+        .collect::<Vec<_>>();
+
+    Some(Subscription::batch(subs))
+}
+
+fn build_trade_subs(
+    exchange: exchange::adapter::Exchange,
+    specs: &exchange::adapter::StreamSpecs,
+) -> Option<Subscription<exchange::Event>> {
+    if specs.trade.is_empty() {
+        return None;
+    }
+
+    let subs = specs
+        .trade
+        .chunks(MAX_TRADE_TICKERS_PER_STREAM)
+        .map(|tickers| {
+            let config = StreamConfig::new(
+                tickers.to_vec(),
+                exchange,
+                None,
+                PushFrequency::ServerDefault,
+            );
+            Subscription::run_with(config, exchange::connect::trade_stream)
+        })
+        .collect::<Vec<_>>();
+
+    Some(Subscription::batch(subs))
+}
+
+fn build_kline_subs(
+    exchange: exchange::adapter::Exchange,
+    specs: &exchange::adapter::StreamSpecs,
+) -> Option<Subscription<exchange::Event>> {
+    if specs.kline.is_empty() {
+        return None;
+    }
+
+    let subs = specs
+        .kline
+        .chunks(MAX_KLINE_STREAMS_PER_STREAM)
+        .map(|streams| {
+            let config = StreamConfig::new(
+                streams.to_vec(),
+                exchange,
+                None,
+                PushFrequency::ServerDefault,
+            );
+            Subscription::run_with(config, exchange::connect::kline_stream)
+        })
+        .collect::<Vec<_>>();
+
+    Some(Subscription::batch(subs))
 }
 
 #[cfg(test)]
@@ -2658,6 +2668,210 @@ mod tests {
         assert!(
             matches!(event, Some(Event::Notification(_))),
             "VirtualOrderFilled must emit Event::Notification, got {event:?}"
+        );
+    }
+
+    // --- market_subscriptions / build_*_subs のテスト ---
+    //
+    // `Subscription<exchange::Event>` は比較不可なため、
+    // 「空なら None / 非空なら Some」という契約を build_*_subs 関数で検証する。
+
+    fn make_ticker_info_binance() -> exchange::TickerInfo {
+        exchange::TickerInfo::new(
+            exchange::Ticker::new("BTCUSDT", exchange::adapter::Exchange::BinanceLinear),
+            0.1,
+            0.001,
+            None,
+        )
+    }
+
+    fn make_ticker_info_bybit() -> exchange::TickerInfo {
+        exchange::TickerInfo::new(
+            exchange::Ticker::new("BTCUSDT", exchange::adapter::Exchange::BybitLinear),
+            0.1,
+            0.001,
+            None,
+        )
+    }
+
+    #[test]
+    fn build_depth_subs_returns_none_when_specs_depth_is_empty() {
+        use exchange::adapter::{Exchange, StreamSpecs};
+        let specs = StreamSpecs::default();
+        let result = build_depth_subs(Exchange::BinanceLinear, &specs);
+        assert!(
+            result.is_none(),
+            "depth が空のとき build_depth_subs は None を返すこと"
+        );
+    }
+
+    #[test]
+    fn build_depth_subs_returns_some_when_specs_depth_is_non_empty() {
+        use exchange::{
+            PushFrequency,
+            adapter::{Exchange, StreamSpecs, StreamTicksize},
+        };
+        let ticker = make_ticker_info_binance();
+        let specs = StreamSpecs {
+            depth: vec![(ticker, StreamTicksize::Client, PushFrequency::ServerDefault)],
+            ..Default::default()
+        };
+        let result = build_depth_subs(Exchange::BinanceLinear, &specs);
+        assert!(
+            result.is_some(),
+            "depth が非空のとき build_depth_subs は Some を返すこと"
+        );
+    }
+
+    #[test]
+    fn build_trade_subs_returns_none_when_specs_trade_is_empty() {
+        use exchange::adapter::{Exchange, StreamSpecs};
+        let specs = StreamSpecs::default();
+        let result = build_trade_subs(Exchange::BinanceLinear, &specs);
+        assert!(
+            result.is_none(),
+            "trade が空のとき build_trade_subs は None を返すこと"
+        );
+    }
+
+    #[test]
+    fn build_trade_subs_returns_some_when_specs_trade_is_non_empty() {
+        use exchange::adapter::{Exchange, StreamSpecs};
+        let ticker = make_ticker_info_binance();
+        let specs = StreamSpecs {
+            trade: vec![ticker],
+            ..Default::default()
+        };
+        let result = build_trade_subs(Exchange::BinanceLinear, &specs);
+        assert!(
+            result.is_some(),
+            "trade が非空のとき build_trade_subs は Some を返すこと"
+        );
+    }
+
+    #[test]
+    fn build_trade_subs_returns_some_when_trade_exceeds_max_per_stream() {
+        use exchange::{
+            Timeframe,
+            adapter::{Exchange, StreamSpecs},
+        };
+        // MAX_TRADE_TICKERS_PER_STREAM (100) を超える 101 件
+        let ticker = make_ticker_info_binance();
+        let trade: Vec<_> = (0..101)
+            .map(|i| {
+                exchange::TickerInfo::new(
+                    exchange::Ticker::new(
+                        &format!("TICKER{i:03}USDT"),
+                        exchange::adapter::Exchange::BinanceLinear,
+                    ),
+                    0.1,
+                    0.001,
+                    None,
+                )
+            })
+            .collect();
+        let _ = (ticker, Timeframe::M1); // suppress unused warning
+        let specs = StreamSpecs {
+            trade,
+            ..Default::default()
+        };
+        // 101 件は 2 チャンクになるが、Some が返ることを確認
+        let result = build_trade_subs(Exchange::BinanceLinear, &specs);
+        assert!(
+            result.is_some(),
+            "trade が MAX を超えても build_trade_subs は Some を返すこと"
+        );
+    }
+
+    #[test]
+    fn build_kline_subs_returns_none_when_specs_kline_is_empty() {
+        use exchange::adapter::{Exchange, StreamSpecs};
+        let specs = StreamSpecs::default();
+        let result = build_kline_subs(Exchange::BinanceLinear, &specs);
+        assert!(
+            result.is_none(),
+            "kline が空のとき build_kline_subs は None を返すこと"
+        );
+    }
+
+    #[test]
+    fn build_kline_subs_returns_some_when_specs_kline_is_non_empty() {
+        use exchange::{
+            Timeframe,
+            adapter::{Exchange, StreamSpecs},
+        };
+        let ticker = make_ticker_info_binance();
+        let specs = StreamSpecs {
+            kline: vec![(ticker, Timeframe::M1)],
+            ..Default::default()
+        };
+        let result = build_kline_subs(Exchange::BinanceLinear, &specs);
+        assert!(
+            result.is_some(),
+            "kline が非空のとき build_kline_subs は Some を返すこと"
+        );
+    }
+
+    #[test]
+    fn build_kline_subs_returns_some_when_kline_exceeds_max_per_stream() {
+        use exchange::{
+            Timeframe,
+            adapter::{Exchange, StreamSpecs},
+        };
+        // MAX_KLINE_STREAMS_PER_STREAM (100) を超える 101 件
+        let kline: Vec<_> = (0..101)
+            .map(|i| {
+                let info = exchange::TickerInfo::new(
+                    exchange::Ticker::new(
+                        &format!("TICKER{i:03}USDT"),
+                        exchange::adapter::Exchange::BinanceLinear,
+                    ),
+                    0.1,
+                    0.001,
+                    None,
+                );
+                (info, Timeframe::M1)
+            })
+            .collect();
+        let specs = StreamSpecs {
+            kline,
+            ..Default::default()
+        };
+        let result = build_kline_subs(Exchange::BinanceLinear, &specs);
+        assert!(
+            result.is_some(),
+            "kline が MAX を超えても build_kline_subs は Some を返すこと"
+        );
+    }
+
+    #[test]
+    fn market_subscriptions_returns_batch_for_empty_dashboard() {
+        // ストリームが一切ない Dashboard では Subscription::batch([]) が返る。
+        // パニックしないことだけを確認する。
+        let dashboard = Dashboard::default();
+        let _sub = dashboard.market_subscriptions();
+        // コンパイルが通り、パニックしなければ OK
+    }
+
+    #[test]
+    fn depth_subs_use_ticker_exchange_not_argument_exchange() {
+        // build_depth_subs は StreamConfig を ticker.exchange() から生成する。
+        // Bybit TickerInfo を渡した場合、BinanceLinear を引数に渡しても
+        // Some が返ること（exchange 引数は depth では使われない）。
+        use exchange::{
+            PushFrequency,
+            adapter::{Exchange, StreamSpecs, StreamTicksize},
+        };
+        let ticker = make_ticker_info_bybit();
+        let specs = StreamSpecs {
+            depth: vec![(ticker, StreamTicksize::Client, PushFrequency::ServerDefault)],
+            ..Default::default()
+        };
+        // exchange 引数 (BinanceLinear) と ticker の exchange (BybitLinear) が異なるが Some が返る
+        let result = build_depth_subs(Exchange::BinanceLinear, &specs);
+        assert!(
+            result.is_some(),
+            "build_depth_subs は ticker.exchange() を使うため引数 exchange に依存しない"
         );
     }
 }

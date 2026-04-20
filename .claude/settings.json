@@ -107,7 +107,15 @@
       "Skill(tdd)",
       "Skill(tdd:*)",
       "Bash(cargo run:*)",
-      "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\('hooks' in d\\)\")"
+      "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\('hooks' in d\\)\")",
+      "Bash(python tests/s4_multi_pane_binance.py)",
+      "Bash(python tests/s7_mid_replay_pane.py)",
+      "Bash(awk '/^fn render_body\\\\|^fn render_comparison\\\\|^fn render_heatmap\\\\|^fn render_kline\\\\|^fn render_shader_heatmap\\\\|^fn render_ladder/{start=NR} start && /^fn /{if\\(NR!=start\\) {print NR-1 \" \" FILENAME; start=0}}' /c/Users/sasai/Documents/flowsurface/src/screen/dashboard/pane/view.rs)",
+      "Bash(awk 'NR>1{print prev_line, \"→\", $0} {prev_line=$0}')",
+      "Bash(python tests/s15_chart_snapshot.py)",
+      "Bash(python tests/s19_tachibana_chart_snapshot.py)",
+      "Bash(python tests/s6_mixed_timeframes.py)",
+      "Bash(python tests/s23_mid_replay_ticker_change.py)"
     ],
     "additionalDirectories": [
       "C:\\Users\\sasai\\Documents\\marimo\\.claude\\plans",

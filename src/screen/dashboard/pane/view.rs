@@ -588,6 +588,59 @@ fn render_ladder<'a>(
     }
 }
 
+fn build_heatmap_modifiers<'a>(
+    state: &State,
+    id: pane_grid::Pane,
+    tick_size: exchange::unit::PriceStep,
+    modifier: Option<modal::stream::Modifier>,
+) -> (Basis, Element<'a, Message>) {
+    let ticker_info = state.stream_pair();
+    let exchange = ticker_info.as_ref().map(|info| info.ticker.exchange);
+    let basis = state
+        .settings
+        .selected_basis
+        .unwrap_or(Basis::default_heatmap_time(ticker_info));
+    let tick_multiply = state.settings.tick_multiply.unwrap_or(TickMultiplier(5));
+    let kind = ModifierKind::Heatmap(basis, tick_multiply);
+    let price_step = ticker_info
+        .map(|ti| tick_multiply.unscale_step_or_min_tick(tick_size, ti.min_ticksize))
+        .unwrap_or_else(|| tick_multiply.unscale_step(tick_size));
+    let min_ticksize = ticker_info.map(|ti| ti.min_ticksize);
+
+    let modifiers = row![
+        basis_modifier(id, basis, modifier, kind),
+        ticksize_modifier(
+            id,
+            price_step,
+            min_ticksize,
+            tick_multiply,
+            modifier,
+            kind,
+            exchange
+        ),
+    ]
+    .spacing(4);
+
+    (basis, modifiers.into())
+}
+
+fn build_heatmap_indicator_modal<'a>(
+    state: &'a State,
+    id: pane_grid::Pane,
+    indicators: &'a [HeatmapIndicator],
+) -> Option<Element<'a, Message>> {
+    if state.modal == Some(Modal::Indicators) {
+        Some(modal::indicators::view(
+            id,
+            state,
+            indicators,
+            state.stream_pair().map(|i| i.ticker.market_type()),
+        ))
+    } else {
+        None
+    }
+}
+
 fn render_heatmap<'a>(
     state: &'a State,
     chart: &'a Option<HeatmapChart>,
@@ -600,34 +653,7 @@ fn render_heatmap<'a>(
     has_stream: bool,
 ) -> (Element<'a, Message>, Option<Element<'a, Message>>) {
     if let Some(chart) = chart {
-        let ticker_info = state.stream_pair();
-        let exchange = ticker_info.as_ref().map(|info| info.ticker.exchange);
-
-        let basis = state
-            .settings
-            .selected_basis
-            .unwrap_or(Basis::default_heatmap_time(ticker_info));
-        let tick_multiply = state.settings.tick_multiply.unwrap_or(TickMultiplier(5));
-
-        let kind = ModifierKind::Heatmap(basis, tick_multiply);
-        let price_step = ticker_info
-            .map(|ti| tick_multiply.unscale_step_or_min_tick(chart.tick_size(), ti.min_ticksize))
-            .unwrap_or_else(|| tick_multiply.unscale_step(chart.tick_size()));
-        let min_ticksize = ticker_info.map(|ti| ti.min_ticksize);
-
-        let modifiers = row![
-            basis_modifier(id, basis, modifier, kind),
-            ticksize_modifier(
-                id,
-                price_step,
-                min_ticksize,
-                tick_multiply,
-                modifier,
-                kind,
-                exchange
-            ),
-        ]
-        .spacing(4);
+        let (basis, modifiers) = build_heatmap_modifiers(state, id, chart.tick_size(), modifier);
 
         let base = chart::view(chart, indicators, timezone)
             .map(move |message| Message::PaneEvent(id, Event::ChartInteraction(message)));
@@ -641,16 +667,7 @@ fn render_heatmap<'a>(
             )
         };
 
-        let indicator_modal = if state.modal == Some(Modal::Indicators) {
-            Some(modal::indicators::view(
-                id,
-                state,
-                indicators,
-                state.stream_pair().map(|i| i.ticker.market_type()),
-            ))
-        } else {
-            None
-        };
+        let indicator_modal = build_heatmap_indicator_modal(state, id, indicators);
 
         let body = compose_stack_view(
             state,
@@ -662,7 +679,7 @@ fn render_heatmap<'a>(
             None,
             tickers_table,
         );
-        (body, Some(modifiers.into()))
+        (body, Some(modifiers))
     } else {
         let base = uninitialized_base(ContentKind::HeatmapChart, has_stream);
         let body = compose_stack_view(
@@ -793,20 +810,7 @@ fn render_shader_heatmap<'a>(
     has_stream: bool,
 ) -> (Element<'a, Message>, Option<Element<'a, Message>>) {
     if let Some(chart) = chart {
-        let ticker_info = state.stream_pair();
-        let exchange = ticker_info.as_ref().map(|info| info.ticker.exchange);
-
-        let basis = state
-            .settings
-            .selected_basis
-            .unwrap_or(Basis::default_heatmap_time(ticker_info));
-        let tick_multiply = state.settings.tick_multiply.unwrap_or(TickMultiplier(5));
-
-        let kind = ModifierKind::Heatmap(basis, tick_multiply);
-        let price_step = ticker_info
-            .map(|ti| tick_multiply.unscale_step_or_min_tick(chart.tick_size(), ti.min_ticksize))
-            .unwrap_or_else(|| tick_multiply.unscale_step(chart.tick_size()));
-        let min_ticksize = ticker_info.map(|ti| ti.min_ticksize);
+        let (basis, modifiers) = build_heatmap_modifiers(state, id, chart.tick_size(), modifier);
 
         let settings_modal = || {
             heatmap_shader_cfg_view(
@@ -818,30 +822,7 @@ fn render_shader_heatmap<'a>(
             )
         };
 
-        let indicator_modal = if state.modal == Some(Modal::Indicators) {
-            Some(modal::indicators::view(
-                id,
-                state,
-                indicators,
-                state.stream_pair().map(|i| i.ticker.market_type()),
-            ))
-        } else {
-            None
-        };
-
-        let modifiers = row![
-            basis_modifier(id, basis, modifier, kind),
-            ticksize_modifier(
-                id,
-                price_step,
-                min_ticksize,
-                tick_multiply,
-                modifier,
-                kind,
-                exchange
-            ),
-        ]
-        .spacing(4);
+        let indicator_modal = build_heatmap_indicator_modal(state, id, indicators);
 
         let base = HeatmapShader::view(chart, timezone)
             .map(move |message| Message::PaneEvent(id, Event::HeatmapShaderInteraction(message)));
@@ -856,7 +837,7 @@ fn render_shader_heatmap<'a>(
             None,
             tickers_table,
         );
-        (body, Some(modifiers.into()))
+        (body, Some(modifiers))
     } else {
         let base = uninitialized_base(ContentKind::ShaderHeatmap, has_stream);
         let body = compose_stack_view(
