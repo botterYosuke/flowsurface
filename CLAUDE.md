@@ -44,6 +44,9 @@ cargo check
 uv run tests/s1_basic_lifecycle.py   # 例：個別スクリプト（Python 版）
 bash tests/s2_persistence.sh        # 例：bash スクリプト
 # HTTP API はポート 9876 で受け付け（replay_api.rs）
+# 注意: GUI アプリが起動中の状態でテストを実行するとポート衝突が起きる。
+# 各テストは自前でプロセスを起動・終了するため、実行前に既存プロセスを終了すること。
+# 詳細: .claude/skills/e2e-testing/SKILL.md「既存 GUI アプリとのポート衝突」
 ```
 
 ## スキルの使い方ガイド
