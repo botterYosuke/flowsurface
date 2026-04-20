@@ -153,9 +153,8 @@ pub type OrderResult = Result<OrderSuccess, String>;
 // ── パネル状態 ─────────────────────────────────────────────────────────────────
 
 pub struct OrderEntryPanel {
-    // 銘柄情報（チャートペインと連動）
+    // 銘柄情報
     pub issue_code: String,
-    pub issue_name: String,
 
     // 入力フォーム
     pub side: Side,
@@ -179,6 +178,8 @@ pub struct OrderEntryPanel {
     pub last_result: Option<OrderResult>,
     /// true = REPLAYモード（仮想注文）。pane.rs の is_virtual_mode に連動する。
     pub is_virtual: bool,
+    /// 銘柄選択モーダル
+    pub modal: Option<crate::modal::pane::mini_tickers_list::MiniPanel>,
 }
 
 #[derive(Debug, Clone)]
@@ -207,12 +208,10 @@ pub enum Message {
     Submitted,
     /// API 応答を受け取り UI を更新
     OrderCompleted(OrderResult),
-    /// チャートペインからの銘柄連動
-    SyncIssue {
-        issue_code: String,
-        issue_name: String,
-        tick_size: Option<f64>,
-    },
+    /// 銘柄選択モーダルを開く
+    OpenTickerSearch,
+    /// MiniTickersList からのメッセージを委譲
+    MiniTickers(crate::modal::pane::mini_tickers_list::Message),
 }
 
 #[derive(Debug)]
@@ -223,11 +222,16 @@ pub enum Action {
 
 // ── 実装 ──────────────────────────────────────────────────────────────────────
 
+impl Default for OrderEntryPanel {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl OrderEntryPanel {
     pub fn new() -> Self {
         Self {
             issue_code: String::new(),
-            issue_name: String::new(),
             side: Side::Buy,
             account_type: AccountType::Tokutei,
             qty: String::new(),
@@ -242,6 +246,7 @@ impl OrderEntryPanel {
             loading: false,
             last_result: None,
             is_virtual: false,
+            modal: None,
         }
     }
 
@@ -375,21 +380,34 @@ impl OrderEntryPanel {
                 }
                 self.last_result = Some(result);
             }
-            Message::SyncIssue {
-                issue_code,
-                issue_name,
-                tick_size,
-            } => {
-                let issue_changed = self.issue_code != issue_code;
-                self.issue_code = issue_code.clone();
-                self.issue_name = issue_name;
-                self.tick_size = tick_size;
-                // 銘柄変更時に保有株数をリセット
-                if issue_changed {
-                    self.holdings = None;
-                    // 売りモードなら新銘柄の保有株数を取得
-                    if self.side == Side::Sell && !issue_code.is_empty() {
-                        return Some(Action::FetchHoldings { issue_code });
+            Message::OpenTickerSearch => {
+                self.modal = Some(crate::modal::pane::mini_tickers_list::MiniPanel::new());
+            }
+            Message::MiniTickers(msg) => {
+                if let Some(modal) = &mut self.modal {
+                    match modal.update(msg) {
+                        Some(crate::modal::pane::mini_tickers_list::Action::RowSelected(
+                            crate::modal::pane::mini_tickers_list::RowSelection::Switch(
+                                ticker_info,
+                            ),
+                        )) => {
+                            let issue_code = ticker_info.ticker.symbol_and_exchange_string();
+                            let tick_size = f64::from(f32::from(ticker_info.min_ticksize));
+                            let issue_changed = self.issue_code != issue_code;
+                            self.issue_code = issue_code.clone();
+                            self.tick_size = Some(tick_size);
+                            self.modal = None;
+                            if issue_changed {
+                                self.holdings = None;
+                                if self.side == Side::Sell && !issue_code.is_empty() {
+                                    return Some(Action::FetchHoldings { issue_code });
+                                }
+                            }
+                        }
+                        Some(crate::modal::pane::mini_tickers_list::Action::RowSelected(_)) => {
+                            self.modal = None;
+                        }
+                        None => {}
                     }
                 }
             }
@@ -403,14 +421,20 @@ impl OrderEntryPanel {
         let virtual_mode = self.is_virtual || is_replay;
 
         let issue_label = if self.issue_code.is_empty() {
-            text("銘柄未選択").size(13)
+            "銘柄未選択".to_string()
         } else {
-            text(format!("{} {}", self.issue_code, self.issue_name)).size(13)
+            self.issue_code.clone()
         };
+        let is_modal_active = self.modal.is_some();
+        let ticker_btn = button(text(issue_label).size(13))
+            .on_press(Message::OpenTickerSearch)
+            .style(move |theme, status| {
+                crate::style::button::modifier(theme, status, !is_modal_active)
+            });
 
         let mut col = column![
             self.view_side_tabs(),
-            issue_label,
+            ticker_btn,
             self.view_account_row(),
             self.view_qty_row(),
             self.view_price_row(),
@@ -664,7 +688,6 @@ mod tests {
     fn make_panel() -> OrderEntryPanel {
         let mut p = OrderEntryPanel::new();
         p.issue_code = "7203".to_string();
-        p.issue_name = "トヨタ自動車".to_string();
         p.qty = "100".to_string();
         p.second_password = "secret".to_string();
         p
@@ -852,66 +875,6 @@ mod tests {
         assert!(!panel.second_password.is_empty());
     }
 
-    // ── Cycle 7b: SyncIssue — 銘柄切り替えリセット（5-1） ─────────────────
-    // 5-1: 銘柄切り替え時に注文パネルがリセットされること
-
-    #[test]
-    fn sync_issue_resets_holdings_on_issue_change() {
-        let mut panel = make_panel();
-        panel.side = Side::Sell;
-        panel.holdings = Some(500);
-        panel.update(Message::SyncIssue {
-            issue_code: "6758".to_string(), // 別銘柄（ソニー）
-            issue_name: "ソニーグループ".to_string(),
-            tick_size: Some(5.0),
-        });
-        assert!(
-            panel.holdings.is_none(),
-            "銘柄変更で holdings がリセットされるべき"
-        );
-    }
-
-    #[test]
-    fn sync_issue_same_issue_does_not_reset_holdings() {
-        let mut panel = make_panel(); // issue_code = "7203"
-        panel.holdings = Some(200);
-        panel.update(Message::SyncIssue {
-            issue_code: "7203".to_string(), // 同じ銘柄
-            issue_name: "トヨタ自動車".to_string(),
-            tick_size: None,
-        });
-        assert_eq!(panel.holdings, Some(200), "同一銘柄なら holdings を保持");
-    }
-
-    #[test]
-    fn sync_issue_sell_mode_emits_fetch_holdings() {
-        let mut panel = make_panel();
-        panel.side = Side::Sell;
-        let action = panel.update(Message::SyncIssue {
-            issue_code: "6758".to_string(),
-            issue_name: "ソニーグループ".to_string(),
-            tick_size: None,
-        });
-        assert!(
-            matches!(action, Some(Action::FetchHoldings { ref issue_code }) if issue_code == "6758"),
-            "銘柄変更+売りモードで FetchHoldings が発行されるべき: {action:?}"
-        );
-    }
-
-    #[test]
-    fn sync_issue_buy_mode_does_not_emit_fetch_holdings() {
-        let mut panel = make_panel(); // side = Buy
-        let action = panel.update(Message::SyncIssue {
-            issue_code: "6758".to_string(),
-            issue_name: "ソニーグループ".to_string(),
-            tick_size: None,
-        });
-        assert!(
-            action.is_none(),
-            "買いモードでは FetchHoldings を発行しない"
-        );
-    }
-
     // ── Cycle 7c: CashMarginChanged — 現物⇔信用切り替え（5-2） ─────────────
     // 5-2: 現物⇔信用切り替え時の cash_margin フィールド更新
 
@@ -1025,5 +988,124 @@ mod tests {
         let panel = make_panel();
         let theme = iced::Theme::Dark;
         let _elem = panel.view_action_area(&theme, false);
+    }
+
+    // ── Cycle 9: 銘柄手動選択（OpenTickerSearch / MiniTickers） ──────────────
+
+    fn make_ticker_info(symbol: &str) -> exchange::TickerInfo {
+        let ticker = exchange::Ticker::new(symbol, exchange::adapter::Exchange::BinanceSpot);
+        exchange::TickerInfo::new(ticker, 1.0, 1.0, None)
+    }
+
+    #[test]
+    fn open_ticker_search_sets_modal() {
+        let mut panel = make_panel();
+        assert!(panel.modal.is_none());
+        panel.update(Message::OpenTickerSearch);
+        assert!(
+            panel.modal.is_some(),
+            "OpenTickerSearch でモーダルが開くべき"
+        );
+    }
+
+    #[test]
+    fn mini_tickers_switch_updates_issue_code() {
+        let mut panel = make_panel();
+        panel.update(Message::OpenTickerSearch);
+        let ti = make_ticker_info("BTCUSDT");
+        panel.update(Message::MiniTickers(
+            crate::modal::pane::mini_tickers_list::Message::RowSelected(
+                crate::modal::pane::mini_tickers_list::RowSelection::Switch(ti),
+            ),
+        ));
+        assert!(
+            !panel.issue_code.is_empty(),
+            "銘柄選択後に issue_code が設定されるべき"
+        );
+        assert!(
+            panel.tick_size.is_some(),
+            "銘柄選択後に tick_size が設定されるべき"
+        );
+    }
+
+    #[test]
+    fn mini_tickers_switch_closes_modal() {
+        let mut panel = make_panel();
+        panel.update(Message::OpenTickerSearch);
+        let ti = make_ticker_info("BTCUSDT");
+        panel.update(Message::MiniTickers(
+            crate::modal::pane::mini_tickers_list::Message::RowSelected(
+                crate::modal::pane::mini_tickers_list::RowSelection::Switch(ti),
+            ),
+        ));
+        assert!(panel.modal.is_none(), "銘柄選択後にモーダルが閉じるべき");
+    }
+
+    #[test]
+    fn mini_tickers_switch_resets_holdings_on_new_ticker() {
+        let mut panel = make_panel(); // issue_code = "7203"
+        panel.holdings = Some(500);
+        panel.update(Message::OpenTickerSearch);
+        let ti = make_ticker_info("BTCUSDT");
+        panel.update(Message::MiniTickers(
+            crate::modal::pane::mini_tickers_list::Message::RowSelected(
+                crate::modal::pane::mini_tickers_list::RowSelection::Switch(ti),
+            ),
+        ));
+        assert!(
+            panel.holdings.is_none(),
+            "銘柄変更で holdings がリセットされるべき"
+        );
+    }
+
+    #[test]
+    fn mini_tickers_switch_sell_mode_emits_fetch_holdings() {
+        let mut panel = make_panel();
+        panel.side = Side::Sell;
+        panel.update(Message::OpenTickerSearch);
+        let ti = make_ticker_info("BTCUSDT");
+        let action = panel.update(Message::MiniTickers(
+            crate::modal::pane::mini_tickers_list::Message::RowSelected(
+                crate::modal::pane::mini_tickers_list::RowSelection::Switch(ti),
+            ),
+        ));
+        assert!(
+            matches!(action, Some(Action::FetchHoldings { .. })),
+            "売りモード＋銘柄変更で FetchHoldings が発行されるべき: {action:?}"
+        );
+    }
+
+    #[test]
+    fn mini_tickers_switch_buy_mode_no_fetch_holdings() {
+        let mut panel = make_panel();
+        panel.side = Side::Buy;
+        panel.update(Message::OpenTickerSearch);
+        let ti = make_ticker_info("BTCUSDT");
+        let action = panel.update(Message::MiniTickers(
+            crate::modal::pane::mini_tickers_list::Message::RowSelected(
+                crate::modal::pane::mini_tickers_list::RowSelection::Switch(ti),
+            ),
+        ));
+        assert!(
+            action.is_none(),
+            "買いモードでは FetchHoldings を発行しない"
+        );
+    }
+
+    #[test]
+    fn mini_tickers_add_row_selection_is_ignored() {
+        let mut panel = make_panel();
+        panel.update(Message::OpenTickerSearch);
+        let ti = make_ticker_info("BTCUSDT");
+        let action = panel.update(Message::MiniTickers(
+            crate::modal::pane::mini_tickers_list::Message::RowSelected(
+                crate::modal::pane::mini_tickers_list::RowSelection::Add(ti),
+            ),
+        ));
+        assert!(action.is_none(), "Add 選択は無視されるべき");
+        assert!(
+            panel.issue_code == "7203",
+            "Add 選択で issue_code は変わらないべき"
+        );
     }
 }

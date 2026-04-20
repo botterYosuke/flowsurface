@@ -513,41 +513,8 @@ impl Dashboard {
     ) -> Task<Message> {
         if let Some(state) = self.get_mut_pane(main_window, window, selected_pane) {
             let pane_id = state.unique_id();
-            let previous_ticker = state.stream_pair();
-
             let streams = state.set_content_and_streams(vec![ticker_info], content_kind);
             self.streams.extend(streams.iter());
-
-            // Sync ticker change to OrderEntry panes if ticker actually changed
-            let ticker_changed = previous_ticker != Some(ticker_info);
-            if ticker_changed {
-                let issue_code = ticker_info.ticker.symbol_and_exchange_string();
-                let tick_size: f64 = f32::from(ticker_info.min_ticksize) as f64;
-                let sync_task = self.sync_issue_to_order_entry(
-                    main_window,
-                    issue_code.clone(),
-                    issue_code, // Use ticker symbol as both code and name
-                    Some(tick_size),
-                );
-                if !skip_kline_fetch {
-                    for stream in &streams {
-                        if let StreamKind::Kline { .. } = stream {
-                            return Task::batch(vec![
-                                fetcher::kline_fetch_task(
-                                    self.layout_id,
-                                    pane_id,
-                                    *stream,
-                                    None,
-                                    None,
-                                )
-                                .map(Message::from),
-                                sync_task,
-                            ]);
-                        }
-                    }
-                }
-                return sync_task;
-            }
 
             if !skip_kline_fetch {
                 for stream in &streams {
@@ -595,36 +562,6 @@ impl Dashboard {
 
             let pane_id = state.unique_id();
             self.streams.extend(streams.iter());
-
-            // Sync ticker change to OrderEntry panes if ticker actually changed
-            if ticker_changed {
-                let issue_code = ticker_info.ticker.symbol_and_exchange_string();
-                let tick_size: f64 = f32::from(ticker_info.min_ticksize) as f64;
-                let sync_task = self.sync_issue_to_order_entry(
-                    main_window,
-                    issue_code.clone(),
-                    issue_code, // Use ticker symbol as both code and name
-                    Some(tick_size),
-                );
-                if !skip_kline_fetch {
-                    for stream in &streams {
-                        if let StreamKind::Kline { .. } = stream {
-                            return Task::batch(vec![
-                                fetcher::kline_fetch_task(
-                                    self.layout_id,
-                                    pane_id,
-                                    *stream,
-                                    None,
-                                    None,
-                                )
-                                .map(Message::from),
-                                sync_task,
-                            ]);
-                        }
-                    }
-                }
-                return sync_task;
-            }
 
             if !skip_kline_fetch {
                 for stream in &streams {
@@ -1321,132 +1258,5 @@ mod tests {
         let dashboard = Dashboard::default();
         let _sub = dashboard.market_subscriptions();
         // コンパイルが通り、パニックしなければ OK
-    }
-
-    #[test]
-    fn sync_issue_to_order_entry_updates_panel() {
-        // sync_issue_to_order_entry() が OrderEntry ペインを更新することを確認
-        use crate::screen::dashboard::panel::order_entry::OrderEntryPanel;
-
-        let main_window = make_window();
-
-        // 1. Dashboard を作成
-        let mut dashboard = Dashboard::default();
-        let pane1 = *dashboard.panes.iter().next().map(|(p, _)| p).unwrap();
-
-        // 2. ペイン1 を OrderEntry に設定
-        if let Some(state) = dashboard.get_mut_pane(main_window.id, main_window.id, pane1) {
-            state.content = pane::Content::OrderEntry(OrderEntryPanel::new());
-        }
-
-        // 3. OrderEntry の初期状態を確認（銘柄未選択）
-        if let Some(state) = dashboard.get_pane(main_window.id, main_window.id, pane1) {
-            if let pane::Content::OrderEntry(panel) = &state.content {
-                assert_eq!(panel.issue_code, "", "OrderEntry should start empty");
-            }
-        }
-
-        // 4. sync_issue_to_order_entry() を直接呼び出し
-        let _task = dashboard.sync_issue_to_order_entry(
-            main_window.id,
-            "TachibanaSpot:7201".to_string(),
-            "TachibanaSpot:7201".to_string(),
-            Some(0.1),
-        );
-
-        // 5. OrderEntry の issue_code が更新されたことを確認
-        if let Some(state) = dashboard.get_pane(main_window.id, main_window.id, pane1) {
-            if let pane::Content::OrderEntry(panel) = &state.content {
-                assert_eq!(
-                    panel.issue_code, "TachibanaSpot:7201",
-                    "sync_issue_to_order_entry should update issue_code immediately"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn switch_tickers_syncs_to_order_entry_panel() {
-        // チャートペインで銘柄を切り替えると、同じリンクグループの OrderEntry ペインが同期される
-        use crate::screen::dashboard::panel::order_entry::OrderEntryPanel;
-        use data::layout::pane::{ContentKind, LinkGroup};
-        use exchange::adapter::Exchange;
-
-        let main_window = make_window();
-
-        // 1. Dashboard を作成し、最初のペインをチャートペインに設定
-        let mut dashboard = Dashboard::default();
-        let pane1 = *dashboard.panes.iter().next().map(|(p, _)| p).unwrap();
-
-        let toyota = exchange::TickerInfo::new(
-            exchange::Ticker::new("7203", Exchange::Tachibana),
-            0.1,
-            1.0,
-            None,
-        );
-
-        // ペイン1 を Kline チャートに設定（TOYOTA）
-        if let Some(state) = dashboard.get_mut_pane(main_window.id, main_window.id, pane1) {
-            state.set_content_and_streams(vec![toyota.clone()], ContentKind::CandlestickChart);
-            state.link_group = Some(LinkGroup::A);
-        }
-
-        // 2. 2 番目のペインを分割で作成し、OrderEntry に設定
-        let (_pane2, _) = dashboard
-            .panes
-            .split(
-                iced::widget::pane_grid::Axis::Horizontal,
-                pane1,
-                pane::State::new(),
-            )
-            .expect("split should succeed");
-        let pane2 = *dashboard
-            .panes
-            .iter()
-            .find(|(p, _)| **p != pane1)
-            .map(|(p, _)| p)
-            .unwrap();
-
-        if let Some(state) = dashboard.get_mut_pane(main_window.id, main_window.id, pane2) {
-            state.content = pane::Content::OrderEntry(OrderEntryPanel::new());
-            state.link_group = Some(LinkGroup::A); // Same link group as pane1
-        }
-
-        // 3. OrderEntry の初期状態を確認（銘柄未選択）
-        if let Some(state) = dashboard.get_pane(main_window.id, main_window.id, pane2) {
-            if let pane::Content::OrderEntry(panel) = &state.content {
-                assert_eq!(
-                    panel.issue_code, "",
-                    "OrderEntry should start with empty issue_code"
-                );
-            }
-        }
-
-        // 4. チャートペインで NISSAN に切り替え（同じリンクグループなので両方が切り替わる）
-        let nissan = exchange::TickerInfo::new(
-            exchange::Ticker::new("7201", Exchange::Tachibana),
-            0.1,
-            1.0,
-            None,
-        );
-
-        // Set focus to pane1 so init_focused_pane will be called
-        dashboard.focus = Some((main_window.id, pane1));
-
-        let _task = dashboard.switch_tickers_in_group(main_window.id, nissan.clone(), false);
-
-        // 5. OrderEntry の issue_code が NISSAN に更新されていることを確認
-        if let Some(state) = dashboard.get_pane(main_window.id, main_window.id, pane2) {
-            if let pane::Content::OrderEntry(panel) = &state.content {
-                assert_eq!(
-                    panel.issue_code, "TachibanaSpot:7201",
-                    "OrderEntry issue_code should be synced to NISSAN after chart ticker switches"
-                );
-            } else {
-                panic!("pane2 should be OrderEntry panel");
-            }
-        } else {
-            panic!("couldn't get pane2");
-        }
     }
 }
