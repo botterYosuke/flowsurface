@@ -1,5 +1,5 @@
-use super::footprint::{ContentGaps, draw_all_npocs, draw_clusters, effective_cluster_qty};
 use super::KlineChart;
+use super::footprint::{ContentGaps, draw_all_npocs, draw_clusters, effective_cluster_qty};
 use crate::chart::{Chart, Interaction, Message, PlotData, TEXT_SIZE};
 use crate::style;
 use data::chart::KlineChartKind;
