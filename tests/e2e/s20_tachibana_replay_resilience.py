@@ -42,6 +42,18 @@ import requests
 import helpers as _h
 
 
+def _close_with_logout(env: FlowsurfaceEnv) -> None:
+    """teardown ヘルパー: ルート API でセッションを明示切断してから env を閉じる。
+    CI 環境で前ジョブのセッションが残留し次ジョブのログインが失敗する問題を防ぐ。
+    """
+    try:
+        api_post("/api/auth/tachibana/logout")
+        time.sleep(3)  # サーバー側のセッション切断を待つ
+    except Exception:
+        pass
+    env.close()
+
+
 def _tachibana_start(start: str, end: str) -> FlowsurfaceEnv:
     """saved-state を書き込み、FlowsurfaceEnv を起動して返す（close は呼び出し元の責任）。"""
     tachibana_replay_setup(start, end)
@@ -127,7 +139,7 @@ def run_s20() -> None:
                 else:
                     fail("TC-S20-01", f"status={final_status}, ct_advanced={ct_advanced} (Playing または進行を期待)")
         finally:
-            env1.close()
+            _close_with_logout(env1)
 
     # ── TC-S20-02: D1 StepForward/StepBackward の delta 検証 ──────────────────
     print("  [TC-S20-02] D1 StepForward/StepBackward delta 検証...")
@@ -190,7 +202,7 @@ def run_s20() -> None:
                 else:
                     fail("TC-S20-02b", f"status={status}")
         finally:
-            env2.close()
+            _close_with_logout(env2)
 
     # ── TC-S20-03: Live ↔ Replay 高速切替 ───────────────────────────────────
     print("  [TC-S20-03] Live ↔ Replay 高速切替...")
@@ -224,7 +236,7 @@ def run_s20() -> None:
                 else:
                     fail("TC-S20-03", "toggle 連打後にアプリが応答しなくなった")
         finally:
-            env3.close()
+            _close_with_logout(env3)
 
     # ── TC-S20-04: Playing 中の toggle ────────────────────────────────────
     print("  [TC-S20-04] Playing 中の toggle...")
@@ -256,7 +268,7 @@ def run_s20() -> None:
                 else:
                     fail("TC-S20-04", "toggle 後にアプリが応答しなくなった")
         finally:
-            env4.close()
+            _close_with_logout(env4)
 
     # ── TC-S20-05: Paused 中の toggle → Live → 再び Replay ─────────────────
     print("  [TC-S20-05] Paused 中の toggle...")
@@ -315,7 +327,7 @@ def run_s20() -> None:
                     else:
                         fail("TC-S20-05b", "2 回目 toggle 後にアプリが応答しなくなった")
         finally:
-            env5.close()
+            _close_with_logout(env5)
 
 
 def test_s20_tachibana_replay_resilience() -> None:

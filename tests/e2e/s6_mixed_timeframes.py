@@ -44,6 +44,7 @@ from helpers import (
     restore_state,
     utc_offset,
     wait_playing,
+    wait_status,
     FlowsurfaceEnv,
 )
 
@@ -284,7 +285,7 @@ def run_s6_m5only(start: str, end: str) -> None:
         api_post("/api/replay/step-forward")
     except requests.RequestException:
         pass
-    time.sleep(1)
+    wait_status("Paused", 10)                                       # Paused 確定後に読む（was: time.sleep(1)）
     post2 = int(api_get("/api/replay/status").get("current_time") or 0)
     diff2 = post2 - pre2
     if diff2 == STEP_M5:

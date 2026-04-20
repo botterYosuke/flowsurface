@@ -335,14 +335,17 @@ def wait_for_pane_streams_ready(pane_id: str, timeout: int = 30) -> bool:
 def wait_tachibana_session(timeout: int = 120) -> bool:
     """GET /api/auth/tachibana/status → session=present になるまで待つ。"""
     deadline = time.monotonic() + timeout
+    last_body: dict = {}
     while time.monotonic() < deadline:
         try:
             body = requests.get(f"{API_BASE}/api/auth/tachibana/status", timeout=5).json()
+            last_body = body
             if body.get("session") == "present":
                 return True
         except requests.RequestException:
             pass
         time.sleep(1)
+    print(f"  [debug] last tachibana status: {last_body}")  # 診断用: CI ログで原因調査
     return False
 
 

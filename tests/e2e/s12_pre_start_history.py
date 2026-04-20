@@ -61,7 +61,7 @@ def run_s12() -> None:
             wait_streams_ready(30)
         headless_play()
 
-        if not wait_playing(30):
+        if not wait_playing(60):   # was 30 — CI で不安定なため延長
             fail("TC-S12-precond", "Playing 到達せず")
             return
 

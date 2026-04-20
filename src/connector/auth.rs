@@ -30,8 +30,6 @@ pub fn store_session(session: TachibanaSession) {
 }
 
 /// セッションをクリアする（メモリ + keyring）。
-/// 現時点ではログアウト機能未実装のため未使用。
-#[allow(dead_code)]
 pub fn clear_session() {
     if let Ok(mut guard) = SESSION.write() {
         *guard = None;

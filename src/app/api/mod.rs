@@ -110,6 +110,11 @@ impl Flowsurface {
                 })
                 .to_string()
             }
+            AuthCommand::TachibanaLogout => {
+                connector::auth::clear_session();
+                log::info!("Tachibana: explicit logout via API (session cleared)");
+                serde_json::json!({ "ok": true, "action": "logout" }).to_string()
+            }
         }
     }
 

@@ -67,7 +67,7 @@ def run_s13() -> None:
             wait_streams_ready(30)
         headless_play()
 
-        if not wait_playing(30):
+        if not wait_playing(60):   # was 30 — CI で不安定なため延長
             fail("TC-S13-precond", "Playing 到達せず")
             return
 

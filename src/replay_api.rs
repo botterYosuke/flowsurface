@@ -72,6 +72,9 @@ pub enum VirtualExchangeCommand {
 pub enum AuthCommand {
     /// 現在の立花証券セッション有無を返す（`{"session":"present"|"none"}`）。
     TachibanaSessionStatus,
+    /// 立花証券セッションを明示的にログアウトする（`POST /api/auth/tachibana/logout`）。
+    /// メモリセッション + keyring を両方クリアする。CI teardown での競合防止用。
+    TachibanaLogout,
 }
 
 /// E2E テスト fixture 注入コマンド。
@@ -395,6 +398,9 @@ fn route(method: &str, path: &str, body: &str) -> Result<ApiCommand, RouteError>
         // ── 認証（本番ビルドにも含まれる）────────────────────────────────
         ("GET", "/api/auth/tachibana/status") => {
             Ok(ApiCommand::Auth(AuthCommand::TachibanaSessionStatus))
+        }
+        ("POST", "/api/auth/tachibana/logout") => {
+            Ok(ApiCommand::Auth(AuthCommand::TachibanaLogout))
         }
 
         // ── ペイン CRUD ────────────────────────────────────────────────────

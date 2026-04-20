@@ -150,9 +150,9 @@ jobs:
           PYTHONUTF8: "1"
         run: |
           if [[ "${{ matrix.script }}" == *.py ]]; then
-            FLOWSURFACE_BINARY="$(cygpath -w "$FLOWSURFACE_EXE")" uv run tests/${{ matrix.script }}
+            FLOWSURFACE_BINARY="$(cygpath -w "$FLOWSURFACE_EXE")" uv run tests/e2e/${{ matrix.script }}
           else
-            bash tests/${{ matrix.script }}
+            bash tests/e2e/${{ matrix.script }}
           fi
 
       - name: Upload debug log on failure
@@ -248,9 +248,9 @@ jobs:
           PYTHONUTF8: "1"
         run: |
           if [[ "${{ matrix.script }}" == *.py ]]; then
-            FLOWSURFACE_BINARY="$(cygpath -w "$FLOWSURFACE_EXE")" uv run tests/${{ matrix.script }}
+            FLOWSURFACE_BINARY="$(cygpath -w "$FLOWSURFACE_EXE")" uv run tests/e2e/${{ matrix.script }}
           else
-            bash tests/${{ matrix.script }}
+            bash tests/e2e/${{ matrix.script }}
           fi
 
       - name: Upload debug log on failure
@@ -276,6 +276,9 @@ jobs:
       max-parallel: 1
       matrix:
         include:
+          - name: S50 Tachibana login
+            script: s50_tachibana_login.py
+            dev_is_demo: "true"
           - name: S44 Order list
             script: s44_order_list.py
             dev_is_demo: "true"
@@ -344,9 +347,9 @@ jobs:
           PYTHONUTF8: "1"
         run: |
           if [[ "${{ matrix.script }}" == *.py ]]; then
-            FLOWSURFACE_BINARY="$(cygpath -w "$FLOWSURFACE_EXE")" uv run tests/${{ matrix.script }}
+            FLOWSURFACE_BINARY="$(cygpath -w "$FLOWSURFACE_EXE")" uv run tests/e2e/${{ matrix.script }}
           else
-            bash tests/${{ matrix.script }}
+            bash tests/e2e/${{ matrix.script }}
           fi
 
       - name: Upload debug log on failure

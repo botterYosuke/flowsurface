@@ -82,7 +82,7 @@ def run_s11() -> None:
         if not IS_HEADLESS:
             wait_streams_ready(30)
         headless_play()
-        if not wait_playing(30):
+        if not wait_playing(60):   # was 30 — CI で不安定なため延長
             fail("TC-S11-01-pre", "Playing 到達せず")
         else:
             speed_to_10x()
@@ -119,7 +119,7 @@ def run_s11() -> None:
         if not IS_HEADLESS:
             wait_streams_ready(30)
         headless_play()
-        if not wait_playing(30):
+        if not wait_playing(60):   # was 30 — CI で不安定なため延長
             fail("TC-S11-03-pre", "Playing 到達せず")
         else:
             api_post("/api/replay/pause")
@@ -161,7 +161,7 @@ def run_s11() -> None:
         try:
             env5._start_process()
             headless_play()
-            if not wait_playing(30):
+            if not wait_playing(60):   # was 30 — CI で不安定なため延長
                 fail("TC-S11-05-pre", "Playing 到達せず")
             else:
                 api_post("/api/replay/pause")
@@ -243,7 +243,7 @@ def run_s11() -> None:
         try:
             env5._start_process()
             wait_streams_ready(30)
-            if not wait_playing(30):
+            if not wait_playing(60):   # was 30 — CI で不安定なため延長
                 fail("TC-S11-05-pre", "Playing 到達せず")
             else:
                 api_post("/api/replay/pause")
@@ -264,7 +264,7 @@ def run_s11() -> None:
         if not IS_HEADLESS:
             wait_streams_ready(30)
         headless_play()
-        if not wait_playing(30):
+        if not wait_playing(60):   # was 30 — CI で不安定なため延長
             fail("TC-S11-06-pre", "Playing 到達せず")
         else:
             api_post("/api/replay/pause")

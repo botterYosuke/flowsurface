@@ -46,6 +46,18 @@ import helpers as _h
 FAKE_UUID = "ffffffff-ffff-ffff-ffff-ffffffffffff"
 
 
+def _close_with_logout(env: FlowsurfaceEnv) -> None:
+    """teardown ヘルパー: logout API を呢いてから env を閉じる。
+    CI 環境で前ジョブのセッションが残留し次ジョブのログインが失敗する問題を防ぐ。
+    """
+    try:
+        api_post("/api/auth/tachibana/logout")
+        time.sleep(3)  # サーバー側のセッション切断を待つ
+    except Exception:
+        pass
+    env.close()
+
+
 def _write_live_tachibana_fixture() -> None:
     """TachibanaSpot:7203 D1 Live モードのフィクスチャを書き込む（replay フィールドなし）。"""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -159,7 +171,7 @@ def run_s21() -> None:
                 else:
                     fail("TC-S21-03", f"HTTP={http_ticker} alive={alive}")
         finally:
-            env1.close()
+            _close_with_logout(env1)
 
     # ── TC-S21-04: 空 range (start == end) ─────────────────────────────────
     print("  [TC-S21-04] 空 range (start == end)...")
@@ -187,7 +199,7 @@ def run_s21() -> None:
             else:
                 fail("TC-S21-04", "空 range でアプリがクラッシュした")
     finally:
-        env4.close()
+        _close_with_logout(env4)
 
     # ── TC-S21-05: 未来の range (現在時刻 + 24h 先) ──────────────────────────
     print("  [TC-S21-05] 未来 range テスト...")
@@ -216,7 +228,7 @@ def run_s21() -> None:
             else:
                 fail("TC-S21-05", "未来 range でアプリがクラッシュした")
     finally:
-        env5.close()
+        _close_with_logout(env5)
 
     # ── TC-S21-06: StepForward 連打 50 回 (Paused 状態) ─────────────────────
     print("  [TC-S21-06] StepForward 連打 50 回...")
@@ -297,7 +309,7 @@ def run_s21() -> None:
                 fail("TC-S21-07", f"split 繰り返し後にアプリがクラッシュした")
 
         finally:
-            env6.close()
+            _close_with_logout(env6)
 
 
 def test_s21_tachibana_error_boundary() -> None:
