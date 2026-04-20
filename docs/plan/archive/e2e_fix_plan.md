@@ -188,12 +188,33 @@ def wait_tachibana_session(timeout: int = 120) -> bool:
 
 ## 完了チェックリスト
 
-- [ ] A: `s11_bar_step_discrete.py` — 4箇所 30→60秒 ✅
-- [ ] A: `s12_pre_start_history.py` — 1箇所 30→60秒 ✅
-- [ ] A: `s13_step_backward_quality.py` — 1箇所 30→60秒 ✅
-- [ ] B: `s6_mixed_timeframes.py` — `time.sleep(1)` → `wait_status("Paused", 10)` ✅
-- [ ] C-3: `helpers.py` — `wait_tachibana_session` デバッグ出力追加 ✅
-- [ ] C-2: `src/replay_api.rs` logout エンドポイント確認 ✅
-- [ ] C-2: `s20_tachibana_replay_resilience.py` teardown logout 追加 ✅
-- [ ] C-2: `s21_tachibana_error_boundary.py` teardown logout 追加 ✅
-- [ ] CI 再実行で FAIL 件数が低下することを確認 ✅
+- [x] A: `s11_bar_step_discrete.py` — 4箇所 30→60秒 ✅
+- [x] A: `s12_pre_start_history.py` — 1箇所 30→60秒 ✅
+- [x] A: `s13_step_backward_quality.py` — 1箇所 30→60秒 ✅
+- [x] B: `s6_mixed_timeframes.py` — `time.sleep(1)` → `wait_status("Paused", 10)` ✅
+- [x] C-3: `helpers.py` — `wait_tachibana_session` デバッグ出力追加 ✅
+- [x] C-2: `src/replay_api.rs` logout エンドポイント確認（`POST /api/auth/tachibana/logout` 実装済み）✅
+- [x] C-2: `s20_tachibana_replay_resilience.py` — `_close_with_logout()` で全 teardown 実装済み ✅
+- [x] C-2: `s21_tachibana_error_boundary.py` — `_close_with_logout()` で全 teardown 実装済み ✅
+- [ ] CI 再実行で FAIL 件数が低下することを確認
+
+---
+
+## ログ照合検証結果（2026-04-20）
+
+元ログ 58件を照合し、実装済み修正との対応を確認した。
+
+| エラーパターン | ログ検出件数 | 修正適用 | 解消期待度 |
+|-------------|-----------|--------|---------|
+| Playing 到達せず（S11/12/13） | 14件 | A: wait_playing(60) ✅ | **高** |
+| TC-S6-04 diff=60000 | 2件 | B: wait_status("Paused") ✅ | **高** |
+| Tachibana session not established | 12件 | C-2: _close_with_logout ✅ | **中〜高**（資格情報は正常確認済み） |
+| DEV_USER_ID ログイン失敗 | 6件 | C-2: _close_with_logout ✅ | **中**（セッション競合が根本原因） |
+| セッションが切断（code=2） | 2件 | C-2: logout + 3s 待機 ✅ | **中** |
+
+> **注**: カテゴリ C の「DEV_USER_ID ログイン失敗」は資格情報の問題ではなく前ジョブのセッション残留が確定（ローカル単体実行で 100% PASS 確認済み）。`_close_with_logout()` + `time.sleep(3)` で Tachibana サーバ側のセッション切断を待ってから次ジョブが起動するため、改善が見込まれる。
+
+### 修正適用後の期待 FAIL 件数
+- **楽観的（修正が最大限効果的）**: 36件 → **0〜3件**
+- **現実的（セッション競合の解消率 80% 想定）**: 36件 → **4〜8件**
+- **悲観的（CI 固有の遅延が残存）**: 36件 → **10〜15件**

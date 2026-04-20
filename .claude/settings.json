@@ -115,7 +115,8 @@
       "Bash(python tests/s15_chart_snapshot.py)",
       "Bash(python tests/s19_tachibana_chart_snapshot.py)",
       "Bash(python tests/s6_mixed_timeframes.py)",
-      "Bash(python tests/s23_mid_replay_ticker_change.py)"
+      "Bash(python tests/s23_mid_replay_ticker_change.py)",
+      "Bash(xargs -I{} grep -c \"#\\\\[test\\\\]\" {})"
     ],
     "additionalDirectories": [
       "C:\\Users\\sasai\\Documents\\marimo\\.claude\\plans",
