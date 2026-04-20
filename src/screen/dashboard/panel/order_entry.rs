@@ -430,7 +430,8 @@ impl OrderEntryPanel {
             );
         }
 
-        col = col.push(self.view_result_row())
+        col = col
+            .push(self.view_result_row())
             .push(self.view_action_area(theme, virtual_mode));
 
         let body = container(col.padding(8));
