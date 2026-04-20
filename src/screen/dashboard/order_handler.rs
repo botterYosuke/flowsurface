@@ -1,7 +1,7 @@
 use iced::Task;
 
 use super::{Dashboard, Message, pane, panel};
-use crate::window;
+use crate::{connector::order as order_connector, window};
 
 impl Dashboard {
     pub(super) fn handle_order_new_result(
@@ -153,16 +153,25 @@ impl Dashboard {
         issue_name: String,
         tick_size: Option<f64>,
     ) -> Task<Message> {
+        let mut tasks = vec![];
         for (_, _, state) in self.iter_all_panes_mut(main_window) {
+            let pane_id = state.unique_id();
             if let pane::Content::OrderEntry(panel) = &mut state.content {
-                panel.update(panel::order_entry::Message::SyncIssue {
-                    issue_code: issue_code.clone(),
-                    issue_name: issue_name.clone(),
-                    tick_size,
-                });
+                if let Some(panel::order_entry::Action::FetchHoldings { issue_code: code }) =
+                    panel.update(panel::order_entry::Message::SyncIssue {
+                        issue_code: issue_code.clone(),
+                        issue_name: issue_name.clone(),
+                        tick_size,
+                    })
+                {
+                    tasks.push(Task::perform(
+                        order_connector::fetch_holdings(code),
+                        move |result| Message::HoldingsResult { pane_id, result },
+                    ));
+                }
             }
         }
-        Task::none()
+        Task::batch(tasks)
     }
 }
 
