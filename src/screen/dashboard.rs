@@ -258,338 +258,13 @@ impl Dashboard {
                     );
                 }
             },
-            Message::Pane(window, message) => match message {
-                pane::Message::PaneClicked(pane) => {
-                    self.focus = Some((window, pane));
-                }
-                pane::Message::PaneResized(pane_grid::ResizeEvent { split, ratio }) => {
-                    self.panes.resize(split, ratio);
-                }
-                pane::Message::PaneDragged(event) => {
-                    if let pane_grid::DragEvent::Dropped { pane, target } = event {
-                        self.panes.drop(pane, target);
-                    }
-                }
-                pane::Message::SplitPane(axis, pane) => {
-                    let focus_pane = if let Some((new_pane, _)) =
-                        self.panes.split(axis, pane, pane::State::new())
-                    {
-                        Some(new_pane)
-                    } else {
-                        None
-                    };
-
-                    if Some(focus_pane).is_some() {
-                        self.focus = Some((window, focus_pane.unwrap()));
-                    }
-                }
-                pane::Message::ClosePane(pane) => {
-                    if let Some((_, sibling)) = self.panes.close(pane) {
-                        self.focus = Some((window, sibling));
-                    }
-                }
-                pane::Message::MaximizePane(pane) => {
-                    self.panes.maximize(pane);
-                }
-                pane::Message::Restore => {
-                    self.panes.restore();
-                }
-                pane::Message::ReplacePane(pane) => {
-                    if let Some(pane) = self.panes.get_mut(pane) {
-                        *pane = pane::State::new();
-                    }
-
-                    return (self.refresh_streams(main_window.id), None);
-                }
-                pane::Message::VisualConfigChanged(pane, cfg, to_sync) => {
-                    if to_sync {
-                        if let Some(state) = self.get_pane(main_window.id, window, pane) {
-                            let studies_cfg = state.content.studies();
-                            let clusters_cfg = match &state.content {
-                                pane::Content::Kline {
-                                    kind: data::chart::KlineChartKind::Footprint { clusters, .. },
-                                    ..
-                                } => Some(*clusters),
-                                _ => None,
-                            };
-
-                            self.iter_all_panes_mut(main_window.id)
-                                .for_each(|(_, _, state)| {
-                                    let should_apply = match state.settings.visual_config {
-                                        Some(ref current_cfg) => {
-                                            std::mem::discriminant(current_cfg)
-                                                == std::mem::discriminant(&cfg)
-                                        }
-                                        None => matches!(
-                                            (&cfg, &state.content),
-                                            (
-                                                data::layout::pane::VisualConfig::Kline(_),
-                                                pane::Content::Kline { .. }
-                                            ) | (
-                                                data::layout::pane::VisualConfig::Heatmap(_),
-                                                pane::Content::Heatmap { .. }
-                                                    | pane::Content::ShaderHeatmap { .. }
-                                            ) | (
-                                                data::layout::pane::VisualConfig::TimeAndSales(_),
-                                                pane::Content::TimeAndSales(_)
-                                            ) | (
-                                                data::layout::pane::VisualConfig::Comparison(_),
-                                                pane::Content::Comparison(_)
-                                            )
-                                        ),
-                                    };
-
-                                    if should_apply {
-                                        state.settings.visual_config = Some(cfg.clone());
-                                        state.content.change_visual_config(cfg.clone());
-
-                                        if let Some(studies) = &studies_cfg {
-                                            state.content.update_studies(studies.clone());
-                                        }
-
-                                        if let Some(cluster_kind) = &clusters_cfg
-                                            && let pane::Content::Kline { chart, .. } =
-                                                &mut state.content
-                                            && let Some(c) = chart
-                                        {
-                                            c.set_cluster_kind(*cluster_kind);
-                                        }
-                                    }
-                                });
-                        }
-                    } else if let Some(state) = self.get_mut_pane(main_window.id, window, pane) {
-                        state.settings.visual_config = Some(cfg.clone());
-                        state.content.change_visual_config(cfg);
-                    }
-                }
-                pane::Message::SwitchLinkGroup(pane, group) => {
-                    if group.is_none() {
-                        if let Some(state) = self.get_mut_pane(main_window.id, window, pane) {
-                            state.link_group = None;
-                        }
-                        return (Task::none(), None);
-                    }
-
-                    let maybe_ticker_info = self
-                        .iter_all_panes(main_window.id)
-                        .filter(|(w, p, _)| !(*w == window && *p == pane))
-                        .find_map(|(_, _, other_state)| {
-                            if other_state.link_group == group {
-                                other_state.stream_pair()
-                            } else {
-                                None
-                            }
-                        });
-
-                    if let Some(state) = self.get_mut_pane(main_window.id, window, pane) {
-                        state.link_group = group;
-                        state.modal = None;
-
-                        if let Some(ticker_info) = maybe_ticker_info
-                            && state.stream_pair() != Some(ticker_info)
-                        {
-                            let pane_id = state.unique_id();
-                            let content_kind = state.content.kind();
-
-                            let streams =
-                                state.set_content_and_streams(vec![ticker_info], content_kind);
-                            self.streams.extend(streams.iter());
-
-                            for stream in &streams {
-                                if let StreamKind::Kline { .. } = stream {
-                                    return (
-                                        fetcher::kline_fetch_task(
-                                            *layout_id, pane_id, *stream, None, None,
-                                        )
-                                        .map(Message::from),
-                                        None,
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-                pane::Message::Popout => {
-                    return (self.popout_pane(main_window), None);
-                }
-                pane::Message::Merge => {
-                    return (self.merge_pane(main_window), None);
-                }
-                pane::Message::PaneEvent(pane, local) => {
-                    // is_replay をコピーしておく（可変借用と同時参照できないため）
-                    let is_replay = self.is_replay;
-                    if let Some(state) = self.get_mut_pane(main_window.id, window, pane) {
-                        let Some(effect) = state.update(local) else {
-                            return (Task::none(), None);
-                        };
-
-                        let task = match effect {
-                            pane::Effect::RefreshStreams => self.refresh_streams(main_window.id),
-                            pane::Effect::RequestFetch(reqs) => {
-                                let pane_id = state.unique_id();
-                                let ready_streams = state
-                                    .streams
-                                    .ready_iter()
-                                    .map(|iter| iter.copied().collect::<Vec<_>>())
-                                    .unwrap_or_default();
-
-                                fetcher::request_fetch_many(
-                                    pane_id,
-                                    &ready_streams,
-                                    *layout_id,
-                                    reqs.into_iter().map(|r| (r.req_id, r.fetch, r.stream)),
-                                    |handle| {
-                                        if let pane::Content::Kline { chart, .. } =
-                                            &mut state.content
-                                            && let Some(c) = chart
-                                        {
-                                            c.set_handle(handle);
-                                        }
-                                    },
-                                )
-                                .map(Message::from)
-                                .chain(self.refresh_streams(main_window.id))
-                            }
-                            pane::Effect::SwitchTickersInGroup(ticker_info) => {
-                                // main.rs でリプレイ同期（ReloadKlineStream / SyncReplayBuffers）を
-                                // 行うため、Task を直接実行せずにイベントとして伝搬する。
-                                return (
-                                    Task::none(),
-                                    Some(Event::SwitchTickersInGroup { ticker_info }),
-                                );
-                            }
-                            pane::Effect::FocusWidget(id) => {
-                                return (iced::widget::operation::focus(id), None);
-                            }
-                            pane::Effect::ReloadReplayKlines {
-                                old_stream,
-                                new_stream,
-                            } => {
-                                return (
-                                    Task::none(),
-                                    Some(Event::ReloadReplayKlines {
-                                        old_stream,
-                                        new_stream,
-                                    }),
-                                );
-                            }
-                            // ── 注文関連 Effect ──────────────────────────────────────
-                            pane::Effect::SubmitNewOrder(req) => {
-                                if is_replay {
-                                    // REPLAYモードでは実際の発注をブロック
-                                    log::warn!(
-                                        "REPLAY中の発注はブロックされました（新規注文）: {:?}",
-                                        req
-                                    );
-                                    Task::none()
-                                } else {
-                                    let pane_id = state.unique_id();
-                                    Task::perform(
-                                        order_connector::submit_new_order(req),
-                                        move |result| Message::OrderNewResult { pane_id, result },
-                                    )
-                                }
-                            }
-                            pane::Effect::SubmitCorrectOrder(req) => {
-                                if is_replay {
-                                    log::warn!(
-                                        "REPLAY中の発注はブロックされました（訂正注文）: {:?}",
-                                        req
-                                    );
-                                    Task::none()
-                                } else {
-                                    let pane_id = state.unique_id();
-                                    Task::perform(
-                                        order_connector::submit_correct_order(req),
-                                        move |result| Message::OrderModifyResult {
-                                            pane_id,
-                                            result: result.map(|r| r.order_number),
-                                        },
-                                    )
-                                }
-                            }
-                            pane::Effect::SubmitCancelOrder(req) => {
-                                if is_replay {
-                                    log::warn!(
-                                        "REPLAY中の発注はブロックされました（取消注文）: {:?}",
-                                        req
-                                    );
-                                    Task::none()
-                                } else {
-                                    let pane_id = state.unique_id();
-                                    Task::perform(
-                                        order_connector::submit_cancel_order(req),
-                                        move |result| Message::OrderModifyResult {
-                                            pane_id,
-                                            result: result.map(|r| r.order_number),
-                                        },
-                                    )
-                                }
-                            }
-                            pane::Effect::FetchOrders => {
-                                let pane_id = state.unique_id();
-                                let eig_day = self.eig_day_or_today();
-                                Task::perform(
-                                    order_connector::fetch_orders(eig_day),
-                                    move |result| Message::OrdersListResult { pane_id, result },
-                                )
-                            }
-                            pane::Effect::FetchOrderDetail {
-                                order_num,
-                                eig_day: detail_eig_day,
-                            } => {
-                                let pane_id = state.unique_id();
-                                Task::perform(
-                                    order_connector::fetch_order_detail(
-                                        order_num.clone(),
-                                        detail_eig_day,
-                                    ),
-                                    move |result| Message::OrderDetailResult {
-                                        pane_id,
-                                        order_num,
-                                        result,
-                                    },
-                                )
-                            }
-                            pane::Effect::FetchBuyingPower => {
-                                let pane_id = state.unique_id();
-                                Task::perform(
-                                    order_connector::fetch_buying_power(),
-                                    move |result| Message::BuyingPowerResult { pane_id, result },
-                                )
-                            }
-                            pane::Effect::FetchHoldings { issue_code } => {
-                                let pane_id = state.unique_id();
-                                Task::perform(
-                                    order_connector::fetch_holdings(issue_code),
-                                    move |result| Message::HoldingsResult { pane_id, result },
-                                )
-                            }
-                            pane::Effect::SyncIssueToOrderEntry {
-                                issue_code,
-                                issue_name,
-                                tick_size,
-                            } => self.sync_issue_to_order_entry(
-                                main_window.id,
-                                issue_code,
-                                issue_name,
-                                tick_size,
-                            ),
-                            pane::Effect::SubmitVirtualOrder(vo) => {
-                                // main.rs の VirtualExchangeEngine に委譲する
-                                return (Task::none(), Some(Event::SubmitVirtualOrder(vo)));
-                            }
-                        };
-                        return (task, None);
-                    }
-                }
-            },
-            Message::RequestPalette => {
-                return (Task::none(), Some(Event::RequestPalette));
+            Message::Pane(window, msg) => {
+                return self.handle_pane_message(window, msg, main_window, layout_id);
             }
+            Message::RequestPalette => return (Task::none(), Some(Event::RequestPalette)),
             Message::ChangePaneStatus(pane_id, status) => {
-                if let Some(pane_state) = self.get_mut_pane_state_by_uuid(main_window.id, pane_id) {
-                    pane_state.status = status;
+                if let Some(state) = self.get_mut_pane_state_by_uuid(main_window.id, pane_id) {
+                    state.status = status;
                 }
             }
             Message::DistributeFetchedData {
@@ -617,113 +292,549 @@ impl Dashboard {
             Message::Notification(toast) => {
                 return (Task::none(), Some(Event::Notification(toast)));
             }
-            // ── 注文 API 応答ハンドラ ─────────────────────────────────────────
             Message::OrderNewResult { pane_id, result } => {
-                use panel::order_entry::OrderSuccess;
-                let order_result = match result {
-                    Ok(ref resp) => {
-                        // 初回注文成功時に営業日を保存
-                        if !resp.eig_day.is_empty() {
-                            self.eig_day = Some(resp.eig_day.clone());
-                        }
-                        Ok(OrderSuccess {
-                            order_num: resp.order_number.clone(),
-                            warning: if resp.warning_code == "0" || resp.warning_code.is_empty() {
-                                None
-                            } else {
-                                Some(resp.warning_text.clone())
-                            },
-                        })
-                    }
-                    Err(e) => Err(e),
-                };
-                if let Some(state) = self.get_mut_pane_state_by_uuid(main_window.id, pane_id)
-                    && let pane::Content::OrderEntry(panel) = &mut state.content
-                {
-                    panel.update(panel::order_entry::Message::OrderCompleted(order_result));
-                }
+                self.handle_order_new_result(pane_id, result, main_window.id);
             }
             Message::OrderModifyResult { pane_id, result } => {
-                if let Some(state) = self.get_mut_pane_state_by_uuid(main_window.id, pane_id)
-                    && let pane::Content::OrderList(panel) = &mut state.content
-                {
-                    panel.update(panel::order_list::Message::ModifyCompleted(result));
-                }
+                self.handle_order_modify_result(pane_id, result, main_window.id);
             }
             Message::OrdersListResult { pane_id, result } => {
-                if let Some(state) = self.get_mut_pane_state_by_uuid(main_window.id, pane_id)
-                    && let pane::Content::OrderList(panel) = &mut state.content
-                {
-                    match result {
-                        Ok(orders) => {
-                            panel.update(panel::order_list::Message::OrdersUpdated(orders));
-                        }
-                        Err(e) => {
-                            panel.update(panel::order_list::Message::ModifyCompleted(Err(e)));
-                        }
-                    }
-                }
+                self.handle_orders_list_result(pane_id, result, main_window.id);
             }
             Message::OrderDetailResult {
                 pane_id,
                 order_num,
                 result,
             } => {
-                if let Some(state) = self.get_mut_pane_state_by_uuid(main_window.id, pane_id)
-                    && let pane::Content::OrderList(panel) = &mut state.content
-                    && let Ok(executions) = result
+                self.handle_order_detail_result(pane_id, order_num, result, main_window.id);
+            }
+            Message::BuyingPowerResult { pane_id, result } => {
+                self.handle_buying_power_result(pane_id, result, main_window.id);
+            }
+            Message::HoldingsResult { pane_id, result } => {
+                self.handle_holdings_result(pane_id, result, main_window.id);
+            }
+            Message::VirtualOrderFilled(fill) => {
+                return self.handle_virtual_order_filled(fill);
+            }
+        }
+
+        (Task::none(), None)
+    }
+
+    fn handle_pane_message(
+        &mut self,
+        window: window::Id,
+        message: pane::Message,
+        main_window: &Window,
+        layout_id: &uuid::Uuid,
+    ) -> (Task<Message>, Option<Event>) {
+        match message {
+            pane::Message::PaneClicked(pane) => {
+                self.focus = Some((window, pane));
+            }
+            pane::Message::PaneResized(pane_grid::ResizeEvent { split, ratio }) => {
+                self.panes.resize(split, ratio);
+            }
+            pane::Message::PaneDragged(event) => {
+                if let pane_grid::DragEvent::Dropped { pane, target } = event {
+                    self.panes.drop(pane, target);
+                }
+            }
+            pane::Message::SplitPane(axis, pane) => {
+                if let Some((new_pane, _)) = self.panes.split(axis, pane, pane::State::new()) {
+                    self.focus = Some((window, new_pane));
+                }
+            }
+            pane::Message::ClosePane(pane) => {
+                if let Some((_, sibling)) = self.panes.close(pane) {
+                    self.focus = Some((window, sibling));
+                }
+            }
+            pane::Message::MaximizePane(pane) => {
+                self.panes.maximize(pane);
+            }
+            pane::Message::Restore => {
+                self.panes.restore();
+            }
+            pane::Message::ReplacePane(pane) => {
+                if let Some(pane) = self.panes.get_mut(pane) {
+                    *pane = pane::State::new();
+                }
+                return (self.refresh_streams(main_window.id), None);
+            }
+            pane::Message::VisualConfigChanged(pane, cfg, to_sync) => {
+                self.handle_visual_config_changed(window, pane, cfg, to_sync, main_window.id);
+            }
+            pane::Message::SwitchLinkGroup(pane, group) => {
+                return self.handle_switch_link_group(window, pane, group, main_window, layout_id);
+            }
+            pane::Message::Popout => return (self.popout_pane(main_window), None),
+            pane::Message::Merge => return (self.merge_pane(main_window), None),
+            pane::Message::PaneEvent(pane, local) => {
+                return self.handle_pane_event(window, pane, local, main_window, layout_id);
+            }
+        }
+        (Task::none(), None)
+    }
+
+    fn handle_visual_config_changed(
+        &mut self,
+        window: window::Id,
+        pane: pane_grid::Pane,
+        cfg: data::layout::pane::VisualConfig,
+        to_sync: bool,
+        main_window: window::Id,
+    ) {
+        if to_sync {
+            if let Some(state) = self.get_pane(main_window, window, pane) {
+                let studies_cfg = state.content.studies();
+                let clusters_cfg = match &state.content {
+                    pane::Content::Kline {
+                        kind: data::chart::KlineChartKind::Footprint { clusters, .. },
+                        ..
+                    } => Some(*clusters),
+                    _ => None,
+                };
+
+                self.iter_all_panes_mut(main_window)
+                    .for_each(|(_, _, state)| {
+                        let should_apply = Self::visual_config_should_apply(&cfg, state);
+
+                        if should_apply {
+                            state.settings.visual_config = Some(cfg.clone());
+                            state.content.change_visual_config(cfg.clone());
+
+                            if let Some(studies) = &studies_cfg {
+                                state.content.update_studies(studies.clone());
+                            }
+
+                            if let Some(cluster_kind) = &clusters_cfg
+                                && let pane::Content::Kline { chart, .. } = &mut state.content
+                                && let Some(c) = chart
+                            {
+                                c.set_cluster_kind(*cluster_kind);
+                            }
+                        }
+                    });
+            }
+        } else if let Some(state) = self.get_mut_pane(main_window, window, pane) {
+            state.settings.visual_config = Some(cfg.clone());
+            state.content.change_visual_config(cfg);
+        }
+    }
+
+    fn visual_config_should_apply(
+        cfg: &data::layout::pane::VisualConfig,
+        state: &pane::State,
+    ) -> bool {
+        match state.settings.visual_config {
+            Some(ref current_cfg) => {
+                std::mem::discriminant(current_cfg) == std::mem::discriminant(cfg)
+            }
+            None => matches!(
+                (cfg, &state.content),
+                (
+                    data::layout::pane::VisualConfig::Kline(_),
+                    pane::Content::Kline { .. }
+                ) | (
+                    data::layout::pane::VisualConfig::Heatmap(_),
+                    pane::Content::Heatmap { .. } | pane::Content::ShaderHeatmap { .. }
+                ) | (
+                    data::layout::pane::VisualConfig::TimeAndSales(_),
+                    pane::Content::TimeAndSales(_)
+                ) | (
+                    data::layout::pane::VisualConfig::Comparison(_),
+                    pane::Content::Comparison(_)
+                )
+            ),
+        }
+    }
+
+    fn handle_switch_link_group(
+        &mut self,
+        window: window::Id,
+        pane: pane_grid::Pane,
+        group: Option<data::layout::pane::LinkGroup>,
+        main_window: &Window,
+        layout_id: &uuid::Uuid,
+    ) -> (Task<Message>, Option<Event>) {
+        if group.is_none() {
+            if let Some(state) = self.get_mut_pane(main_window.id, window, pane) {
+                state.link_group = None;
+            }
+            return (Task::none(), None);
+        }
+
+        let maybe_ticker_info = self
+            .iter_all_panes(main_window.id)
+            .filter(|(w, p, _)| !(*w == window && *p == pane))
+            .find_map(|(_, _, other_state)| {
+                if other_state.link_group == group {
+                    other_state.stream_pair()
+                } else {
+                    None
+                }
+            });
+
+        if let Some(state) = self.get_mut_pane(main_window.id, window, pane) {
+            state.link_group = group;
+            state.modal = None;
+
+            if let Some(ticker_info) = maybe_ticker_info
+                && state.stream_pair() != Some(ticker_info)
+            {
+                let pane_id = state.unique_id();
+                let content_kind = state.content.kind();
+
+                let streams = state.set_content_and_streams(vec![ticker_info], content_kind);
+                self.streams.extend(streams.iter());
+
+                for stream in &streams {
+                    if let StreamKind::Kline { .. } = stream {
+                        return (
+                            fetcher::kline_fetch_task(*layout_id, pane_id, *stream, None, None)
+                                .map(Message::from),
+                            None,
+                        );
+                    }
+                }
+            }
+        }
+
+        (Task::none(), None)
+    }
+
+    fn handle_pane_event(
+        &mut self,
+        window: window::Id,
+        pane: pane_grid::Pane,
+        local: pane::Event,
+        main_window: &Window,
+        layout_id: &uuid::Uuid,
+    ) -> (Task<Message>, Option<Event>) {
+        let (is_replay, eig_day) = (self.is_replay, self.eig_day_or_today());
+        let Some(state) = self.get_mut_pane(main_window.id, window, pane) else {
+            return (Task::none(), None);
+        };
+        let Some(effect) = state.update(local) else {
+            return (Task::none(), None);
+        };
+        match effect {
+            pane::Effect::RefreshStreams => (self.refresh_streams(main_window.id), None),
+            pane::Effect::RequestFetch(reqs) => {
+                let task = Self::handle_request_fetch(state, reqs, *layout_id);
+                (task.chain(self.refresh_streams(main_window.id)), None)
+            }
+            pane::Effect::SwitchTickersInGroup(ticker_info) => (
+                Task::none(),
+                Some(Event::SwitchTickersInGroup { ticker_info }),
+            ),
+            pane::Effect::FocusWidget(id) => (iced::widget::operation::focus(id), None),
+            pane::Effect::ReloadReplayKlines {
+                old_stream,
+                new_stream,
+            } => (
+                Task::none(),
+                Some(Event::ReloadReplayKlines {
+                    old_stream,
+                    new_stream,
+                }),
+            ),
+            pane::Effect::SyncIssueToOrderEntry {
+                issue_code,
+                issue_name,
+                tick_size,
+            } => (
+                self.sync_issue_to_order_entry(main_window.id, issue_code, issue_name, tick_size),
+                None,
+            ),
+            pane::Effect::SubmitVirtualOrder(vo) => {
+                (Task::none(), Some(Event::SubmitVirtualOrder(vo)))
+            }
+            effect @ (pane::Effect::SubmitNewOrder(_)
+            | pane::Effect::SubmitCorrectOrder(_)
+            | pane::Effect::SubmitCancelOrder(_)
+            | pane::Effect::FetchOrders
+            | pane::Effect::FetchOrderDetail { .. }
+            | pane::Effect::FetchBuyingPower
+            | pane::Effect::FetchHoldings { .. }) => {
+                let pane_id = state.unique_id();
+                let task = Self::order_effect_task(effect, is_replay, pane_id, eig_day);
+                (task, None)
+            }
+        }
+    }
+
+    fn handle_request_fetch(
+        state: &mut pane::State,
+        reqs: Vec<crate::connector::fetcher::FetchSpec>,
+        layout_id: uuid::Uuid,
+    ) -> Task<Message> {
+        let pane_id = state.unique_id();
+        let ready_streams = state
+            .streams
+            .ready_iter()
+            .map(|iter| iter.copied().collect::<Vec<_>>())
+            .unwrap_or_default();
+
+        fetcher::request_fetch_many(
+            pane_id,
+            &ready_streams,
+            layout_id,
+            reqs.into_iter().map(|r| (r.req_id, r.fetch, r.stream)),
+            |handle| {
+                if let pane::Content::Kline { chart, .. } = &mut state.content
+                    && let Some(c) = chart
                 {
+                    c.set_handle(handle);
+                }
+            },
+        )
+        .map(Message::from)
+    }
+
+    fn order_effect_task(
+        effect: pane::Effect,
+        is_replay: bool,
+        pane_id: uuid::Uuid,
+        eig_day: String,
+    ) -> Task<Message> {
+        match effect {
+            effect @ (pane::Effect::SubmitNewOrder(_)
+            | pane::Effect::SubmitCorrectOrder(_)
+            | pane::Effect::SubmitCancelOrder(_)) => {
+                Self::submit_effect_task(effect, is_replay, pane_id)
+            }
+            effect => Self::fetch_effect_task(effect, pane_id, eig_day),
+        }
+    }
+
+    fn submit_effect_task(
+        effect: pane::Effect,
+        is_replay: bool,
+        pane_id: uuid::Uuid,
+    ) -> Task<Message> {
+        match effect {
+            effect @ (pane::Effect::SubmitNewOrder(_)
+            | pane::Effect::SubmitCorrectOrder(_)
+            | pane::Effect::SubmitCancelOrder(_))
+                if is_replay =>
+            {
+                log::warn!("REPLAY中の発注はブロックされました: {:?}", effect);
+                Task::none()
+            }
+            pane::Effect::SubmitNewOrder(req) => {
+                Task::perform(order_connector::submit_new_order(req), move |result| {
+                    Message::OrderNewResult { pane_id, result }
+                })
+            }
+            pane::Effect::SubmitCorrectOrder(req) => {
+                Task::perform(order_connector::submit_correct_order(req), move |result| {
+                    Message::OrderModifyResult {
+                        pane_id,
+                        result: result.map(|r| r.order_number),
+                    }
+                })
+            }
+            pane::Effect::SubmitCancelOrder(req) => {
+                Task::perform(order_connector::submit_cancel_order(req), move |result| {
+                    Message::OrderModifyResult {
+                        pane_id,
+                        result: result.map(|r| r.order_number),
+                    }
+                })
+            }
+            // order_effect_task が SubmitNew/Correct/Cancel のみをここに渡すことを保証する
+            _ => unreachable!("non-submit effect passed to submit_effect_task"),
+        }
+    }
+
+    fn fetch_effect_task(
+        effect: pane::Effect,
+        pane_id: uuid::Uuid,
+        eig_day: String,
+    ) -> Task<Message> {
+        match effect {
+            pane::Effect::FetchOrders => {
+                Task::perform(order_connector::fetch_orders(eig_day), move |result| {
+                    Message::OrdersListResult { pane_id, result }
+                })
+            }
+            pane::Effect::FetchOrderDetail {
+                order_num,
+                eig_day: detail_eig_day,
+            } => Task::perform(
+                order_connector::fetch_order_detail(order_num.clone(), detail_eig_day),
+                move |result| Message::OrderDetailResult {
+                    pane_id,
+                    order_num,
+                    result,
+                },
+            ),
+            pane::Effect::FetchBuyingPower => {
+                Task::perform(order_connector::fetch_buying_power(), move |result| {
+                    Message::BuyingPowerResult { pane_id, result }
+                })
+            }
+            pane::Effect::FetchHoldings { issue_code } => {
+                Task::perform(order_connector::fetch_holdings(issue_code), move |result| {
+                    Message::HoldingsResult { pane_id, result }
+                })
+            }
+            // order_effect_task が FetchOrders/Detail/BuyingPower/Holdings のみをここに渡すことを保証する
+            _ => unreachable!("non-fetch effect passed to fetch_effect_task"),
+        }
+    }
+
+    fn handle_order_new_result(
+        &mut self,
+        pane_id: uuid::Uuid,
+        result: Result<exchange::adapter::tachibana::NewOrderResponse, String>,
+        main_window: window::Id,
+    ) {
+        use panel::order_entry::OrderSuccess;
+        let order_result = match result {
+            Ok(ref resp) => {
+                if !resp.eig_day.is_empty() {
+                    self.eig_day = Some(resp.eig_day.clone());
+                }
+                Ok(OrderSuccess {
+                    order_num: resp.order_number.clone(),
+                    warning: if resp.warning_code == "0" || resp.warning_code.is_empty() {
+                        None
+                    } else {
+                        Some(resp.warning_text.clone())
+                    },
+                })
+            }
+            Err(e) => Err(e),
+        };
+        if let Some(state) = self.get_mut_pane_state_by_uuid(main_window, pane_id)
+            && let pane::Content::OrderEntry(panel) = &mut state.content
+        {
+            panel.update(panel::order_entry::Message::OrderCompleted(order_result));
+        }
+    }
+
+    fn handle_order_modify_result(
+        &mut self,
+        pane_id: uuid::Uuid,
+        result: Result<String, String>,
+        main_window: window::Id,
+    ) {
+        if let Some(state) = self.get_mut_pane_state_by_uuid(main_window, pane_id)
+            && let pane::Content::OrderList(panel) = &mut state.content
+        {
+            panel.update(panel::order_list::Message::ModifyCompleted(result));
+        }
+    }
+
+    fn handle_orders_list_result(
+        &mut self,
+        pane_id: uuid::Uuid,
+        result: Result<Vec<exchange::adapter::tachibana::OrderRecord>, String>,
+        main_window: window::Id,
+    ) {
+        if let Some(state) = self.get_mut_pane_state_by_uuid(main_window, pane_id)
+            && let pane::Content::OrderList(panel) = &mut state.content
+        {
+            match result {
+                Ok(orders) => {
+                    panel.update(panel::order_list::Message::OrdersUpdated(orders));
+                }
+                Err(e) => {
+                    panel.update(panel::order_list::Message::ModifyCompleted(Err(e)));
+                }
+            }
+        }
+    }
+
+    fn handle_order_detail_result(
+        &mut self,
+        pane_id: uuid::Uuid,
+        order_num: String,
+        result: Result<Vec<exchange::adapter::tachibana::ExecutionRecord>, String>,
+        main_window: window::Id,
+    ) {
+        if let Some(state) = self.get_mut_pane_state_by_uuid(main_window, pane_id)
+            && let pane::Content::OrderList(panel) = &mut state.content
+        {
+            match result {
+                Ok(executions) => {
                     panel.update(panel::order_list::Message::ExecutionsUpdated {
                         order_num,
                         executions,
                     });
                 }
-            }
-            Message::BuyingPowerResult { pane_id, result } => {
-                if let Some(state) = self.get_mut_pane_state_by_uuid(main_window.id, pane_id)
-                    && let pane::Content::BuyingPower(panel) = &mut state.content
-                {
-                    match result {
-                        Ok((cash, margin)) => {
-                            panel.update(panel::buying_power::Message::BuyingPowerUpdated {
-                                cash_buying_power: cash.cash_buying_power,
-                                nisa_growth_buying_power: cash.nisa_growth_buying_power,
-                                shortage_flag: cash.shortage_flag,
-                            });
-                            panel.update(panel::buying_power::Message::MarginPowerUpdated {
-                                margin_new_order_power: margin.margin_new_order_power,
-                                maintenance_margin_rate: margin.maintenance_margin_rate,
-                                margin_call_flag: margin.margin_call_flag,
-                            });
-                        }
-                        Err(e) => {
-                            panel.update(panel::buying_power::Message::FetchFailed(e));
-                        }
-                    }
+                Err(e) => {
+                    panel.update(panel::order_list::Message::ModifyCompleted(Err(e)));
                 }
-            }
-            Message::HoldingsResult { pane_id, result } => {
-                if let Some(state) = self.get_mut_pane_state_by_uuid(main_window.id, pane_id)
-                    && let pane::Content::OrderEntry(panel) = &mut state.content
-                {
-                    panel.update(panel::order_entry::Message::HoldingsUpdated(result.ok()));
-                }
-            }
-            Message::VirtualOrderFilled(fill) => {
-                // 仮想約定通知をトーストで表示する
-                let side_str = match fill.side {
-                    crate::replay::virtual_exchange::PositionSide::Long => "買い",
-                    crate::replay::virtual_exchange::PositionSide::Short => "売り",
-                };
-                let msg = format!(
-                    "[仮想] 約定: {} {} {:.4} @ {:.2}",
-                    fill.ticker, side_str, fill.qty, fill.fill_price
-                );
-                return (Task::none(), Some(Event::Notification(Toast::info(msg))));
             }
         }
+    }
 
-        (Task::none(), None)
+    fn handle_buying_power_result(
+        &mut self,
+        pane_id: uuid::Uuid,
+        result: Result<
+            (
+                exchange::adapter::tachibana::BuyingPowerResponse,
+                exchange::adapter::tachibana::MarginPowerResponse,
+            ),
+            String,
+        >,
+        main_window: window::Id,
+    ) {
+        if let Some(state) = self.get_mut_pane_state_by_uuid(main_window, pane_id)
+            && let pane::Content::BuyingPower(panel) = &mut state.content
+        {
+            match result {
+                Ok((cash, margin)) => {
+                    panel.update(panel::buying_power::Message::BuyingPowerUpdated {
+                        cash_buying_power: cash.cash_buying_power,
+                        nisa_growth_buying_power: cash.nisa_growth_buying_power,
+                        shortage_flag: cash.shortage_flag,
+                    });
+                    panel.update(panel::buying_power::Message::MarginPowerUpdated {
+                        margin_new_order_power: margin.margin_new_order_power,
+                        maintenance_margin_rate: margin.maintenance_margin_rate,
+                        margin_call_flag: margin.margin_call_flag,
+                    });
+                }
+                Err(e) => {
+                    panel.update(panel::buying_power::Message::FetchFailed(e));
+                }
+            }
+        }
+    }
+
+    fn handle_holdings_result(
+        &mut self,
+        pane_id: uuid::Uuid,
+        result: Result<u64, String>,
+        main_window: window::Id,
+    ) {
+        if let Some(state) = self.get_mut_pane_state_by_uuid(main_window, pane_id)
+            && let pane::Content::OrderEntry(panel) = &mut state.content
+        {
+            panel.update(panel::order_entry::Message::HoldingsUpdated(result.ok()));
+        }
+    }
+
+    fn handle_virtual_order_filled(
+        &self,
+        fill: crate::replay::virtual_exchange::FillEvent,
+    ) -> (Task<Message>, Option<Event>) {
+        let side_str = match fill.side {
+            crate::replay::virtual_exchange::PositionSide::Long => "買い",
+            crate::replay::virtual_exchange::PositionSide::Short => "売り",
+        };
+        let msg = format!(
+            "[仮想] 約定: {} {} {:.4} @ {:.2}",
+            fill.ticker, side_str, fill.qty, fill.fill_price
+        );
+        (Task::none(), Some(Event::Notification(Toast::info(msg))))
     }
 
     /// 営業日を返す。未取得の場合は今日の日付 (YYYYMMDD) をローカル時計から生成する。
@@ -2435,6 +2546,118 @@ mod tests {
             matches!(&event, Some(Event::SwitchTickersInGroup { ticker_info: ti }) if *ti == ticker_info),
             "expected Some(Event::SwitchTickersInGroup {{ ticker_info }}) but got {:?}",
             event
+        );
+    }
+
+    // --- update() Message バリアントの振る舞いテスト ---
+
+    fn make_window() -> crate::window::Window {
+        crate::window::Window::new(iced::window::Id::unique())
+    }
+
+    #[test]
+    fn update_request_palette_emits_event() {
+        let main_window = make_window();
+        let layout_id = uuid::Uuid::new_v4();
+        let mut dashboard = Dashboard::default();
+
+        let (_task, event) = dashboard.update(Message::RequestPalette, &main_window, &layout_id);
+
+        assert!(
+            matches!(event, Some(Event::RequestPalette)),
+            "RequestPalette must emit Event::RequestPalette, got {event:?}"
+        );
+    }
+
+    #[test]
+    fn update_notification_passes_through() {
+        use crate::widget::toast::Toast;
+        let main_window = make_window();
+        let layout_id = uuid::Uuid::new_v4();
+        let mut dashboard = Dashboard::default();
+
+        let toast = Toast::info("test message".to_string());
+        let (_task, event) = dashboard.update(
+            Message::Notification(toast.clone()),
+            &main_window,
+            &layout_id,
+        );
+
+        assert!(
+            matches!(event, Some(Event::Notification(_))),
+            "Notification must emit Event::Notification, got {event:?}"
+        );
+    }
+
+    #[test]
+    fn update_resolve_streams_emits_event() {
+        let main_window = make_window();
+        let layout_id = uuid::Uuid::new_v4();
+        let mut dashboard = Dashboard::default();
+        let pane_id = uuid::Uuid::new_v4();
+
+        let (_task, event) = dashboard.update(
+            Message::ResolveStreams(pane_id, vec![]),
+            &main_window,
+            &layout_id,
+        );
+
+        assert!(
+            matches!(event, Some(Event::ResolveStreams { pane_id: pid, .. }) if pid == pane_id),
+            "ResolveStreams must emit Event::ResolveStreams with matching pane_id, got {event:?}"
+        );
+    }
+
+    #[test]
+    fn update_change_pane_status_updates_state() {
+        use crate::connector::fetcher::InfoKind;
+        let main_window = make_window();
+        let layout_id = uuid::Uuid::new_v4();
+        let mut dashboard = Dashboard::default();
+
+        let pane = *dashboard.panes.iter().next().map(|(p, _)| p).unwrap();
+        let pane_uuid = dashboard.panes.get(pane).unwrap().unique_id();
+
+        let (_task, event) = dashboard.update(
+            Message::ChangePaneStatus(pane_uuid, pane::Status::Loading(InfoKind::FetchingKlines)),
+            &main_window,
+            &layout_id,
+        );
+
+        assert!(event.is_none(), "ChangePaneStatus must not emit an event");
+        let state = dashboard.panes.get(pane).unwrap();
+        assert!(
+            matches!(
+                state.status,
+                pane::Status::Loading(InfoKind::FetchingKlines)
+            ),
+            "pane status must be updated to Loading(FetchingKlines)"
+        );
+    }
+
+    #[test]
+    fn update_virtual_order_filled_emits_notification() {
+        use crate::replay::virtual_exchange::order_book::FillEvent;
+        use crate::replay::virtual_exchange::portfolio::PositionSide;
+        let main_window = make_window();
+        let layout_id = uuid::Uuid::new_v4();
+        let mut dashboard = Dashboard::default();
+
+        let fill = FillEvent {
+            order_id: "test-order".to_string(),
+            ticker: "BTCUSDT".to_string(),
+            side: PositionSide::Long,
+            qty: 0.001,
+            fill_price: 50000.0,
+            fill_time_ms: 0,
+        };
+
+        let (_task, event) =
+            dashboard.update(Message::VirtualOrderFilled(fill), &main_window, &layout_id);
+
+        assert!(
+            matches!(event, Some(Event::Notification(_))),
+            "VirtualOrderFilled must emit Event::Notification, got {event:?}"
         );
     }
 }
