@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 
-from flowsurface_sdk.env import FlowsurfaceEnv
+from flowsurface.env import FlowsurfaceEnv
 
 
 # ── constructor ───────────────────────────────────────────────────────────────

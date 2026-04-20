@@ -416,6 +416,42 @@ taskkill //f //im flowsurface.exe 2>/dev/null || true
 sleep 3  # ポート解放待ち
 ```
 
+### 既存 GUI アプリとのポート衝突（最重要）
+
+**症状**: テストが「前提条件未達」や「pane count が想定と違う」で失敗する。
+`env._start_process()` は起動後すぐに `:9876/api/replay/status` の応答を待つが、
+既存アプリが先に応答するため、新プロセスではなく**汚染済みの既存アプリ**に対してテストが走る。
+
+**確認方法**:
+```bash
+curl -s http://localhost:9876/api/replay/status
+# → 応答が返れば既存アプリが起動中
+```
+
+**対処**: E2E テストを実行する前に必ず既存プロセスを終了する。
+ただし**ユーザーが GUI を開いている可能性があるため、終了前に確認を取ること**。
+
+```bash
+# 既存プロセスの確認
+tasklist | grep flowsurface
+
+# 終了（確認を得てから実行）
+taskkill //f //im flowsurface.exe 2>/dev/null || true
+sleep 3  # ポート解放待ち
+
+# その後テスト実行（各テストが自前でプロセスを管理する）
+PYTHONIOENCODING=utf-8 uv run tests/s36_sidebar_order_pane.py
+```
+
+**headless モードの制限**: `IS_HEADLESS=true` で実行しても既存アプリがポートを握っていれば同じ問題が起きる。
+また headless モードでは sidebar API（`/api/sidebar/open-order-pane` 等）が 501 を返すため、
+GUI 専用テスト（s36 等）は headless では実行できない。
+
+**GUI モードで複数テストを連続実行する場合の注意**:
+s33 など前のテストがペインを追加すると pane count が汚染される。
+各テストは `backup_state()` / `restore_state()` + `env._start_process()` / `env.close()` で
+プロセスごとクリーンアップする設計なので、テスト間でプロセスを共有しないこと。
+
 ---
 
 ## 新しいシナリオの追加手順
