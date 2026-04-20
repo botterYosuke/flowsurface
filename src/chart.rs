@@ -1140,7 +1140,7 @@ fn request_fetch(handler: &mut RequestHandler, range: FetchRange) -> Option<Acti
     }
 }
 
-fn draw_volume_bar(
+pub(crate) fn draw_volume_bar(
     frame: &mut canvas::Frame,
     start_x: f32,
     start_y: f32,
