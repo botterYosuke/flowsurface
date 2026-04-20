@@ -1083,7 +1083,6 @@ impl From<fetcher::FetchUpdate> for Message {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use iced::window;
 
     // compile-time: clear_chart_for_replay returns (), not Vec<...
     fn _type_check_clear_chart_for_replay_returns_unit(

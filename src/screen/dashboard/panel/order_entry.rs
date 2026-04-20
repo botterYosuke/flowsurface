@@ -400,197 +400,29 @@ impl OrderEntryPanel {
     // ── View ──────────────────────────────────────────────────────────────────
 
     pub fn view(&self, theme: &Theme, is_replay: bool) -> Element<'_, Message> {
+        let virtual_mode = self.is_virtual || is_replay;
+
         let issue_label = if self.issue_code.is_empty() {
             text("銘柄未選択").size(13)
         } else {
             text(format!("{} {}", self.issue_code, self.issue_name)).size(13)
         };
 
-        // 売買区分タブ
-        let buy_btn = button(text("買い").size(13))
-            .on_press(Message::SideChanged(Side::Buy))
-            .style(if self.side == Side::Buy {
-                iced::widget::button::primary
-            } else {
-                iced::widget::button::secondary
-            });
-        let sell_btn = button(text("売り").size(13))
-            .on_press(Message::SideChanged(Side::Sell))
-            .style(if self.side == Side::Sell {
-                iced::widget::button::primary
-            } else {
-                iced::widget::button::secondary
-            });
-        let side_tabs = row![buy_btn, sell_btn].spacing(4);
-
-        // 口座区分
-        let account_picker = pick_list(
-            &AccountType::ALL[..],
-            Some(self.account_type),
-            Message::AccountTypeChanged,
-        )
-        .text_size(13);
-
-        // 現物/信用区分
-        let cash_margin_picker = pick_list(
-            &CashMarginType::ALL[..],
-            Some(self.cash_margin),
-            Message::CashMarginChanged,
-        )
-        .text_size(13);
-
-        // 数量入力
-        let qty_input = text_input("株数", &self.qty)
-            .on_input(Message::QtyChanged)
-            .size(13)
-            .width(iced::Length::Fixed(100.0));
-
-        let qty_row: Element<'_, Message> = if self.side == Side::Sell {
-            let all_btn = button(text("全数量").size(12))
-                .on_press_maybe(self.holdings.map(|_| Message::FillFromHoldings));
-            let holding_info = self
-                .holdings
-                .map(|h| text(format!("(保有: {h}株)")).size(11))
-                .unwrap_or_else(|| text("(保有: --株)").size(11));
-            row![text("数量: ").size(13), qty_input, all_btn, holding_info]
-                .spacing(4)
-                .align_y(Alignment::Center)
-                .into()
-        } else {
-            row![text("数量: ").size(13), qty_input]
-                .spacing(4)
-                .align_y(Alignment::Center)
-                .into()
-        };
-
-        // 価格種別 + 指値入力
-        let price_type_picker = pick_list(
-            [PriceType::Market, PriceType::Limit],
-            Some(self.price_type),
-            Message::PriceTypeChanged,
-        )
-        .text_size(13);
-
-        let price_row: Element<'_, Message> = if self.price_type == PriceType::Limit {
-            let dec_btn = button(text("▼").size(12)).on_press(Message::PriceDecrementTick);
-            let price_input = text_input("指値", &self.limit_price)
-                .on_input(Message::LimitPriceChanged)
-                .size(13)
-                .width(iced::Length::Fixed(80.0));
-            let inc_btn = button(text("▲").size(12)).on_press(Message::PriceIncrementTick);
-            row![
-                text("価格: ").size(13),
-                price_type_picker,
-                dec_btn,
-                price_input,
-                inc_btn
-            ]
-            .spacing(4)
-            .align_y(Alignment::Center)
-            .into()
-        } else {
-            row![text("価格: ").size(13), price_type_picker]
-                .spacing(4)
-                .align_y(Alignment::Center)
-                .into()
-        };
-
-        // 期日
-        let expire_options = [ExpireDay::Today];
-        let expire_picker = pick_list(
-            expire_options,
-            Some(self.expire_day.clone()),
-            Message::ExpireDayChanged,
-        )
-        .text_size(13);
-
-        // 発注パスワード
-        let password_input = text_input("発注パスワード", &self.second_password)
-            .on_input(Message::SecondPasswordChanged)
-            .secure(true)
-            .size(13);
-
-        // 結果表示
-        let result_row: Element<'_, Message> = match &self.last_result {
-            Some(Ok(ok)) => {
-                let msg = if let Some(warn) = &ok.warning {
-                    format!("受付: {} (警告: {})", ok.order_num, warn)
-                } else {
-                    format!("注文受付: {}", ok.order_num)
-                };
-                text(msg).size(12).color([0.2, 0.8, 0.2]).into()
-            }
-            Some(Err(e)) => text(e.as_str()).size(12).color([0.9, 0.2, 0.2]).into(),
-            None => text("").size(12).into(),
-        };
-
-        // 確認ボタン / 送信ボタン
-        let action_area: Element<'_, Message> = if self.confirm_modal {
-            let side_str = self.side.to_string();
-            let price_str = match self.price_type {
-                PriceType::Market => "成行".to_string(),
-                PriceType::Limit => format!("{}円", self.limit_price),
-            };
-            let info = row![
-                text(format!("{} ", self.issue_code)).size(12),
-                text(side_str.clone())
-                    .size(12)
-                    .color(crate::style::side_color(&side_str, theme)),
-                text(format!(" {}株 {}", self.qty, price_str)).size(12),
-            ];
-            let cancel_btn =
-                button(text("キャンセル").size(13)).on_press(Message::ConfirmCancelled);
-            let submit_btn = button(text("注文を発注する").size(13)).on_press(Message::Submitted);
-            column![
-                text("注文確認").size(14),
-                info,
-                row![cancel_btn, submit_btn].spacing(8),
-            ]
-            .spacing(8)
-            .into()
-        } else {
-            // 仮想モードではパスワード不要
-            let password_ok = self.is_virtual || !self.second_password.is_empty();
-            let confirm_enabled = !self.loading
-                && !self.issue_code.is_empty()
-                && !self.qty.is_empty()
-                && password_ok
-                && (self.price_type == PriceType::Market || !self.limit_price.is_empty());
-
-            let label = if self.loading {
-                "送信中..."
-            } else if self.is_virtual {
-                "仮想注文確認"
-            } else {
-                "注文確認"
-            };
-
-            button(text(label).size(13))
-                .on_press_maybe(confirm_enabled.then_some(Message::ConfirmClicked))
-                .into()
-        };
-
-        // 仮想モード = is_virtual フィールド OR is_replay パラメータ（フェーズ A との後方互換）
-        let virtual_mode = self.is_virtual || is_replay;
-
         let mut col = column![
-            side_tabs,
+            self.view_side_tabs(),
             issue_label,
-            row![text("口座: ").size(13), account_picker]
-                .align_y(Alignment::Center)
-                .spacing(4),
-            row![text("現物/信用: ").size(13), cash_margin_picker]
-                .align_y(Alignment::Center)
-                .spacing(4),
-            qty_row,
-            price_row,
-            row![text("期日: ").size(13), expire_picker]
-                .align_y(Alignment::Center)
-                .spacing(4),
+            self.view_account_row(),
+            self.view_qty_row(),
+            self.view_price_row(),
+            self.view_expire_row(),
         ]
         .spacing(8);
 
         if !virtual_mode {
+            let password_input = text_input("発注パスワード", &self.second_password)
+                .on_input(Message::SecondPasswordChanged)
+                .secure(true)
+                .size(13);
             col = col.push(
                 row![text("パスワード: ").size(13), password_input]
                     .align_y(Alignment::Center)
@@ -598,7 +430,8 @@ impl OrderEntryPanel {
             );
         }
 
-        col = col.push(result_row).push(action_area);
+        col = col.push(self.view_result_row())
+            .push(self.view_action_area(theme, virtual_mode));
 
         let body = container(col.padding(8));
 
@@ -625,6 +458,184 @@ impl OrderEntryPanel {
             .into()
         } else {
             body.into()
+        }
+    }
+
+    fn view_side_tabs(&self) -> Element<'_, Message> {
+        let buy_btn = button(text("買い").size(13))
+            .on_press(Message::SideChanged(Side::Buy))
+            .style(if self.side == Side::Buy {
+                iced::widget::button::primary
+            } else {
+                iced::widget::button::secondary
+            });
+        let sell_btn = button(text("売り").size(13))
+            .on_press(Message::SideChanged(Side::Sell))
+            .style(if self.side == Side::Sell {
+                iced::widget::button::primary
+            } else {
+                iced::widget::button::secondary
+            });
+        row![buy_btn, sell_btn].spacing(4).into()
+    }
+
+    fn view_account_row(&self) -> Element<'_, Message> {
+        let account_picker = pick_list(
+            &AccountType::ALL[..],
+            Some(self.account_type),
+            Message::AccountTypeChanged,
+        )
+        .text_size(13);
+
+        let cash_margin_picker = pick_list(
+            &CashMarginType::ALL[..],
+            Some(self.cash_margin),
+            Message::CashMarginChanged,
+        )
+        .text_size(13);
+
+        column![
+            row![text("口座: ").size(13), account_picker]
+                .align_y(Alignment::Center)
+                .spacing(4),
+            row![text("現物/信用: ").size(13), cash_margin_picker]
+                .align_y(Alignment::Center)
+                .spacing(4)
+        ]
+        .spacing(8)
+        .into()
+    }
+
+    fn view_qty_row(&self) -> Element<'_, Message> {
+        let qty_input = text_input("株数", &self.qty)
+            .on_input(Message::QtyChanged)
+            .size(13)
+            .width(iced::Length::Fixed(100.0));
+
+        if self.side == Side::Sell {
+            let all_btn = button(text("全数量").size(12))
+                .on_press_maybe(self.holdings.map(|_| Message::FillFromHoldings));
+            let holding_info = self
+                .holdings
+                .map(|h| text(format!("(保有: {h}株)")).size(11))
+                .unwrap_or_else(|| text("(保有: --株)").size(11));
+            row![text("数量: ").size(13), qty_input, all_btn, holding_info]
+                .spacing(4)
+                .align_y(Alignment::Center)
+                .into()
+        } else {
+            row![text("数量: ").size(13), qty_input]
+                .spacing(4)
+                .align_y(Alignment::Center)
+                .into()
+        }
+    }
+
+    fn view_price_row(&self) -> Element<'_, Message> {
+        let price_type_picker = pick_list(
+            [PriceType::Market, PriceType::Limit],
+            Some(self.price_type),
+            Message::PriceTypeChanged,
+        )
+        .text_size(13);
+
+        if self.price_type == PriceType::Limit {
+            let dec_btn = button(text("▼").size(12)).on_press(Message::PriceDecrementTick);
+            let price_input = text_input("指値", &self.limit_price)
+                .on_input(Message::LimitPriceChanged)
+                .size(13)
+                .width(iced::Length::Fixed(80.0));
+            let inc_btn = button(text("▲").size(12)).on_press(Message::PriceIncrementTick);
+            row![
+                text("価格: ").size(13),
+                price_type_picker,
+                dec_btn,
+                price_input,
+                inc_btn
+            ]
+            .spacing(4)
+            .align_y(Alignment::Center)
+            .into()
+        } else {
+            row![text("価格: ").size(13), price_type_picker]
+                .spacing(4)
+                .align_y(Alignment::Center)
+                .into()
+        }
+    }
+
+    fn view_expire_row(&self) -> Element<'_, Message> {
+        let expire_options = [ExpireDay::Today];
+        let expire_picker = pick_list(
+            expire_options,
+            Some(self.expire_day.clone()),
+            Message::ExpireDayChanged,
+        )
+        .text_size(13);
+        row![text("期日: ").size(13), expire_picker]
+            .align_y(Alignment::Center)
+            .spacing(4)
+            .into()
+    }
+
+    fn view_result_row(&self) -> Element<'_, Message> {
+        match &self.last_result {
+            Some(Ok(ok)) => {
+                let msg = if let Some(warn) = &ok.warning {
+                    format!("受付: {} (警告: {})", ok.order_num, warn)
+                } else {
+                    format!("注文受付: {}", ok.order_num)
+                };
+                text(msg).size(12).color([0.2, 0.8, 0.2]).into()
+            }
+            Some(Err(e)) => text(e.as_str()).size(12).color([0.9, 0.2, 0.2]).into(),
+            None => text("").size(12).into(),
+        }
+    }
+
+    fn view_action_area(&self, theme: &Theme, virtual_mode: bool) -> Element<'_, Message> {
+        if self.confirm_modal {
+            let side_str = self.side.to_string();
+            let price_str = match self.price_type {
+                PriceType::Market => "成行".to_string(),
+                PriceType::Limit => format!("{}円", self.limit_price),
+            };
+            let info = row![
+                text(format!("{} ", self.issue_code)).size(12),
+                text(side_str.clone())
+                    .size(12)
+                    .color(crate::style::side_color(&side_str, theme)),
+                text(format!(" {}株 {}", self.qty, price_str)).size(12),
+            ];
+            let cancel_btn =
+                button(text("キャンセル").size(13)).on_press(Message::ConfirmCancelled);
+            let submit_btn = button(text("注文を発注する").size(13)).on_press(Message::Submitted);
+            column![
+                text("注文確認").size(14),
+                info,
+                row![cancel_btn, submit_btn].spacing(8),
+            ]
+            .spacing(8)
+            .into()
+        } else {
+            let password_ok = virtual_mode || !self.second_password.is_empty();
+            let confirm_enabled = !self.loading
+                && !self.issue_code.is_empty()
+                && !self.qty.is_empty()
+                && password_ok
+                && (self.price_type == PriceType::Market || !self.limit_price.is_empty());
+
+            let label = if self.loading {
+                "送信中..."
+            } else if virtual_mode {
+                "仮想注文確認"
+            } else {
+                "注文確認"
+            };
+
+            button(text(label).size(13))
+                .on_press_maybe(confirm_enabled.then_some(Message::ConfirmClicked))
+                .into()
         }
     }
 }
@@ -968,5 +979,50 @@ mod tests {
         assert_eq!(CashMarginType::MarginClose6M.api_code(), "4");
         assert_eq!(CashMarginType::MarginNewGeneral.api_code(), "6");
         assert_eq!(CashMarginType::MarginCloseGeneral.api_code(), "8");
+    }
+
+    // ── Cycle 8: view refactoring ───────────────────────────────────────────
+
+    #[test]
+    fn view_side_tabs_returns_element() {
+        let panel = make_panel();
+        let _elem = panel.view_side_tabs();
+    }
+
+    #[test]
+    fn view_account_row_returns_element() {
+        let panel = make_panel();
+        let _elem = panel.view_account_row();
+    }
+
+    #[test]
+    fn view_qty_row_returns_element() {
+        let panel = make_panel();
+        let _elem = panel.view_qty_row();
+    }
+
+    #[test]
+    fn view_price_row_returns_element() {
+        let panel = make_panel();
+        let _elem = panel.view_price_row();
+    }
+
+    #[test]
+    fn view_expire_row_returns_element() {
+        let panel = make_panel();
+        let _elem = panel.view_expire_row();
+    }
+
+    #[test]
+    fn view_result_row_returns_element() {
+        let panel = make_panel();
+        let _elem = panel.view_result_row();
+    }
+
+    #[test]
+    fn view_action_area_returns_element() {
+        let panel = make_panel();
+        let theme = iced::Theme::Dark;
+        let _elem = panel.view_action_area(&theme, false);
     }
 }
