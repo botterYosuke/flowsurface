@@ -157,8 +157,8 @@ impl Dashboard {
         for (_, _, state) in self.iter_all_panes_mut(main_window) {
             let pane_id = state.unique_id();
             if let pane::Content::OrderEntry(panel) = &mut state.content {
-                if let Some(panel::order_entry::Action::FetchHoldings { issue_code: code }) =
-                    panel.update(panel::order_entry::Message::SyncIssue {
+                if let Some(panel::order_entry::Action::FetchHoldings { issue_code: code }) = panel
+                    .update(panel::order_entry::Message::SyncIssue {
                         issue_code: issue_code.clone(),
                         issue_name: issue_name.clone(),
                         tick_size,

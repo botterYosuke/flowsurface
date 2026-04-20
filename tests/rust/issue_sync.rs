@@ -4,9 +4,7 @@
 // 特定されたバグ: order_handler.rs の sync_issue_to_order_entry() が
 // panel.update() の戻り値（Action::FetchHoldings）を破棄していた。
 
-use flowsurface::screen::dashboard::panel::order_entry::{
-    Action, Message, OrderEntryPanel, Side,
-};
+use flowsurface::screen::dashboard::panel::order_entry::{Action, Message, OrderEntryPanel, Side};
 
 fn panel_with(issue_code: &str) -> OrderEntryPanel {
     let mut p = OrderEntryPanel::new();
@@ -83,7 +81,11 @@ fn sync_to_same_issue_preserves_holdings() {
         tick_size: Some(1.0),
     });
 
-    assert_eq!(panel.holdings, Some(200), "同一銘柄なら holdings を保持すべき");
+    assert_eq!(
+        panel.holdings,
+        Some(200),
+        "同一銘柄なら holdings を保持すべき"
+    );
 }
 
 // ── Action::FetchHoldings — 売りモードでの保有株数取得 ───────────────────────
@@ -183,8 +185,13 @@ fn sequential_syncs_update_correctly() {
         issue_name: "ソニーグループ".to_string(),
         tick_size: Some(5.0),
     });
-    assert!(matches!(action2, Some(Action::FetchHoldings { ref issue_code }) if issue_code == "6758"));
-    assert!(panel.holdings.is_none(), "銘柄切り替えで holdings がリセットされるべき");
+    assert!(
+        matches!(action2, Some(Action::FetchHoldings { ref issue_code }) if issue_code == "6758")
+    );
+    assert!(
+        panel.holdings.is_none(),
+        "銘柄切り替えで holdings がリセットされるべき"
+    );
     assert_eq!(panel.issue_code, "6758");
     assert_eq!(panel.tick_size, Some(5.0));
 }
