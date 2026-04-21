@@ -114,6 +114,12 @@ def _(get_s, mo, set_s):
 
 ### 3-2. mo.state の初期化セル分離（必須）
 
+> **Note (出典)**: このルールは公式ドキュメント（[State - marimo](https://docs.marimo.io/api/state/) / [Dangerously set state - marimo](https://docs.marimo.io/guides/state/)）に**明示的には記載されていない経験則**である。ただし以下 2 つの公式仕様から必然的に導かれる：
+> 1. `mo.state(initial)` はセル評価ごとに呼び出され、新しい state を生成する。
+> 2. `allow_self_loops=True` のセルは `set_xxx()` を呼ぶと自身が再実行される。
+>
+> → 初期化と getter 表示を同居させると、setter 実行 → 自セル再実行 → `mo.state(initial)` 再評価 → state がリセットされる。
+
 - **RULE**: `mo.state()` の初期化は**必ず独立したセルに分離**する。
 - **理由**: getter を呼び出すセルと同じセルに `mo.state()` を置くと、状態変化でそのセルが再実行されるたびに初期値にリセットされる。
 
@@ -136,6 +142,58 @@ def _(get_s, mo):
     mo.md(get_s())    # ← 状態変化で再実行されるが、初期化セルは再実行されない
     return
 ```
+
+### 3-3. レシピ：ボタン + 副作用 + 結果表示を 1 セルに収める
+
+「ボタンを押す → API を叩く → 結果をそのボタンの直下に表示する」という頻出パターンは、
+3-1（`allow_self_loops=True`）+ 3-2（初期化セル分離）+ 4-3（`on_click` で value 更新）の合わせ技で、
+**UI 定義と結果表示を 1 セルに収める**ことができる。
+
+```python
+# セル1: 状態の初期化（独立セル、必須 — ルール 3-2）
+@app.cell
+def _(mo):
+    get_status, set_status = mo.state(
+        {"ok": False, "label": "未実行"},
+        allow_self_loops=True,      # ← setter を呼んだセル自身も再実行させる（ルール 3-1）
+    )
+    return get_status, set_status
+
+# セル2: ボタン定義 + 副作用 + 結果表示（1 セル）
+@app.cell
+def _(api_url, get_status, httpx, mo, set_status):
+    def _on_click(v):
+        try:
+            _resp = httpx.get(f"{api_url.value}/api/replay/status", timeout=2.0)
+            _ok = _resp.status_code == 200
+            set_status({"ok": _ok, "label": f"status={_resp.status_code}"})
+        except Exception as _e:
+            set_status({"ok": False, "label": f"失敗: {_e}"})
+        return v + 1                # ← ボタン value もインクリメント（ルール 4-3）
+
+    check_button = mo.ui.button(value=0, label="✓ 実行", on_click=_on_click)
+    mo.vstack([check_button, mo.md(f"_状態: {get_status()['label']}_")])
+    return (check_button,)
+```
+
+**なぜ成立するか**:
+1. ルール 4-1（同一セル内 `.value` アクセス禁止）を回避 — `button.value` には触れず、副作用は `on_click` コールバック内で `set_xxx()` 経由で起こす。
+2. ルール 3-1 の `allow_self_loops=True` で自セル再実行を許可 → 同セル内の `get_xxx()` 表示が更新される。
+3. ルール 3-2 で初期化セルを分離しているので、再実行しても state がリセットされない。
+
+**ハマりどころ**:
+- `on_click` の戻り値でボタン自身の `value` を更新しないと、下流セルが `button.value` を監視していても再評価されない。`return v + 1` を必ず書く（4-3 参照）。
+- `mo.state` の初期化を同居させると state がリセットされる（3-2 参照）。
+- **逆に言うと**：`mo.state` を使わない版（クロージャや可変 dict での状態保持）はこのパターンに組み込めない — セル再実行で初期化されるため。
+
+**merge 可否の判定表**（「できる限りセルを統合したい」要望への指針）:
+
+| 対象 | 同一セル化 | 理由 |
+|---|---|---|
+| `mo.ui.button` 定義 + `on_click` 内の副作用 + `get_state()` 表示 | ✅ OK | 本レシピ。`.value` に触れないことが条件 |
+| `mo.ui.X` 定義 + `X.value` を使う計算 | ❌ NG | ルール 4-1（RuntimeError） |
+| `mo.state()` 初期化 + `get_state()` 表示 | ❌ NG | ルール 3-2（リセット） |
+| 同じ UI 要素の `.value` に依存する下流セル同士（例: dropdown → method 計算 + dropdown → form 生成） | ✅ OK | `.value` アクセスは定義セルの外なら同居可 |
 
 ---
 

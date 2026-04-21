@@ -121,7 +121,9 @@
       "Edit(/.claude/skills/marimo/**)",
       "Bash(xargs -I {} echo {})",
       "Edit(/.claude/skills/立花証券・ｅ支店・ＡＰＩ/**)",
-      "Edit(/.claude/skills/tachibana/**)"
+      "Edit(/.claude/skills/tachibana/**)",
+      "WebFetch(domain:docs.marimo.io)",
+      "WebSearch"
     ],
     "additionalDirectories": [
       "C:\\Users\\sasai\\Documents\\marimo\\.claude\\plans",
