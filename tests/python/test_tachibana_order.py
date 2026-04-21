@@ -15,7 +15,9 @@ BASE_URL = "http://127.0.0.1:9876"
 
 
 def _get(path: str, **params) -> dict:
-    r = httpx.get(f"{BASE_URL}{path}", params=params, timeout=5.0)
+    # 立花証券 API 経由のため、ローカル API 経由よりレイテンシが大きい。
+    # 実測 ~5s 前後のため余裕を持たせる。
+    r = httpx.get(f"{BASE_URL}{path}", params=params, timeout=15.0)
     r.raise_for_status()
     return r.json()
 
