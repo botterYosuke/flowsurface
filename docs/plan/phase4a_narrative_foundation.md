@@ -294,9 +294,11 @@ Phase 2 の `VirtualExchange::on_tick()` が返す `FillEvent`（`src/replay/vir
 
 ### サブフェーズ E: Python SDK 拡張
 
-- [ ] **E-1**: `flowsurface_sdk.Narrative` データクラス（dataclasses + `to_dict()`）
-- [ ] **E-2**: `FlowsurfaceEnv.record_narrative(reasoning, confidence, ...)` ヘルパー
-- [ ] **E-3**: `env.list_narratives()` / `env.publish_narrative(id)`
+- [x] ✅ **E-1**: `python/narrative.py` 追加 — `Narrative` / `NarrativeAction` / `NarrativeOutcome` dataclass + `NarrativeApi` クライアント（`fs.narrative.create/list/get/publish/unpublish/snapshot/storage_stats/orphans`）
+- [x] ✅ **E-2**: `FlowsurfaceEnv.record_narrative(*, agent_id, reasoning, side, qty, price, confidence, ...)` ヘルパー追加
+- [x] ✅ **E-3**: `FlowsurfaceEnv.list_narratives()` / `FlowsurfaceEnv.publish_narrative(id, public=bool)` 追加
+- [x] ✅ `python/__init__.py` を現存モジュールのみに整理（削除された旧 SDK モジュールへの参照を除去）
+- [x] ✅ `tests/python/test_narrative.py` — 11 テスト（CRUD / idempotency / validation / SDK dataclass）
 
 ### サブフェーズ F: E2E テスト
 
@@ -372,7 +374,7 @@ Cargo.toml                           # rusqlite（bundled）・flate2・sha2 追
 - [x] ✅ サブフェーズ B（HTTP API）
 - [x] ✅ サブフェーズ C（FillEvent 連携）
 - [x] ✅ サブフェーズ D（チャート可視化）
-- [ ] サブフェーズ E（Python SDK 拡張）
+- [x] ✅ サブフェーズ E（Python SDK 拡張）
 - [ ] サブフェーズ F（E2E テスト）
 - [ ] `/verification-loop` 通過
 - [ ] PR 作成・CI 全 PASS

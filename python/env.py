@@ -273,6 +273,83 @@ class FlowsurfaceEnv(gym.Env):
     def _get_portfolio(self) -> dict:
         return self._get("/api/replay/portfolio")
 
+    # ── Phase 4a: Narrative helpers ───────────────────────────────────────────
+
+    def record_narrative(
+        self,
+        *,
+        agent_id: str,
+        reasoning: str,
+        side: str,
+        qty: float,
+        price: float,
+        confidence: float,
+        observation_snapshot: dict | None = None,
+        linked_order_id: str | None = None,
+        timeframe: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> str:
+        """Record a narrative via ``POST /api/agent/narrative``.
+
+        Returns the newly created narrative ID. Raises ``requests.HTTPError``
+        on 4xx/5xx.
+
+        ``observation_snapshot`` defaults to an empty object — callers may
+        pass a dict of OHLCV / indicator state to preserve the context.
+        """
+        payload: dict[str, Any] = {
+            "agent_id": agent_id,
+            "ticker": self.ticker,
+            "timeframe": timeframe or self.timeframe,
+            "observation_snapshot": observation_snapshot or {},
+            "reasoning": reasoning,
+            "action": {"side": side, "qty": qty, "price": price},
+            "confidence": confidence,
+        }
+        if linked_order_id is not None:
+            payload["linked_order_id"] = linked_order_id
+        if idempotency_key is not None:
+            payload["idempotency_key"] = idempotency_key
+        r = requests.post(
+            f"{self._base_url}/api/agent/narrative", json=payload, timeout=5
+        )
+        r.raise_for_status()
+        return str(r.json()["id"])
+
+    def list_narratives(
+        self,
+        *,
+        agent_id: str | None = None,
+        ticker: str | None = None,
+        since_ms: int | None = None,
+        limit: int | None = None,
+    ) -> list[dict]:
+        """Fetch narratives via ``GET /api/agent/narratives``."""
+        params: dict[str, str] = {}
+        if agent_id is not None:
+            params["agent_id"] = agent_id
+        if ticker is not None:
+            params["ticker"] = ticker
+        if since_ms is not None:
+            params["since_ms"] = str(since_ms)
+        if limit is not None:
+            params["limit"] = str(limit)
+        r = requests.get(
+            f"{self._base_url}/api/agent/narratives", params=params, timeout=5
+        )
+        r.raise_for_status()
+        return r.json().get("narratives", [])
+
+    def publish_narrative(self, narrative_id: str, *, public: bool = True) -> dict:
+        """Toggle the ``public`` flag via ``PATCH /api/agent/narrative/:id``."""
+        r = requests.patch(
+            f"{self._base_url}/api/agent/narrative/{narrative_id}",
+            json={"public": public},
+            timeout=5,
+        )
+        r.raise_for_status()
+        return r.json()
+
     def _observe(self) -> np.ndarray:
         """Return a flat float32 array of (open, high, low, close) × kline_limit."""
         try:
