@@ -230,6 +230,39 @@ impl Flowsurface {
                     let clock_ms = self.replay.current_time_ms().unwrap_or(0);
                     let fills = engine.on_tick(&ticker, &trades, clock_ms);
                     for fill in fills {
+                        // ナラティブ outcome 自動更新（Phase 4a C-1）
+                        let narrative_store = self.narrative_store.clone();
+                        let order_id = fill.order_id.clone();
+                        let fill_price = fill.fill_price;
+                        let fill_time_ms = fill.fill_time_ms as i64;
+                        let side_hint = match fill.side {
+                            crate::replay::virtual_exchange::PositionSide::Long => {
+                                Some(crate::narrative::model::NarrativeSide::Buy)
+                            }
+                            crate::replay::virtual_exchange::PositionSide::Short => {
+                                Some(crate::narrative::model::NarrativeSide::Sell)
+                            }
+                        };
+                        all_tasks.push(Task::perform(
+                            async move {
+                                if let Err(e) =
+                                    crate::narrative::service::update_outcome_from_fill(
+                                        &narrative_store,
+                                        &order_id,
+                                        fill_price,
+                                        fill_time_ms,
+                                        side_hint,
+                                    )
+                                    .await
+                                {
+                                    log::warn!(
+                                        "failed to update narrative outcome for order {order_id}: {e}"
+                                    );
+                                }
+                            },
+                            |()| Message::Noop,
+                        ));
+
                         let fill_msg = dashboard::Message::VirtualOrderFilled(fill);
                         all_tasks.push(Task::done(Message::Dashboard {
                             layout_id: None,

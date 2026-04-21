@@ -372,6 +372,43 @@ mod tests {
     }
 
     #[test]
+    fn update_outcome_from_fill_sets_outcome() {
+        let rt = rt();
+        rt.block_on(async {
+            let root = tempdir();
+            let store = Arc::new(NarrativeStore::open_in_memory().unwrap());
+            let snapshot_store = SnapshotStore::new(&root);
+
+            let (_, body) =
+                create_narrative(&store, &snapshot_store, sample_request("alpha", None), 0, 1)
+                    .await;
+            let id = Uuid::parse_str(
+                serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"]
+                    .as_str()
+                    .unwrap(),
+            )
+            .unwrap();
+
+            // FillEvent 想定
+            let updated = update_outcome_from_fill(
+                &store,
+                "ord_1", // sample_request で設定した linked_order_id
+                92_510.5,
+                1_500_000,
+                Some(NarrativeSide::Buy),
+            )
+            .await
+            .unwrap();
+            assert_eq!(updated, 1);
+
+            let fetched = store.get(id).await.unwrap().unwrap();
+            let outcome = fetched.outcome.expect("outcome should be set");
+            assert!((outcome.fill_price - 92_510.5).abs() < 1e-6);
+            assert_eq!(outcome.fill_time_ms, 1_500_000);
+        });
+    }
+
+    #[test]
     fn list_filters_by_agent() {
         let rt = rt();
         rt.block_on(async {

@@ -319,8 +319,31 @@ impl HeadlessEngine {
         // 仮想約定エンジンにトレードを通知する
         let ticker_str = &self.ticker_str;
         for (_, trades) in &dispatch.trade_events {
-            self.virtual_engine
+            let fills = self
+                .virtual_engine
                 .on_tick(ticker_str, trades, dispatch.current_time);
+            // ナラティブ outcome 自動更新（Phase 4a C-1）
+            for fill in fills {
+                let store = self.narrative_store.clone();
+                let order_id = fill.order_id.clone();
+                let fill_price = fill.fill_price;
+                let fill_time_ms = fill.fill_time_ms as i64;
+                tokio::spawn(async move {
+                    if let Err(e) = crate::narrative::service::update_outcome_from_fill(
+                        &store,
+                        &order_id,
+                        fill_price,
+                        fill_time_ms,
+                        None,
+                    )
+                    .await
+                    {
+                        log::warn!(
+                            "headless: failed to update narrative outcome for order {order_id}: {e}"
+                        );
+                    }
+                });
+            }
         }
 
         if dispatch.reached_end {

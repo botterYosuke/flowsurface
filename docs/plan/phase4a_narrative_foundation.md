@@ -273,9 +273,9 @@ Phase 2 の `VirtualExchange::on_tick()` が返す `FillEvent`（`src/replay/vir
 
 ### サブフェーズ C: FillEvent 連携
 
-- [ ] **C-1**: `linked_order_id` フィールドを活用し、FillEvent で outcome を自動埋め込み
-  - テスト: モック NarrativeStore + FillEvent で outcome が入ることを検証
-- [ ] **C-2**: `handle_virtual_order_filled()` から Narrative Store に通知するイベントバス配線
+- [x] ✅ **C-1**: `linked_order_id` フィールドを活用し、FillEvent で outcome を自動埋め込み
+  - テスト: `narrative::service::tests::update_outcome_from_fill_sets_outcome` (in-memory store + mocked fill で outcome が入ることを検証)
+- [x] ✅ **C-2**: GUI (`app/handlers.rs::handle_tick` + `app/dashboard.rs` step_forward) と headless (`headless.rs::tick`) の両方で FillEvent → `service::update_outcome_from_fill` を Task::perform / tokio::spawn で配線
 
 ### サブフェーズ D: チャート可視化
 
@@ -362,7 +362,7 @@ Cargo.toml                           # rusqlite（bundled）・flate2・sha2 追
 
 - [x] ✅ サブフェーズ A（Narrative Store）
 - [x] ✅ サブフェーズ B（HTTP API）
-- [ ] サブフェーズ C（FillEvent 連携）
+- [x] ✅ サブフェーズ C（FillEvent 連携）
 - [ ] サブフェーズ D（チャート可視化）
 - [ ] サブフェーズ E（Python SDK 拡張）
 - [ ] サブフェーズ F（E2E テスト）
@@ -435,3 +435,22 @@ Cargo.toml                           # rusqlite（bundled）・flate2・sha2 追
 - `cargo test --lib -- narrative replay_api` で両モジュールを一括テストできる（`cargo test` は位置引数にパターン、`--` 以降は test harness への引数なので複数指定可）。
 - route handler の path matching は順序依存: `GET /api/agent/narratives/storage` は `GET p if p.starts_with("/api/agent/narratives")` より先に定義すること。実装では `starts_with("/api/agent/narratives?")` で明示的にクエリ境界を確認してパターン衝突を防いだ。
 - `spawn_blocking` 呼び出しは future.await すると `JoinError` が返る可能性がある（タスクがパニックした場合）。service 層で 500 エラーにマッピング済み。
+
+### 2026-04-21: サブフェーズ C（FillEvent 連携）完了
+
+**状況**: C-1 / C-2 完了。GUI の `app/handlers.rs::handle_tick` と `app/dashboard.rs::Message::Replay` の StepForward 分岐、および headless の `HeadlessEngine::tick` の 3 箇所すべてで FillEvent → outcome 自動更新を配線。計画書の想定外だったがバックワード互換のため StepForward でも動くことを確認した。
+
+**新たな知見**:
+
+1. **FillEvent を生成する箇所が 3 つある** — 計画書 §3.4 は `handle_virtual_order_filled()` を指していたが、実際には:
+   - GUI 継続再生: `app/handlers.rs::handle_tick`（tick から on_tick → fills）
+   - GUI StepForward: `app/dashboard.rs::Message::Replay`（合成 Trade 経由で on_tick → fills）
+   - headless: `headless.rs::HeadlessEngine::tick`
+   の 3 箇所。計画書記載の `handle_virtual_order_filled()` は UI 通知専用で、ここから narrative を触ると `&self` のみで `NarrativeStore` が取れず、dashboard.rs 自体に narrative 依存を持ち込む必要があった。生成源に近い handle_tick 側で処理するほうが自然。
+2. **ファイア・アンド・フォーゲット用に `Message::Noop` を追加** — `Task::perform(fut, |()| Message::Noop)` で結果を捨てる。iced の `Task::perform` は callback 必須なので単純な fire-and-forget は少し冗長になる。
+3. **headless は tokio コンテキストが既にあるので `tokio::spawn` が使える** — GUI は iced Task が必要だが、headless は生の tokio runtime なのでシンプル。
+
+**設計思想と背景**:
+
+- **失敗時はログ WARN のみで UI に通知しない** — ナラティブ outcome 更新は補助機能であり、失敗（store が busy、同じ order_id のナラティブが存在しないなど）で注文自体がブロックされるべきではない。計画 §5 の「リスクと緩和策」でも可観測化（tracing）が指示されていたので log::warn! を採用。
+- **side_hint は現状使っていないが、将来の分析用にシグネチャ保持** — `service::update_outcome_from_fill` の第 5 引数 `side_hint: Option<NarrativeSide>` は現時点では無視されるが、将来 PnL 計算を入れる際に参照できるよう型を残した。

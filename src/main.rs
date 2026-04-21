@@ -125,6 +125,9 @@ enum Message {
     },
     Replay(ReplayMessage),
     ReplayApi(replay_api::ApiMessage),
+    /// 完了は気にしないファイア・アンド・フォーゲットの async 結果用。
+    /// 例: ナラティブ outcome の非同期更新（失敗時はログで充分）。
+    Noop,
 }
 
 impl Flowsurface {
@@ -160,6 +163,7 @@ impl Flowsurface {
             } => {
                 self.handle_narrative_api_reply(reply, status, body);
             }
+            Message::Noop => {}
             Message::MarketWsEvent(event) => return self.handle_market_ws_event(event),
             Message::Tick(now) => return self.handle_tick(now),
             Message::WindowEvent(event) => return self.handle_window_event(event),
