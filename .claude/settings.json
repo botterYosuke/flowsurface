@@ -130,7 +130,8 @@
       "Bash(bash tests/e2e/e2e_replay_api.sh)",
       "Bash(.venv/Scripts/python.exe -c \"import flowsurface as fs; print\\(dir\\(fs\\)\\); print\\(fs.replay\\)\")",
       "Bash(.venv/Scripts/python.exe -c ' *)",
-      "Bash(.venv/Scripts/python.exe -m pytest tests/python/ -v --no-header)"
+      "Bash(.venv/Scripts/python.exe -m pytest tests/python/ -v --no-header)",
+      "Bash(./target/debug/flowsurface.exe --headless --ticker HyperliquidLinear:BTC --timeframe M1 --replay --replay-start \"2026-04-19 21:47\" --replay-end \"2026-04-19 23:47\")"
     ],
     "additionalDirectories": [
       "C:\\Users\\sasai\\Documents\\marimo\\.claude\\plans",
