@@ -81,6 +81,12 @@ pub struct TachibanaSession {
     pub url_price: String,
     pub url_event: String,
     pub url_event_ws: String,
+    /// デモ環境でログインしたセッションかを表す。
+    /// 本番口座での誤発注を防ぐガードロジックから参照される。
+    /// keyring に保存された古いセッション (このフィールド未保存) との後方互換のため
+    /// `#[serde(default)]` を付与。未設定値は `false`（本番扱い）— 安全側に倒れる。
+    #[serde(default)]
+    pub is_demo: bool,
 }
 
 // ── ログイン型 ────────────────────────────────────────────────────────────────
@@ -187,6 +193,7 @@ impl TryFrom<LoginResponse> for TachibanaSession {
             url_price: resp.url_price,
             url_event: resp.url_event,
             url_event_ws: resp.url_event_ws,
+            is_demo: false,
         })
     }
 }
@@ -2161,6 +2168,7 @@ mod tests {
             url_price: format!("{}/price/", server.url()),
             url_event: String::new(),
             url_event_ws: String::new(),
+            is_demo: false,
         };
 
         let records = fetch_market_prices(&client, &session, &["6501"])
@@ -2201,6 +2209,7 @@ mod tests {
             url_price: format!("{}/price/", server.url()),
             url_event: String::new(),
             url_event_ws: String::new(),
+            is_demo: false,
         };
 
         let records = fetch_daily_history(&client, &session, "6501")
@@ -2292,6 +2301,7 @@ mod tests {
             url_price: format!("{}/price/", server.url()),
             url_event: String::new(),
             url_event_ws: String::new(),
+            is_demo: false,
         };
 
         let result = fetch_market_prices(&client, &session, &["6501"]).await;
@@ -2327,6 +2337,7 @@ mod tests {
             url_price: format!("{}/price/", server.url()),
             url_event: String::new(),
             url_event_ws: String::new(),
+            is_demo: false,
         };
 
         let result = fetch_daily_history(&client, &session, "6501").await;
@@ -2486,6 +2497,7 @@ mod tests {
             url_price: format!("{}/price/", server.url()),
             url_event: String::new(),
             url_event_ws: String::new(),
+            is_demo: false,
         };
 
         let _records = fetch_market_prices(&client, &session, &["6501"])
@@ -2523,6 +2535,7 @@ mod tests {
             url_price: format!("{}/price/", server.url()),
             url_event: String::new(),
             url_event_ws: String::new(),
+            is_demo: false,
         };
 
         let _records = fetch_daily_history(&client, &session, "6501")
@@ -2652,6 +2665,7 @@ mod tests {
             url_price: "https://virt.test/price/".to_string(),
             url_event: "https://virt.test/event/".to_string(),
             url_event_ws: "wss://virt.test/ws/".to_string(),
+            is_demo: false,
         };
 
         let json = serde_json::to_string(&session).expect("serialize すべき");
@@ -2683,6 +2697,7 @@ mod tests {
             url_price: server.url(),
             url_event: String::new(),
             url_event_ws: String::new(),
+            is_demo: false,
         };
 
         let client = reqwest::Client::new();
@@ -2711,6 +2726,7 @@ mod tests {
             url_price: server.url(),
             url_event: String::new(),
             url_event_ws: String::new(),
+            is_demo: false,
         };
 
         let client = reqwest::Client::new();
@@ -2739,6 +2755,7 @@ mod tests {
             url_price: server.url(),
             url_event: String::new(),
             url_event_ws: String::new(),
+            is_demo: false,
         };
 
         let client = reqwest::Client::new();
@@ -4142,6 +4159,7 @@ mod tests {
             url_price: format!("{url}/"),
             url_event: format!("{url}/"),
             url_event_ws: format!("{url}/ws"),
+            is_demo: false,
         }
     }
 
@@ -4346,6 +4364,55 @@ mod tests {
         assert!(
             json.contains(r#""sGenkinShinyouKubun":"8""#),
             "一般信用返済買い の sGenkinShinyouKubun=8 が必要: {json}"
+        );
+    }
+
+    // ── tachibana_demo_guard: TachibanaSession.is_demo ─────────────────────
+    // 本番口座での誤発注を防ぐため、セッション自体にデモ/本番の別を保持する。
+
+    #[test]
+    fn tachibana_session_stores_is_demo_true() {
+        let session = TachibanaSession {
+            url_request: String::new(),
+            url_master: String::new(),
+            url_price: String::new(),
+            url_event: String::new(),
+            url_event_ws: String::new(),
+            is_demo: true,
+        };
+        assert!(session.is_demo, "is_demo=true で構築できるべき");
+    }
+
+    #[test]
+    fn tachibana_session_serializes_is_demo_field() {
+        let session = TachibanaSession {
+            url_request: "r".to_string(),
+            url_master: "m".to_string(),
+            url_price: "p".to_string(),
+            url_event: "e".to_string(),
+            url_event_ws: "ws".to_string(),
+            is_demo: true,
+        };
+        let json = serde_json::to_string(&session).unwrap();
+        assert!(
+            json.contains(r#""is_demo":true"#),
+            "JSON に is_demo フィールドが含まれるべき: {json}"
+        );
+    }
+
+    #[test]
+    fn tachibana_session_deserializes_missing_is_demo_as_false() {
+        let json = r#"{
+            "url_request": "r",
+            "url_master": "m",
+            "url_price": "p",
+            "url_event": "e",
+            "url_event_ws": "ws"
+        }"#;
+        let session: TachibanaSession = serde_json::from_str(json).unwrap();
+        assert!(
+            !session.is_demo,
+            "is_demo 欠損時は false（本番扱い、安全側）にフォールバックすべき"
         );
     }
 }

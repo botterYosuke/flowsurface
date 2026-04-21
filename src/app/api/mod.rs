@@ -1,4 +1,5 @@
 pub(crate) mod helpers;
+pub(crate) mod narrative;
 pub(crate) mod pane;
 pub(crate) mod pane_ticker;
 pub(crate) mod replay;
@@ -90,6 +91,9 @@ impl Flowsurface {
             ApiCommand::VirtualExchange(cmd) => {
                 return self.handle_virtual_exchange_commands(cmd, reply_tx);
             }
+            ApiCommand::Narrative(cmd) => {
+                return self.handle_narrative_api(cmd, reply_tx);
+            }
             #[cfg(debug_assertions)]
             ApiCommand::Test(cmd) => {
                 let (body, task) = self.handle_test_api(cmd);
@@ -104,11 +108,7 @@ impl Flowsurface {
         use replay_api::AuthCommand;
         match cmd {
             AuthCommand::TachibanaSessionStatus => {
-                let present = connector::auth::get_session().is_some();
-                serde_json::json!({
-                    "session": if present { "present" } else { "none" }
-                })
-                .to_string()
+                format_tachibana_session_status(connector::auth::get_session().as_ref())
             }
             AuthCommand::TachibanaLogout => {
                 connector::auth::clear_session();
@@ -260,5 +260,72 @@ impl Flowsurface {
             Err(e) => serde_json::json!({ "error": e }).to_string(),
         };
         reply.send(body);
+    }
+}
+
+/// `/api/auth/tachibana/status` のレスポンス JSON を組み立てる。
+///
+/// - セッションなし: `{"session": "none"}`
+/// - デモ保存: `{"session": "present", "environment": "demo"}`
+/// - 本番保存: `{"session": "present", "environment": "prod"}`
+///
+/// Python 側テスト (`@pytest.mark.tachibana_demo`) が `environment == "demo"`
+/// を確認して本番口座での誤発注を skip する判定に使用する。
+fn format_tachibana_session_status(
+    session: Option<&exchange::adapter::tachibana::TachibanaSession>,
+) -> String {
+    match session {
+        None => serde_json::json!({ "session": "none" }).to_string(),
+        Some(s) => serde_json::json!({
+            "session": "present",
+            "environment": if s.is_demo { "demo" } else { "prod" },
+        })
+        .to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_tachibana_session_status;
+    use exchange::adapter::tachibana::TachibanaSession;
+
+    fn make_session(is_demo: bool) -> TachibanaSession {
+        TachibanaSession {
+            url_request: "r".to_string(),
+            url_master: "m".to_string(),
+            url_price: "p".to_string(),
+            url_event: "e".to_string(),
+            url_event_ws: "ws".to_string(),
+            is_demo,
+        }
+    }
+
+    #[test]
+    fn status_none_when_no_session() {
+        let body = format_tachibana_session_status(None);
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["session"], "none");
+        assert!(
+            v.get("environment").is_none(),
+            "セッション未保存時は environment を含めない"
+        );
+    }
+
+    #[test]
+    fn status_demo_when_session_is_demo() {
+        let session = make_session(true);
+        let body = format_tachibana_session_status(Some(&session));
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["session"], "present");
+        assert_eq!(v["environment"], "demo");
+    }
+
+    #[test]
+    fn status_prod_when_session_is_not_demo() {
+        let session = make_session(false);
+        let body = format_tachibana_session_status(Some(&session));
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["session"], "present");
+        assert_eq!(v["environment"], "prod");
     }
 }

@@ -231,14 +231,6 @@ impl Dashboard {
                     new_stream,
                 }),
             ),
-            pane::Effect::SyncIssueToOrderEntry {
-                issue_code,
-                issue_name,
-                tick_size,
-            } => (
-                self.sync_issue_to_order_entry(main_window.id, issue_code, issue_name, tick_size),
-                None,
-            ),
             pane::Effect::SubmitVirtualOrder(vo) => {
                 (Task::none(), Some(Event::SubmitVirtualOrder(vo)))
             }

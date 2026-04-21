@@ -27,6 +27,9 @@ impl ReplayController {
                 if was_replay && !self.state.is_replay() {
                     // Replay → Live: ペイン content を再構築して WS を自動復帰させる
                     dashboard.rebuild_for_live(main_window_id);
+                } else if !was_replay && self.state.is_replay() {
+                    // Live → Replay: replay_mode=true で再構築してフェッチループを抑制する
+                    dashboard.clear_chart_for_replay(main_window_id);
                 }
                 (Task::none(), None)
             }

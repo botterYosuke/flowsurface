@@ -13,3 +13,4 @@ docs/.vitepress/cache
 __pycache__/
 *.egg-info/
 python/.venv/
+uv.lock

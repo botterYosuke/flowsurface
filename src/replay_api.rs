@@ -1,3 +1,4 @@
+use crate::narrative::model::NarrativeAction;
 use crate::replay::ReplayCommand;
 use futures::SinkExt;
 use futures::channel::mpsc;
@@ -15,6 +16,8 @@ pub enum ApiCommand {
     Auth(AuthCommand),
     /// 仮想約定エンジンコマンド（Phase 2 互換）。
     VirtualExchange(VirtualExchangeCommand),
+    /// ナラティブ API コマンド（Phase 4a）。
+    Narrative(NarrativeCommand),
     /// 立花証券余力情報を取得する（GET /api/buying-power）。
     FetchBuyingPower,
     /// 立花証券新規注文を発注する（POST /api/tachibana/order）。
@@ -67,6 +70,51 @@ pub enum VirtualExchangeCommand {
     GetOrders,
 }
 
+/// ナラティブ API コマンド（Phase 4a）。
+#[derive(Debug, Clone)]
+pub enum NarrativeCommand {
+    /// `POST /api/agent/narrative`: ナラティブを新規作成する。
+    Create(Box<NarrativeCreateRequest>),
+    /// `GET /api/agent/narratives?agent_id=&ticker=&since_ms=&limit=`
+    List(NarrativeListQuery),
+    /// `GET /api/agent/narrative/:id`: メタ JSON を返す。
+    Get { id: uuid::Uuid },
+    /// `GET /api/agent/narrative/:id/snapshot`: 本体 JSON を返す（gzip 解凍 + sha256 検証）。
+    GetSnapshot { id: uuid::Uuid },
+    /// `PATCH /api/agent/narrative/:id {"public": bool}`.
+    Patch { id: uuid::Uuid, public: bool },
+    /// `GET /api/agent/narratives/storage`.
+    StorageStats,
+    /// `GET /api/agent/narratives/orphans`.
+    Orphans,
+}
+
+/// `POST /api/agent/narrative` のリクエストボディ（バリデーション済み）。
+#[derive(Debug, Clone)]
+pub struct NarrativeCreateRequest {
+    pub agent_id: String,
+    pub uagent_address: Option<String>,
+    pub ticker: String,
+    pub timeframe: String,
+    pub observation_snapshot: serde_json::Value,
+    pub reasoning: String,
+    pub action: NarrativeAction,
+    pub confidence: f64,
+    pub linked_order_id: Option<String>,
+    /// クライアント指定がなければサーバー側の `StepClock::now_ms()` を使う。
+    pub timestamp_ms: Option<i64>,
+    pub idempotency_key: Option<String>,
+}
+
+/// `GET /api/agent/narratives` のクエリパラメータ。
+#[derive(Debug, Clone, Default)]
+pub struct NarrativeListQuery {
+    pub agent_id: Option<String>,
+    pub ticker: Option<String>,
+    pub since_ms: Option<i64>,
+    pub limit: Option<usize>,
+}
+
 /// 認証状態確認コマンド。
 #[derive(Debug, Clone)]
 pub enum AuthCommand {
@@ -112,9 +160,13 @@ pub enum PaneCommand {
     },
     /// 現在の通知（Toast）一覧を取得する。§6.2 #10 backfill 失敗検証用。
     ListNotifications,
-    /// 指定ペインのチャートスナップショット（バー数・タイムスタンプ範囲）を返す。
-    /// クエリパラメータ: `?pane_id=<uuid>`
-    GetChartSnapshot { pane_id: uuid::Uuid },
+    /// 指定ペインのチャートスナップショット（バー数・タイムスタンプ範囲・OHLCV バー配列）を返す。
+    /// クエリパラメータ: `?pane_id=<uuid>[&limit=N][&since_ts=<ms>]`
+    GetChartSnapshot {
+        pane_id: uuid::Uuid,
+        limit: Option<usize>,
+        since_ts: Option<u64>,
+    },
     /// 注文ペインを開く（POST /api/sidebar/open-order-pane）
     /// kind: "OrderEntry" | "OrderList" | "BuyingPower"
     OpenOrderPane { kind: String },
@@ -189,49 +241,70 @@ fn parse_content_length_from_headers(headers: &str) -> usize {
     0
 }
 
+/// 上限: ヘッダー 64KB + ボディ 16MB（Phase 4a のスナップショット 10MB ＋余裕を見た値）。
+const MAX_HEADER_BYTES: usize = 64 * 1024;
+const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
+
+pub(crate) enum ReadRequestOutcome {
+    /// リクエストを全量受信した（ヘッダー + ボディ）
+    Ok(String),
+    /// Content-Length がサーバー上限を超えた → 413 を返すべき
+    TooLarge,
+    /// 接続断・ヘッダー解析失敗など。呼び出し側は 400/黙って切断を選べる
+    Invalid,
+}
+
 /// HTTP リクエストを完全に読み込む（Content-Length に従ってボディも確保）。
-/// TCP が分割して届いても正しく結合する。
-async fn read_full_request(stream: &mut tokio::net::TcpStream) -> Option<String> {
-    // 512KB バッファ（inject-daily-history 等の大きなボディに対応）
-    let mut buf = vec![0u8; 524288];
+/// TCP が分割して届いても正しく結合し、ボディサイズに応じてバッファを動的拡張する。
+pub(crate) async fn read_full_request(stream: &mut tokio::net::TcpStream) -> ReadRequestOutcome {
+    let mut buf = vec![0u8; 16 * 1024];
     let mut total = 0usize;
 
     loop {
+        if total == buf.len() {
+            if buf.len() >= MAX_HEADER_BYTES {
+                return ReadRequestOutcome::Invalid;
+            }
+            let new_size = (buf.len() * 2).min(MAX_HEADER_BYTES);
+            buf.resize(new_size, 0);
+        }
+
         let n = match stream.read(&mut buf[total..]).await {
-            Ok(0) | Err(_) => return None,
+            Ok(0) | Err(_) => return ReadRequestOutcome::Invalid,
             Ok(n) => n,
         };
         total += n;
 
-        // ヘッダー末尾 \r\n\r\n を探す
         let Some(header_end) = buf[..total].windows(4).position(|w| w == b"\r\n\r\n") else {
-            if total >= buf.len() {
-                return None; // バッファ枯渇
-            }
-            continue; // ヘッダーがまだ届いていない
+            continue;
         };
 
         let body_start = header_end + 4;
-        let headers_raw = std::str::from_utf8(&buf[..header_end]).ok()?;
+        let Ok(headers_raw) = std::str::from_utf8(&buf[..header_end]) else {
+            return ReadRequestOutcome::Invalid;
+        };
         let content_length = parse_content_length_from_headers(headers_raw);
+
+        if content_length > MAX_BODY_BYTES {
+            return ReadRequestOutcome::TooLarge;
+        }
 
         let body_received = total - body_start;
         if body_received >= content_length {
-            // 完全なリクエストを受信済み
-            return Some(String::from_utf8_lossy(&buf[..total]).into_owned());
+            return ReadRequestOutcome::Ok(String::from_utf8_lossy(&buf[..total]).into_owned());
         }
 
-        // ボディの残りバイトを読む
-        let remaining = content_length - body_received;
-        if total + remaining > buf.len() {
-            return None; // バッファ超過
+        let total_len = body_start + content_length;
+        if buf.len() < total_len {
+            buf.resize(total_len, 0);
         }
-        match stream.read_exact(&mut buf[total..total + remaining]).await {
+        match stream.read_exact(&mut buf[total..total_len]).await {
             Ok(_) => {
-                total += remaining;
-                return Some(String::from_utf8_lossy(&buf[..total]).into_owned());
+                return ReadRequestOutcome::Ok(
+                    String::from_utf8_lossy(&buf[..total_len]).into_owned(),
+                );
             }
-            Err(_) => return None,
+            Err(_) => return ReadRequestOutcome::Invalid,
         }
     }
 }
@@ -261,11 +334,14 @@ async fn run_server(mut sender: mpsc::Sender<ApiMessage>) {
         };
 
         // 1 リクエスト / 接続（keep-alive なし）
-        // 512KB バッファ: inject-daily-history で多数 kline を送る場合に備えて確保
-        // Content-Length に従って完全なボディを受信する（TCP 分割対策）
+        // ヘッダー 64KB / ボディ 16MB まで動的に拡張する（Phase 4a のスナップショット 10MB 対応）
         let request_string = match read_full_request(&mut stream).await {
-            Some(s) => s,
-            None => continue,
+            ReadRequestOutcome::Ok(s) => s,
+            ReadRequestOutcome::TooLarge => {
+                let _ = write_response(&mut stream, 413, r#"{"error":"Payload Too Large"}"#).await;
+                continue;
+            }
+            ReadRequestOutcome::Invalid => continue,
         };
         let request = request_string.as_str();
         let (method, path, body) = match parse_request(request) {
@@ -298,6 +374,10 @@ async fn run_server(mut sender: mpsc::Sender<ApiMessage>) {
                     r#"{"error":"Bad Request: invalid JSON body"}"#,
                 )
                 .await;
+                continue;
+            }
+            Err(RouteError::PayloadTooLarge) => {
+                let _ = write_response(&mut stream, 413, r#"{"error":"Payload Too Large"}"#).await;
                 continue;
             }
         };
@@ -348,6 +428,7 @@ fn parse_request(raw: &str) -> Option<(String, String, String)> {
 enum RouteError {
     NotFound,
     BadRequest,
+    PayloadTooLarge,
 }
 
 /// body から文字列フィールドを取り出す
@@ -394,6 +475,7 @@ fn route(method: &str, path: &str, body: &str) -> Result<ApiCommand, RouteError>
 
         // ── App 制御 ───────────────────────────────────────────────────────
         ("POST", "/api/app/save") => Ok(ApiCommand::Replay(ReplayCommand::SaveState)),
+        ("POST", "/api/app/set-mode") => parse_set_mode_command(body),
 
         // ── 認証（本番ビルドにも含まれる）────────────────────────────────
         ("GET", "/api/auth/tachibana/status") => {
@@ -441,6 +523,23 @@ fn route(method: &str, path: &str, body: &str) -> Result<ApiCommand, RouteError>
         ("GET", "/api/replay/orders") => Ok(ApiCommand::VirtualExchange(
             VirtualExchangeCommand::GetOrders,
         )),
+
+        // ── ナラティブ API（Phase 4a）──────────────────────────────────────
+        ("POST", "/api/agent/narrative") => parse_narrative_create(body),
+        ("GET", "/api/agent/narratives/storage") => {
+            Ok(ApiCommand::Narrative(NarrativeCommand::StorageStats))
+        }
+        ("GET", "/api/agent/narratives/orphans") => {
+            Ok(ApiCommand::Narrative(NarrativeCommand::Orphans))
+        }
+        ("GET", p) if p == "/api/agent/narratives" || p.starts_with("/api/agent/narratives?") => {
+            parse_narrative_list(p)
+        }
+        ("GET", p) if p.starts_with("/api/agent/narrative/") && p.ends_with("/snapshot") => {
+            parse_narrative_get_snapshot(p)
+        }
+        ("GET", p) if p.starts_with("/api/agent/narrative/") => parse_narrative_get(p),
+        ("PATCH", p) if p.starts_with("/api/agent/narrative/") => parse_narrative_patch(p, body),
 
         // ── 立花証券余力情報 ──────────────────────────────────────────────
         ("GET", "/api/buying-power") => Ok(ApiCommand::FetchBuyingPower),
@@ -545,11 +644,29 @@ fn query_param(path: &str, key: &str) -> Option<String> {
     })
 }
 
-/// `GET /api/pane/chart-snapshot?pane_id=<uuid>` をパースして ApiCommand を返す。
+/// `GET /api/pane/chart-snapshot?pane_id=<uuid>[&limit=N][&since_ts=<ms>]` をパースして ApiCommand を返す。
 fn parse_chart_snapshot_command(path: &str) -> Result<ApiCommand, RouteError> {
     let id_str = query_param(path, "pane_id").ok_or(RouteError::BadRequest)?;
     let pane_id = uuid::Uuid::parse_str(&id_str).map_err(|_| RouteError::BadRequest)?;
-    Ok(ApiCommand::Pane(PaneCommand::GetChartSnapshot { pane_id }))
+    let limit = query_param(path, "limit").and_then(|s| s.parse::<usize>().ok());
+    let since_ts = query_param(path, "since_ts").and_then(|s| s.parse::<u64>().ok());
+    Ok(ApiCommand::Pane(PaneCommand::GetChartSnapshot {
+        pane_id,
+        limit,
+        since_ts,
+    }))
+}
+
+/// `POST /api/app/set-mode` のボディをパースして ApiCommand を返す。
+/// body: `{"mode": "live" | "replay"}`
+fn parse_set_mode_command(body: &str) -> Result<ApiCommand, RouteError> {
+    let mode = body_str_field(body, "mode")?;
+    match mode.to_lowercase().as_str() {
+        "live" | "replay" => Ok(ApiCommand::Replay(ReplayCommand::SetMode {
+            mode: mode.to_lowercase(),
+        })),
+        _ => Err(RouteError::BadRequest),
+    }
 }
 
 /// `POST /api/replay/play` のボディをパースして ApiCommand を返す。
@@ -771,6 +888,145 @@ fn parse_sidebar_select_ticker(body: &str) -> Result<ApiCommand, RouteError> {
     }))
 }
 
+/// `POST /api/agent/narrative` のボディを `NarrativeCreateRequest` にパースする。
+fn parse_narrative_create(body: &str) -> Result<ApiCommand, RouteError> {
+    let parsed: serde_json::Value =
+        serde_json::from_str(body).map_err(|_| RouteError::BadRequest)?;
+
+    let agent_id = parsed
+        .get("agent_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .ok_or(RouteError::BadRequest)?;
+    if agent_id.trim().is_empty() {
+        return Err(RouteError::BadRequest);
+    }
+
+    let ticker = parsed
+        .get("ticker")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .ok_or(RouteError::BadRequest)?;
+    let timeframe = parsed
+        .get("timeframe")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .ok_or(RouteError::BadRequest)?;
+
+    let observation_snapshot = parsed
+        .get("observation_snapshot")
+        .cloned()
+        .ok_or(RouteError::BadRequest)?;
+    if !observation_snapshot.is_object() && !observation_snapshot.is_array() {
+        return Err(RouteError::BadRequest);
+    }
+    // 早期サイズチェック（圧縮前）。計画 §3.2 ハード上限 10 MB。
+    let serialized =
+        serde_json::to_vec(&observation_snapshot).map_err(|_| RouteError::BadRequest)?;
+    if serialized.len() as u64 > crate::narrative::snapshot_store::MAX_UNCOMPRESSED_BYTES {
+        return Err(RouteError::PayloadTooLarge);
+    }
+
+    let reasoning = parsed
+        .get("reasoning")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .ok_or(RouteError::BadRequest)?;
+
+    let action_value = parsed.get("action").ok_or(RouteError::BadRequest)?;
+    let action: NarrativeAction =
+        serde_json::from_value(action_value.clone()).map_err(|_| RouteError::BadRequest)?;
+
+    let confidence = parsed
+        .get("confidence")
+        .and_then(|v| v.as_f64())
+        .ok_or(RouteError::BadRequest)?;
+    if !(0.0..=1.0).contains(&confidence) {
+        return Err(RouteError::BadRequest);
+    }
+
+    let uagent_address = parsed
+        .get("uagent_address")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let linked_order_id = parsed
+        .get("linked_order_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let timestamp_ms = parsed.get("timestamp_ms").and_then(|v| v.as_i64());
+    let idempotency_key = parsed
+        .get("idempotency_key")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let req = NarrativeCreateRequest {
+        agent_id,
+        uagent_address,
+        ticker,
+        timeframe,
+        observation_snapshot,
+        reasoning,
+        action,
+        confidence,
+        linked_order_id,
+        timestamp_ms,
+        idempotency_key,
+    };
+    Ok(ApiCommand::Narrative(NarrativeCommand::Create(Box::new(
+        req,
+    ))))
+}
+
+fn parse_narrative_list(path: &str) -> Result<ApiCommand, RouteError> {
+    let agent_id = query_param(path, "agent_id");
+    let ticker = query_param(path, "ticker");
+    let since_ms = query_param(path, "since_ms").and_then(|s| s.parse::<i64>().ok());
+    let limit = query_param(path, "limit").and_then(|s| s.parse::<usize>().ok());
+    Ok(ApiCommand::Narrative(NarrativeCommand::List(
+        NarrativeListQuery {
+            agent_id,
+            ticker,
+            since_ms,
+            limit,
+        },
+    )))
+}
+
+fn parse_narrative_id_from_path(path: &str) -> Result<uuid::Uuid, RouteError> {
+    let (path_part, _) = path.split_once('?').unwrap_or((path, ""));
+    let tail = path_part
+        .strip_prefix("/api/agent/narrative/")
+        .filter(|s| !s.is_empty())
+        .ok_or(RouteError::BadRequest)?;
+    // /api/agent/narrative/{id}/snapshot などのサフィックスを落とす
+    let id_str = tail.split('/').next().ok_or(RouteError::BadRequest)?;
+    uuid::Uuid::parse_str(id_str).map_err(|_| RouteError::BadRequest)
+}
+
+fn parse_narrative_get(path: &str) -> Result<ApiCommand, RouteError> {
+    let id = parse_narrative_id_from_path(path)?;
+    Ok(ApiCommand::Narrative(NarrativeCommand::Get { id }))
+}
+
+fn parse_narrative_get_snapshot(path: &str) -> Result<ApiCommand, RouteError> {
+    let id = parse_narrative_id_from_path(path)?;
+    Ok(ApiCommand::Narrative(NarrativeCommand::GetSnapshot { id }))
+}
+
+fn parse_narrative_patch(path: &str, body: &str) -> Result<ApiCommand, RouteError> {
+    let id = parse_narrative_id_from_path(path)?;
+    let parsed: serde_json::Value =
+        serde_json::from_str(body).map_err(|_| RouteError::BadRequest)?;
+    let public = parsed
+        .get("public")
+        .and_then(|v| v.as_bool())
+        .ok_or(RouteError::BadRequest)?;
+    Ok(ApiCommand::Narrative(NarrativeCommand::Patch {
+        id,
+        public,
+    }))
+}
+
 /// body から省略可能な文字列フィールドを取り出す。
 /// フィールドが存在しない場合、または値が JSON `null` の場合は `None` を返す。
 /// （必須フィールド用の `body_str_field` は null を 400 として拒否する。）
@@ -791,8 +1047,11 @@ async fn write_response(
 ) -> std::io::Result<()> {
     let status_text = match status_code {
         200 => "OK",
+        201 => "Created",
         400 => "Bad Request",
         404 => "Not Found",
+        410 => "Gone",
+        413 => "Payload Too Large",
         500 => "Internal Server Error",
         501 => "Not Implemented",
         _ => "Unknown",
@@ -1041,6 +1300,253 @@ mod tests {
         assert!(matches!(unwrap_replay(cmd), ReplayCommand::SaveState));
     }
 
+    #[test]
+    fn route_post_app_set_mode_replay() {
+        let cmd = route("POST", "/api/app/set-mode", r#"{"mode":"replay"}"#).unwrap();
+        assert!(matches!(
+            unwrap_replay(cmd),
+            ReplayCommand::SetMode { mode } if mode == "replay"
+        ));
+    }
+
+    #[test]
+    fn route_post_app_set_mode_live() {
+        let cmd = route("POST", "/api/app/set-mode", r#"{"mode":"live"}"#).unwrap();
+        assert!(matches!(
+            unwrap_replay(cmd),
+            ReplayCommand::SetMode { mode } if mode == "live"
+        ));
+    }
+
+    #[test]
+    fn route_post_app_set_mode_case_insensitive() {
+        let cmd = route("POST", "/api/app/set-mode", r#"{"mode":"REPLAY"}"#).unwrap();
+        assert!(matches!(
+            unwrap_replay(cmd),
+            ReplayCommand::SetMode { mode } if mode == "replay"
+        ));
+    }
+
+    #[test]
+    fn route_post_app_set_mode_invalid() {
+        let result = route("POST", "/api/app/set-mode", r#"{"mode":"unknown"}"#);
+        assert!(matches!(result, Err(RouteError::BadRequest)));
+    }
+
+    // ── route tests: narrative（Phase 4a）──
+
+    fn unwrap_narrative(cmd: ApiCommand) -> NarrativeCommand {
+        match cmd {
+            ApiCommand::Narrative(c) => c,
+            _ => panic!("Expected ApiCommand::Narrative, got {cmd:?}"),
+        }
+    }
+
+    fn sample_narrative_body() -> String {
+        serde_json::json!({
+            "agent_id": "agent_alpha",
+            "ticker": "BTCUSDT",
+            "timeframe": "1h",
+            "observation_snapshot": { "ohlcv": [[1, 2, 3, 4, 5]], "rsi": 28.3 },
+            "reasoning": "divergence",
+            "action": { "side": "buy", "qty": 0.1, "price": 92500.0 },
+            "confidence": 0.76,
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn route_post_narrative_create() {
+        let cmd = route("POST", "/api/agent/narrative", &sample_narrative_body()).unwrap();
+        match unwrap_narrative(cmd) {
+            NarrativeCommand::Create(req) => {
+                assert_eq!(req.agent_id, "agent_alpha");
+                assert_eq!(req.ticker, "BTCUSDT");
+                assert_eq!(req.timeframe, "1h");
+                assert!((req.confidence - 0.76).abs() < 1e-9);
+                assert_eq!(req.action.qty, 0.1);
+            }
+            _ => panic!("expected Create"),
+        }
+    }
+
+    #[test]
+    fn route_post_narrative_create_rejects_empty_agent_id() {
+        let body = serde_json::json!({
+            "agent_id": "",
+            "ticker": "BTCUSDT",
+            "timeframe": "1h",
+            "observation_snapshot": {},
+            "reasoning": "x",
+            "action": { "side": "buy", "qty": 1.0, "price": 1.0 },
+            "confidence": 0.5,
+        })
+        .to_string();
+        let result = route("POST", "/api/agent/narrative", &body);
+        assert!(matches!(result, Err(RouteError::BadRequest)));
+    }
+
+    #[test]
+    fn route_post_narrative_create_rejects_out_of_range_confidence() {
+        let body = serde_json::json!({
+            "agent_id": "a",
+            "ticker": "BTCUSDT",
+            "timeframe": "1h",
+            "observation_snapshot": {},
+            "reasoning": "x",
+            "action": { "side": "buy", "qty": 1.0, "price": 1.0 },
+            "confidence": 1.5,
+        })
+        .to_string();
+        let result = route("POST", "/api/agent/narrative", &body);
+        assert!(matches!(result, Err(RouteError::BadRequest)));
+    }
+
+    #[test]
+    fn route_post_narrative_create_rejects_bad_side() {
+        let body = serde_json::json!({
+            "agent_id": "a",
+            "ticker": "BTCUSDT",
+            "timeframe": "1h",
+            "observation_snapshot": {},
+            "reasoning": "x",
+            "action": { "side": "hold", "qty": 1.0, "price": 1.0 },
+            "confidence": 0.5,
+        })
+        .to_string();
+        let result = route("POST", "/api/agent/narrative", &body);
+        assert!(matches!(result, Err(RouteError::BadRequest)));
+    }
+
+    #[test]
+    fn route_post_narrative_create_rejects_oversized_snapshot() {
+        // 11MB of JSON string content → exceeds MAX_UNCOMPRESSED_BYTES (10MB)
+        let big = "x".repeat(11 * 1024 * 1024);
+        let body = serde_json::json!({
+            "agent_id": "a",
+            "ticker": "BTCUSDT",
+            "timeframe": "1h",
+            "observation_snapshot": { "blob": big },
+            "reasoning": "x",
+            "action": { "side": "buy", "qty": 1.0, "price": 1.0 },
+            "confidence": 0.5,
+        })
+        .to_string();
+        let result = route("POST", "/api/agent/narrative", &body);
+        assert!(matches!(result, Err(RouteError::PayloadTooLarge)));
+    }
+
+    #[test]
+    fn route_get_narratives_list_without_filters() {
+        let cmd = route("GET", "/api/agent/narratives", "").unwrap();
+        match unwrap_narrative(cmd) {
+            NarrativeCommand::List(q) => {
+                assert!(q.agent_id.is_none());
+                assert!(q.ticker.is_none());
+                assert!(q.since_ms.is_none());
+                assert!(q.limit.is_none());
+            }
+            _ => panic!("expected List"),
+        }
+    }
+
+    #[test]
+    fn route_get_narratives_list_with_filters() {
+        let path = "/api/agent/narratives?agent_id=alpha&ticker=BTCUSDT&since_ms=1000&limit=50";
+        let cmd = route("GET", path, "").unwrap();
+        match unwrap_narrative(cmd) {
+            NarrativeCommand::List(q) => {
+                assert_eq!(q.agent_id.as_deref(), Some("alpha"));
+                assert_eq!(q.ticker.as_deref(), Some("BTCUSDT"));
+                assert_eq!(q.since_ms, Some(1000));
+                assert_eq!(q.limit, Some(50));
+            }
+            _ => panic!("expected List"),
+        }
+    }
+
+    #[test]
+    fn route_get_narrative_by_id() {
+        let id = uuid::Uuid::new_v4();
+        let path = format!("/api/agent/narrative/{id}");
+        let cmd = route("GET", &path, "").unwrap();
+        match unwrap_narrative(cmd) {
+            NarrativeCommand::Get { id: got } => assert_eq!(got, id),
+            _ => panic!("expected Get"),
+        }
+    }
+
+    #[test]
+    fn route_get_narrative_snapshot() {
+        let id = uuid::Uuid::new_v4();
+        let path = format!("/api/agent/narrative/{id}/snapshot");
+        let cmd = route("GET", &path, "").unwrap();
+        match unwrap_narrative(cmd) {
+            NarrativeCommand::GetSnapshot { id: got } => assert_eq!(got, id),
+            _ => panic!("expected GetSnapshot"),
+        }
+    }
+
+    #[test]
+    fn route_patch_narrative_public_true() {
+        let id = uuid::Uuid::new_v4();
+        let path = format!("/api/agent/narrative/{id}");
+        let cmd = route("PATCH", &path, r#"{"public": true}"#).unwrap();
+        match unwrap_narrative(cmd) {
+            NarrativeCommand::Patch { id: got, public } => {
+                assert_eq!(got, id);
+                assert!(public);
+            }
+            _ => panic!("expected Patch"),
+        }
+    }
+
+    #[test]
+    fn route_patch_narrative_public_false_allowed() {
+        let id = uuid::Uuid::new_v4();
+        let path = format!("/api/agent/narrative/{id}");
+        let cmd = route("PATCH", &path, r#"{"public": false}"#).unwrap();
+        match unwrap_narrative(cmd) {
+            NarrativeCommand::Patch { public, .. } => assert!(!public),
+            _ => panic!("expected Patch"),
+        }
+    }
+
+    #[test]
+    fn route_patch_narrative_rejects_missing_public() {
+        let id = uuid::Uuid::new_v4();
+        let path = format!("/api/agent/narrative/{id}");
+        let result = route("PATCH", &path, r#"{}"#);
+        assert!(matches!(result, Err(RouteError::BadRequest)));
+    }
+
+    #[test]
+    fn route_get_narratives_storage() {
+        let cmd = route("GET", "/api/agent/narratives/storage", "").unwrap();
+        assert!(matches!(
+            unwrap_narrative(cmd),
+            NarrativeCommand::StorageStats
+        ));
+    }
+
+    #[test]
+    fn route_get_narratives_orphans() {
+        let cmd = route("GET", "/api/agent/narratives/orphans", "").unwrap();
+        assert!(matches!(unwrap_narrative(cmd), NarrativeCommand::Orphans));
+    }
+
+    #[test]
+    fn route_get_narrative_invalid_uuid_is_bad_request() {
+        let result = route("GET", "/api/agent/narrative/not-a-uuid", "");
+        assert!(matches!(result, Err(RouteError::BadRequest)));
+    }
+
+    #[test]
+    fn route_post_app_set_mode_missing_field() {
+        let result = route("POST", "/api/app/set-mode", r#"{}"#);
+        assert!(matches!(result, Err(RouteError::BadRequest)));
+    }
+
     // ── route tests: pane ──
 
     #[test]
@@ -1179,11 +1685,17 @@ mod tests {
         let path = "/api/pane/chart-snapshot?pane_id=00000000-0000-0000-0000-000000000010";
         let cmd = route("GET", path, "").unwrap();
         match unwrap_pane(cmd) {
-            PaneCommand::GetChartSnapshot { pane_id } => {
+            PaneCommand::GetChartSnapshot {
+                pane_id,
+                limit,
+                since_ts,
+            } => {
                 assert_eq!(
                     pane_id,
                     uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000010").unwrap()
                 );
+                assert_eq!(limit, None);
+                assert_eq!(since_ts, None);
             }
             _ => panic!("Expected GetChartSnapshot command"),
         }
@@ -1209,6 +1721,27 @@ mod tests {
             "",
         );
         assert!(matches!(result, Err(RouteError::NotFound)));
+    }
+
+    #[test]
+    fn route_get_chart_snapshot_with_limit_and_since_ts() {
+        let path = "/api/pane/chart-snapshot?pane_id=00000000-0000-0000-0000-000000000010&limit=100&since_ts=1700000000000";
+        let cmd = route("GET", path, "").unwrap();
+        match unwrap_pane(cmd) {
+            PaneCommand::GetChartSnapshot {
+                pane_id,
+                limit,
+                since_ts,
+            } => {
+                assert_eq!(
+                    pane_id,
+                    uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000010").unwrap()
+                );
+                assert_eq!(limit, Some(100));
+                assert_eq!(since_ts, Some(1700000000000));
+            }
+            _ => panic!("Expected GetChartSnapshot command"),
+        }
     }
 
     // ── query_param ──

@@ -141,6 +141,9 @@ struct HeadlessEngine {
     timeframe: Timeframe,
     load_tx: tokio::sync::mpsc::Sender<LoadResult>,
     panes: Vec<HeadlessPane>,
+    narrative_store: std::sync::Arc<crate::narrative::store::NarrativeStore>,
+    snapshot_store: crate::narrative::snapshot_store::SnapshotStore,
+    data_root: std::path::PathBuf,
 }
 
 impl HeadlessEngine {
@@ -159,6 +162,7 @@ impl HeadlessEngine {
             ticker: ticker_str.clone(),
             timeframe,
         };
+        let data_root = data::data_path(None);
         Self {
             state,
             virtual_engine: VirtualExchangeEngine::new(1_000_000.0),
@@ -167,6 +171,12 @@ impl HeadlessEngine {
             timeframe,
             load_tx,
             panes: vec![initial_pane],
+            narrative_store: std::sync::Arc::new(
+                crate::narrative::store::NarrativeStore::open_default()
+                    .expect("failed to open narrative store"),
+            ),
+            snapshot_store: crate::narrative::snapshot_store::SnapshotStore::new(data_root.clone()),
+            data_root,
         }
     }
 
@@ -309,8 +319,31 @@ impl HeadlessEngine {
         // 仮想約定エンジンにトレードを通知する
         let ticker_str = &self.ticker_str;
         for (_, trades) in &dispatch.trade_events {
-            self.virtual_engine
+            let fills = self
+                .virtual_engine
                 .on_tick(ticker_str, trades, dispatch.current_time);
+            // ナラティブ outcome 自動更新（Phase 4a C-1）
+            for fill in fills {
+                let store = self.narrative_store.clone();
+                let order_id = fill.order_id.clone();
+                let fill_price = fill.fill_price;
+                let fill_time_ms = fill.fill_time_ms as i64;
+                tokio::spawn(async move {
+                    if let Err(e) = crate::narrative::service::update_outcome_from_fill(
+                        &store,
+                        &order_id,
+                        fill_price,
+                        fill_time_ms,
+                        None,
+                    )
+                    .await
+                    {
+                        log::warn!(
+                            "headless: failed to update narrative outcome for order {order_id}: {e}"
+                        );
+                    }
+                });
+            }
         }
 
         if dispatch.reached_end {
@@ -385,8 +418,32 @@ impl HeadlessEngine {
                 })
                 .collect();
             if !synthetic.is_empty() {
-                self.virtual_engine
+                let fills = self
+                    .virtual_engine
                     .on_tick(&ticker_str, &synthetic, new_time);
+                // ナラティブ outcome 自動更新（Phase 4a C-1）: step-forward 経由でも
+                // fills を拾わないと S52 の outcome 自動反映が発火しない。
+                for fill in fills {
+                    let store = self.narrative_store.clone();
+                    let order_id = fill.order_id.clone();
+                    let fill_price = fill.fill_price;
+                    let fill_time_ms = fill.fill_time_ms as i64;
+                    tokio::spawn(async move {
+                        if let Err(e) = crate::narrative::service::update_outcome_from_fill(
+                            &store,
+                            &order_id,
+                            fill_price,
+                            fill_time_ms,
+                            None,
+                        )
+                        .await
+                        {
+                            log::warn!(
+                                "headless step_forward: failed to update narrative outcome for order {order_id}: {e}"
+                            );
+                        }
+                    });
+                }
             }
         }
 
@@ -747,8 +804,57 @@ impl HeadlessEngine {
         serde_json::json!({ "ok": true }).to_string()
     }
 
+    /// `StepClock::now_ms()` を取得する。未開始なら 0。
+    fn now_ms(&self) -> i64 {
+        use crate::replay::ReplaySession;
+        match &self.state.session {
+            ReplaySession::Loading { clock, .. } | ReplaySession::Active { clock, .. } => {
+                clock.now_ms() as i64
+            }
+            _ => 0,
+        }
+    }
+
+    /// ナラティブコマンドをサービスレイヤーに委譲する。
+    async fn handle_narrative_command(
+        &self,
+        cmd: crate::replay_api::NarrativeCommand,
+        reply: crate::replay_api::ReplySender,
+    ) {
+        use crate::narrative::service;
+        use crate::replay_api::NarrativeCommand;
+        let now_ms = self.now_ms();
+        let created_at_ms = chrono::Utc::now().timestamp_millis();
+        let (status, body) = match cmd {
+            NarrativeCommand::Create(req) => {
+                service::create_narrative(
+                    &self.narrative_store,
+                    &self.snapshot_store,
+                    *req,
+                    now_ms,
+                    created_at_ms,
+                )
+                .await
+            }
+            NarrativeCommand::List(q) => service::list_narratives(&self.narrative_store, q).await,
+            NarrativeCommand::Get { id } => service::get_narrative(&self.narrative_store, id).await,
+            NarrativeCommand::GetSnapshot { id } => {
+                service::get_narrative_snapshot(&self.narrative_store, &self.snapshot_store, id)
+                    .await
+            }
+            NarrativeCommand::Patch { id, public } => {
+                service::patch_narrative(&self.narrative_store, id, public).await
+            }
+            NarrativeCommand::StorageStats => service::storage_stats(&self.narrative_store).await,
+            NarrativeCommand::Orphans => {
+                service::orphans(&self.narrative_store, self.data_root.clone()).await
+            }
+        };
+        reply.send_status(status, body);
+    }
+
     /// API コマンドを処理し、ReplySender でレスポンスを返す。
-    fn handle_command(&mut self, cmd: ApiCommand, reply: crate::replay_api::ReplySender) {
+    async fn handle_command(&mut self, cmd: ApiCommand, reply: crate::replay_api::ReplySender) {
         use crate::replay::ReplayCommand;
 
         match cmd {
@@ -771,6 +877,14 @@ impl HeadlessEngine {
                 reply.send(self.step_forward());
             }
             ApiCommand::Replay(ReplayCommand::Toggle) => {
+                let result = if self.is_playing() {
+                    self.pause()
+                } else {
+                    self.resume()
+                };
+                reply.send(result);
+            }
+            ApiCommand::Replay(ReplayCommand::SetMode { .. }) => {
                 // headless では常に Replay モードなので no-op
                 reply.send(self.get_status_json());
             }
@@ -823,6 +937,9 @@ impl HeadlessEngine {
                 timeframe,
             }) => {
                 reply.send(self.set_pane_timeframe(pane_id, &timeframe));
+            }
+            ApiCommand::Narrative(cmd) => {
+                self.handle_narrative_command(cmd, reply).await;
             }
             // headless で未対応のコマンドは 501 を返す
             ApiCommand::Pane(_)
@@ -923,7 +1040,7 @@ pub async fn run(args: &[String]) {
 
             // API コマンド受信
             Some((cmd, reply)) = api_rx.next() => {
-                engine.handle_command(cmd, reply);
+                engine.handle_command(cmd, reply).await;
             }
 
             // 再生中の tick（Playing 時のみ処理）

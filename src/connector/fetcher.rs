@@ -554,6 +554,7 @@ mod tests {
             url_price: format!("{}/price/", server.url()),
             url_event: String::new(),
             url_event_ws: String::new(),
+            is_demo: false,
         }
     }
 

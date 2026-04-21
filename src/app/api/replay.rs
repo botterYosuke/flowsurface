@@ -67,7 +67,12 @@ impl Flowsurface {
                 }
             }
             replay::ReplayCommand::Toggle => {
-                let task = self.handle_replay(ReplayMessage::User(ReplayUserMessage::ToggleMode));
+                let msg = if self.replay.is_playing() {
+                    ReplayMessage::User(ReplayUserMessage::Pause)
+                } else {
+                    ReplayMessage::User(ReplayUserMessage::Resume)
+                };
+                let task = self.handle_replay(msg);
                 reply_tx.send(reply_replay_status(self));
                 return task;
             }
@@ -124,6 +129,16 @@ impl Flowsurface {
                 let empty_windows = std::collections::HashMap::new();
                 self.save_state_to_disk(&empty_windows);
                 reply_tx.send(reply_replay_status(self));
+            }
+            replay::ReplayCommand::SetMode { mode } => {
+                let target_is_replay = mode == "replay";
+                let task = if self.replay.is_replay() != target_is_replay {
+                    self.handle_replay(ReplayMessage::User(ReplayUserMessage::ToggleMode))
+                } else {
+                    Task::none()
+                };
+                reply_tx.send(reply_replay_status(self));
+                return task;
             }
         }
         Task::none()

@@ -513,7 +513,6 @@ impl Dashboard {
     ) -> Task<Message> {
         if let Some(state) = self.get_mut_pane(main_window, window, selected_pane) {
             let pane_id = state.unique_id();
-
             let streams = state.set_content_and_streams(vec![ticker_info], content_kind);
             self.streams.extend(streams.iter());
 
@@ -554,7 +553,8 @@ impl Dashboard {
             && let Some(state) = self.get_mut_pane(main_window, window, selected_pane)
         {
             let previous_ticker = state.stream_pair();
-            if previous_ticker.is_some() && previous_ticker != Some(ticker_info) {
+            let ticker_changed = previous_ticker.is_some() && previous_ticker != Some(ticker_info);
+            if ticker_changed {
                 state.link_group = None;
             }
 
@@ -1004,7 +1004,8 @@ impl Dashboard {
         kline_targets
     }
 
-    /// StepBackward 用: kline 収集をせずチャートデータのみクリアする。
+    /// replay_mode=true でチャートを再構築する。
+    /// Live→Replay 切り替えおよび StepBackward の両方で使用する。
     pub fn clear_chart_for_replay(&mut self, main_window: window::Id) {
         for (_, _, state) in self.iter_all_panes_mut(main_window) {
             state.rebuild_content_for_replay();

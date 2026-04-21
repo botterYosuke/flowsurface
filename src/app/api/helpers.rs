@@ -107,24 +107,7 @@ impl Flowsurface {
     }
 
     pub(crate) fn parse_timeframe(s: &str) -> Option<exchange::Timeframe> {
-        match s {
-            "MS100" => Some(exchange::Timeframe::MS100),
-            "MS200" => Some(exchange::Timeframe::MS200),
-            "MS300" => Some(exchange::Timeframe::MS300),
-            "MS500" => Some(exchange::Timeframe::MS500),
-            "MS1000" | "S1" => Some(exchange::Timeframe::MS1000),
-            "M1" => Some(exchange::Timeframe::M1),
-            "M3" => Some(exchange::Timeframe::M3),
-            "M5" => Some(exchange::Timeframe::M5),
-            "M15" => Some(exchange::Timeframe::M15),
-            "M30" => Some(exchange::Timeframe::M30),
-            "H1" => Some(exchange::Timeframe::H1),
-            "H2" => Some(exchange::Timeframe::H2),
-            "H4" => Some(exchange::Timeframe::H4),
-            "H12" => Some(exchange::Timeframe::H12),
-            "D1" => Some(exchange::Timeframe::D1),
-            _ => None,
-        }
+        crate::headless::parse_timeframe_str(s).ok()
     }
 
     pub(crate) fn parse_content_kind(s: &str) -> Option<data::layout::pane::ContentKind> {
@@ -159,5 +142,51 @@ impl Flowsurface {
                     None
                 }
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_timeframe_accepts_uppercase_form() {
+        assert_eq!(
+            Flowsurface::parse_timeframe("M1"),
+            Some(exchange::Timeframe::M1)
+        );
+        assert_eq!(
+            Flowsurface::parse_timeframe("H1"),
+            Some(exchange::Timeframe::H1)
+        );
+        assert_eq!(
+            Flowsurface::parse_timeframe("D1"),
+            Some(exchange::Timeframe::D1)
+        );
+    }
+
+    #[test]
+    fn parse_timeframe_accepts_lowercase_alias() {
+        assert_eq!(
+            Flowsurface::parse_timeframe("1m"),
+            Some(exchange::Timeframe::M1)
+        );
+        assert_eq!(
+            Flowsurface::parse_timeframe("5m"),
+            Some(exchange::Timeframe::M5)
+        );
+        assert_eq!(
+            Flowsurface::parse_timeframe("1h"),
+            Some(exchange::Timeframe::H1)
+        );
+        assert_eq!(
+            Flowsurface::parse_timeframe("1d"),
+            Some(exchange::Timeframe::D1)
+        );
+    }
+
+    #[test]
+    fn parse_timeframe_returns_none_for_unknown() {
+        assert_eq!(Flowsurface::parse_timeframe("X99"), None);
     }
 }

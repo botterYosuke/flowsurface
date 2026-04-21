@@ -866,7 +866,8 @@ fn render_order_entry<'a>(
     let base = panel.view(theme, is_replay).map(move |msg| {
         Message::PaneEvent(id, Event::PanelInteraction(panel::Message::OrderEntry(msg)))
     });
-    compose_stack_view(
+
+    let composed = compose_stack_view(
         state,
         base,
         id,
@@ -875,7 +876,32 @@ fn render_order_entry<'a>(
         || column![].into(),
         None,
         tickers_table,
-    )
+    );
+
+    if let Some(mini_panel) = &panel.modal {
+        let mini_list = mini_panel.view(tickers_table, None, None).map(move |msg| {
+            Message::PaneEvent(
+                id,
+                Event::PanelInteraction(panel::Message::OrderEntry(
+                    super::super::panel::order_entry::Message::MiniTickers(msg),
+                )),
+            )
+        });
+        let overlay: Element<_> = container(mini_list)
+            .max_width(260)
+            .padding(16)
+            .style(crate::style::chart_modal)
+            .into();
+        crate::modal::pane::stack_modal(
+            composed,
+            overlay,
+            Message::PaneEvent(id, Event::HideModal),
+            iced::padding::left(12),
+            iced::Alignment::Start,
+        )
+    } else {
+        composed
+    }
 }
 
 fn render_order_list<'a>(

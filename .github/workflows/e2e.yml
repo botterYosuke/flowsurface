@@ -220,6 +220,12 @@ jobs:
             script: x1_current_time.py
           - name: S8 Error boundary
             script: s8_error_boundary.py
+          - name: S51 Narrative CRUD
+            script: s51_narrative_crud.py
+          - name: S52 Narrative outcome link
+            script: s52_narrative_outcome_link.py
+          - name: S53 Narrative snapshot size
+            script: s53_narrative_snapshot_size.py
 
     steps:
       - uses: actions/checkout@v4

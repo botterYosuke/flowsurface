@@ -26,10 +26,4 @@ pub enum Effect {
     FetchHoldings {
         issue_code: String,
     },
-    /// チャートペインの銘柄変更時に OrderEntry ペインへ配信する
-    SyncIssueToOrderEntry {
-        issue_code: String,
-        issue_name: String,
-        tick_size: Option<f64>,
-    },
 }

@@ -1,0 +1,44 @@
+# `🔄ai_agent_platform_roadmap.md` 修正計画
+
+`docs/plan/replay_python_backend.md` の実装計画が確立したことで、AIプラットフォーム化のロードマップには**根本的なアーキテクチャの変更**を反映する必要があります。
+
+特に「Rustがコアエンジンを持ち、HTTP APIを提供する」という従来路線の前提が崩れ、「Pythonがコアエンジンを持ち、WebSocketで通信する（あるいはPython内で完結する）」という形にシフトした影響をドキュメントに反映します。
+
+## 修正のポイント（前提となる変更）
+
+1. **通信プロトコルの変更**: HTTP (REST) から WebSocket への一本化。
+2. **実行エンジンの所在の変更**: Rust から Python バックエンドへ。
+3. **データ蓄積の所在の変更**: Narrative Store（エージェントの行動履歴）も Rust 側ではなく Python 側に持つべき。
+
+## Proposed Changes
+
+### `docs/plan/🔄ai_agent_platform_roadmap.md`
+
+#### [MODIFY] 🔄ai_agent_platform_roadmap.md
+
+1. **Phase 1: 観測 (Observation) API** と **Phase 2: アクションと報酬**
+   - **変更前**: Rust側に `GET /api/replay/state` や `POST /api/replay/order` などの新規HTTPエンドポイントを作成する。
+   - **変更後**: HTTPによるエンドポイント追加は廃止。Pythonバックエンドの WebSocketプロトコル (`port 9877`) またはPython内での直接的な関数呼び出し（`kline/service.py` や `virtual_exchange/engine.py`）により状態取得と注文実行を行うアーキテクチャに修正。
+
+2. **Phase 3: Python 環境・AI フレームワークとの統合**
+   - **変更前**: Rust側の `--headless` モードと HTTP API (9876) を介して行われる。
+   - **変更後**: 完了済みの記述は残しつつ、「今後の移行（Phase 7に相当）」として、Gymnasiumラッパーを WebSocket クライアント版へ書き換え、Pythonバックエンド(9877)と直接対話する形に移行することを追記。Rustのheadlessすら経由せずにPythonプロセス単独で完結可能になり、より高速な学習サイクルが実現できる点も強調。
+
+3. **Phase 4a: Agent ナラティブ基盤（ローカル）**
+   - **変更前**: `POST /api/agent/narrative` のようなHTTP APIを定義。
+   - **変更後**: Pythonバックエンド側に Narrative Store を実装し、WebSocket経由 (`narrative.*`) またはPythonモジュールから直接ローカルSQLiteに記録する方式に変更。
+
+4. **アーキテクチャ図（Phase 4b）**
+   - Flowsurface (Rust) が担っていた「Virtual Exchange Engine」や「HTTP (port 9876)」を取り除き、Python側の「Flowsurface Backend」がWSサーバーを持ち、Narrative Storeもそこに内包される図に書き換える。
+
+5. **技術スタック整理**
+   - **変更前**: Rust側がAPI、実行エンジン、Narrative Storeを持つ。
+   - **変更後**: 
+     - **Python (Backend 本体)**: WebSocket Server (port 9877), Virtual Exchange Engine, Narrative Store (SQLite)
+     - **Rust (Flowsurface GUI)**: GUI (iced), Headless モード, WS Client
+     - **Python (AI エージェント)**: Gymnasium Env, uAgentラッパー 等
+
+## User Review Required
+
+この方針で `🔄ai_agent_platform_roadmap.md` を書き換えてもよろしいでしょうか？  
+方針に同意いただければ、ドキュメントの具体的な修正作業（replace_file_content）に入ります。

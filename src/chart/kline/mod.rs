@@ -161,6 +161,8 @@ pub struct KlineChart {
     last_tick: Instant,
     /// リプレイ中は true。fetch_missing_data による live API fetch を抑制する。
     replay_mode: bool,
+    /// Phase 4a: ナラティブマーカー。リプレイ時のエントリー/エグジット可視化用。
+    pub(crate) narrative_markers: Vec<crate::narrative::marker::NarrativeMarker>,
 }
 
 impl KlineChart {
@@ -252,6 +254,7 @@ impl KlineChart {
                     study_configurator: study::Configurator::new(),
                     last_tick: Instant::now(),
                     replay_mode: false,
+                    narrative_markers: Vec::new(),
                 }
             }
             Basis::Tick(interval) => {
@@ -309,6 +312,7 @@ impl KlineChart {
                     study_configurator: study::Configurator::new(),
                     last_tick: Instant::now(),
                     replay_mode: false,
+                    narrative_markers: Vec::new(),
                 }
             }
         }
@@ -459,6 +463,15 @@ impl KlineChart {
         self.raw_trades.clone()
     }
 
+    /// Phase 4a: ナラティブマーカーを設定する。設定後はチャート再描画が必要。
+    pub fn set_narrative_markers(
+        &mut self,
+        markers: Vec<crate::narrative::marker::NarrativeMarker>,
+    ) {
+        self.narrative_markers = markers;
+        self.chart.cache.clear_all();
+    }
+
     pub fn set_handle(&mut self, handle: Handle) {
         self.fetching_trades.1 = Some(handle);
     }
@@ -492,6 +505,32 @@ impl KlineChart {
         match &self.data_source {
             PlotData::TimeBased(ts) => ts.datapoints.keys().last().copied(),
             PlotData::TickBased(_) => None,
+        }
+    }
+
+    /// pandas DataFrame エクスポート用に OHLCV バーを返す。
+    /// `since_ts`: このタイムスタンプ（ミリ秒）以降のバーのみ返す。
+    /// `limit`: 返す最大バー数（最新 N 本）。
+    /// TickBased チャートには対応していないため空 Vec を返す。
+    pub fn bars_for_export(
+        &self,
+        since_ts: Option<u64>,
+        limit: Option<usize>,
+    ) -> Vec<(&u64, &exchange::Kline)> {
+        let PlotData::TimeBased(ts) = &self.data_source else {
+            return vec![];
+        };
+
+        let iter = ts
+            .datapoints
+            .iter()
+            .filter(move |(t, _)| since_ts.map_or(true, |s| **t >= s));
+
+        let bars: Vec<_> = iter.map(|(t, dp)| (t, &dp.kline)).collect();
+
+        match limit {
+            Some(n) if n < bars.len() => bars[bars.len() - n..].to_vec(),
+            _ => bars,
         }
     }
 

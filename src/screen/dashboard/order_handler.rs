@@ -1,6 +1,4 @@
-use iced::Task;
-
-use super::{Dashboard, Message, pane, panel};
+use super::{Dashboard, pane, panel};
 use crate::window;
 
 impl Dashboard {
@@ -144,25 +142,6 @@ impl Dashboard {
             let now = chrono::Local::now();
             now.format("%Y%m%d").to_string()
         })
-    }
-
-    pub(super) fn sync_issue_to_order_entry(
-        &mut self,
-        main_window: window::Id,
-        issue_code: String,
-        issue_name: String,
-        tick_size: Option<f64>,
-    ) -> Task<Message> {
-        for (_, _, state) in self.iter_all_panes_mut(main_window) {
-            if let pane::Content::OrderEntry(panel) = &mut state.content {
-                panel.update(panel::order_entry::Message::SyncIssue {
-                    issue_code: issue_code.clone(),
-                    issue_name: issue_name.clone(),
-                    tick_size,
-                });
-            }
-        }
-        Task::none()
     }
 }
 

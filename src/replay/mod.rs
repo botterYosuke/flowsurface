@@ -80,6 +80,10 @@ pub enum ReplayCommand {
     CycleSpeed,
     /// 状態をディスクに保存（E2E テスト用）
     SaveState,
+    /// Live / Replay モードを指定して切り替える（POST /api/app/set-mode）
+    SetMode {
+        mode: String,
+    },
 }
 
 /// iced app から API へ返すレスポンス

@@ -176,6 +176,34 @@ impl canvas::Program<Message> for KlineChart {
             }
 
             chart.draw_last_price_line(frame, palette, region);
+
+            // Phase 4a: ナラティブマーカー（エントリー/エグジット）を描画する。
+            // リプレイモード中のみ可視化する（Open Question #8）。
+            if self.replay_mode && !self.narrative_markers.is_empty() {
+                let basis = chart.basis;
+                let interval_ms = match basis {
+                    crate::chart::Basis::Time(tf) => tf.to_milliseconds() as i64,
+                    crate::chart::Basis::Tick(_) => 0, // tick-based chart は未対応
+                };
+                if interval_ms > 0 {
+                    let (earliest_interval, latest_interval) = chart.interval_range(&region);
+                    let time_to_x = |t_ms: i64| -> f32 {
+                        let interval = (t_ms as u64) / (interval_ms as u64) * (interval_ms as u64);
+                        chart.interval_to_x(interval)
+                    };
+                    let price_to_y_f64 = |p: f64| -> f32 {
+                        chart.price_to_y(exchange::unit::price::Price::from_f32(p as f32))
+                    };
+                    crate::narrative::marker::draw_markers(
+                        frame,
+                        &self.narrative_markers,
+                        (earliest_interval as i64, latest_interval as i64),
+                        time_to_x,
+                        price_to_y_f64,
+                        6.0,
+                    );
+                }
+            }
         });
 
         let crosshair = chart.cache.crosshair.draw(renderer, bounds_size, |frame| {

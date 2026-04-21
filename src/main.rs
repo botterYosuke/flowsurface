@@ -8,6 +8,7 @@ mod headless;
 mod layout;
 mod logger;
 mod modal;
+mod narrative;
 mod notify;
 mod replay;
 mod replay_api;
@@ -52,6 +53,8 @@ struct Flowsurface {
     notifications: Notifications,
     replay: ReplayController,
     virtual_engine: Option<replay::virtual_exchange::VirtualExchangeEngine>,
+    narrative_store: std::sync::Arc<narrative::store::NarrativeStore>,
+    snapshot_store: narrative::snapshot_store::SnapshotStore,
     is_headless: bool,
 }
 
@@ -115,8 +118,19 @@ enum Message {
         reply: replay_api::ReplySender,
         result: Result<u64, String>,
     },
+    NarrativeApiReply {
+        reply: replay_api::ReplySender,
+        status: u16,
+        body: String,
+    },
+    /// アクティブダッシュボード上の全 KlineChart に最新ナラティブマーカーを配信する。
+    /// POST /api/agent/narrative 成功時と FillEvent 発火時にトリガーされる。
+    SetNarrativeMarkers(Vec<narrative::marker::NarrativeMarker>),
     Replay(ReplayMessage),
     ReplayApi(replay_api::ApiMessage),
+    /// 完了は気にしないファイア・アンド・フォーゲットの async 結果用。
+    /// 例: ナラティブ outcome の非同期更新（失敗時はログで充分）。
+    Noop,
 }
 
 impl Flowsurface {
@@ -145,6 +159,17 @@ impl Flowsurface {
             Message::FetchHoldingsApiResult { reply, result } => {
                 self.handle_api_fetch_holdings(reply, result);
             }
+            Message::NarrativeApiReply {
+                reply,
+                status,
+                body,
+            } => {
+                return self.handle_narrative_api_reply(reply, status, body);
+            }
+            Message::SetNarrativeMarkers(markers) => {
+                self.handle_set_narrative_markers(markers);
+            }
+            Message::Noop => {}
             Message::MarketWsEvent(event) => return self.handle_market_ws_event(event),
             Message::Tick(now) => return self.handle_tick(now),
             Message::WindowEvent(event) => return self.handle_window_event(event),

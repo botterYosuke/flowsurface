@@ -20,6 +20,9 @@ pub(super) fn dispatch(state: &mut State, msg: Event) -> Option<Effect> {
         }
         Event::HideModal => {
             state.modal = None;
+            if let Content::OrderEntry(panel) = &mut state.content {
+                panel.modal = None;
+            }
         }
         Event::ContentSelected(kind) => {
             return handle_content_selected(state, kind);
