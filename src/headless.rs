@@ -774,6 +774,10 @@ impl HeadlessEngine {
                 // headless では常に Replay モードなので no-op
                 reply.send(self.get_status_json());
             }
+            ApiCommand::Replay(ReplayCommand::SetMode { .. }) => {
+                // headless では常に Replay モードなので no-op
+                reply.send(self.get_status_json());
+            }
             ApiCommand::Replay(ReplayCommand::CycleSpeed) => {
                 self.state.cycle_speed();
                 reply.send(self.get_status_json());

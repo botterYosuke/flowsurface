@@ -394,6 +394,7 @@ fn route(method: &str, path: &str, body: &str) -> Result<ApiCommand, RouteError>
 
         // ── App 制御 ───────────────────────────────────────────────────────
         ("POST", "/api/app/save") => Ok(ApiCommand::Replay(ReplayCommand::SaveState)),
+        ("POST", "/api/app/set-mode") => parse_set_mode_command(body),
 
         // ── 認証（本番ビルドにも含まれる）────────────────────────────────
         ("GET", "/api/auth/tachibana/status") => {
@@ -550,6 +551,18 @@ fn parse_chart_snapshot_command(path: &str) -> Result<ApiCommand, RouteError> {
     let id_str = query_param(path, "pane_id").ok_or(RouteError::BadRequest)?;
     let pane_id = uuid::Uuid::parse_str(&id_str).map_err(|_| RouteError::BadRequest)?;
     Ok(ApiCommand::Pane(PaneCommand::GetChartSnapshot { pane_id }))
+}
+
+/// `POST /api/app/set-mode` のボディをパースして ApiCommand を返す。
+/// body: `{"mode": "live" | "replay"}`
+fn parse_set_mode_command(body: &str) -> Result<ApiCommand, RouteError> {
+    let mode = body_str_field(body, "mode")?;
+    match mode.to_lowercase().as_str() {
+        "live" | "replay" => Ok(ApiCommand::Replay(ReplayCommand::SetMode {
+            mode: mode.to_lowercase(),
+        })),
+        _ => Err(RouteError::BadRequest),
+    }
 }
 
 /// `POST /api/replay/play` のボディをパースして ApiCommand を返す。
@@ -1039,6 +1052,45 @@ mod tests {
     fn route_post_app_save() {
         let cmd = route("POST", "/api/app/save", "").unwrap();
         assert!(matches!(unwrap_replay(cmd), ReplayCommand::SaveState));
+    }
+
+    #[test]
+    fn route_post_app_set_mode_replay() {
+        let cmd = route("POST", "/api/app/set-mode", r#"{"mode":"replay"}"#).unwrap();
+        assert!(matches!(
+            unwrap_replay(cmd),
+            ReplayCommand::SetMode { mode } if mode == "replay"
+        ));
+    }
+
+    #[test]
+    fn route_post_app_set_mode_live() {
+        let cmd = route("POST", "/api/app/set-mode", r#"{"mode":"live"}"#).unwrap();
+        assert!(matches!(
+            unwrap_replay(cmd),
+            ReplayCommand::SetMode { mode } if mode == "live"
+        ));
+    }
+
+    #[test]
+    fn route_post_app_set_mode_case_insensitive() {
+        let cmd = route("POST", "/api/app/set-mode", r#"{"mode":"REPLAY"}"#).unwrap();
+        assert!(matches!(
+            unwrap_replay(cmd),
+            ReplayCommand::SetMode { mode } if mode == "replay"
+        ));
+    }
+
+    #[test]
+    fn route_post_app_set_mode_invalid() {
+        let result = route("POST", "/api/app/set-mode", r#"{"mode":"unknown"}"#);
+        assert!(matches!(result, Err(RouteError::BadRequest)));
+    }
+
+    #[test]
+    fn route_post_app_set_mode_missing_field() {
+        let result = route("POST", "/api/app/set-mode", r#"{}"#);
+        assert!(matches!(result, Err(RouteError::BadRequest)));
     }
 
     // ── route tests: pane ──

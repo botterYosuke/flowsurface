@@ -125,6 +125,16 @@ impl Flowsurface {
                 self.save_state_to_disk(&empty_windows);
                 reply_tx.send(reply_replay_status(self));
             }
+            replay::ReplayCommand::SetMode { mode } => {
+                let target_is_replay = mode == "replay";
+                let task = if self.replay.is_replay() != target_is_replay {
+                    self.handle_replay(ReplayMessage::User(ReplayUserMessage::ToggleMode))
+                } else {
+                    Task::none()
+                };
+                reply_tx.send(reply_replay_status(self));
+                return task;
+            }
         }
         Task::none()
     }
