@@ -18,12 +18,14 @@ def _():
     import httpx
     import json
     mo.md("# flowsurface Replay API 疎通確認")
-    return (mo, httpx, json)
+    return httpx, json, mo
 
 
 @app.cell
 def _(mo):
-    mo.md("## 接続設定")
+    mo.md("""
+    ## 接続設定
+    """)
     return
 
 
@@ -36,29 +38,32 @@ def _(mo):
 
 @app.cell
 def _(mo):
-    check_button = mo.ui.button(value=0, label="✓ 接続確認", on_click=lambda v: v + 1)
-    check_button
+    get_conn, set_conn = mo.state({"connected": False, "label": "接続確認前"}, allow_self_loops=True)
+    return get_conn, set_conn
+
+
+@app.cell
+def _(api_url, get_conn, httpx, mo, set_conn):
+    def _on_click(v):
+        try:
+            _resp = httpx.get(f"{api_url.value}/api/replay/status", timeout=2.0)
+            _ok = _resp.status_code == 200
+            set_conn({
+                "connected": _ok,
+                "label": f"✅ 接続成功（status={_resp.status_code}）" if _ok else f"❌ 接続失敗: status={_resp.status_code}",
+            })
+        except Exception as _e:
+            set_conn({"connected": False, "label": f"❌ 接続失敗: {_e}"})
+        return v + 1
+
+    check_button = mo.ui.button(value=0, label="✓ 接続確認", on_click=_on_click)
+    mo.vstack([check_button, mo.md(f"_状態: {get_conn()['label']}_")])
     return (check_button,)
 
 
 @app.cell
-def _(mo, httpx, api_url, check_button):
-    is_connected = False
-    if check_button.value:
-        try:
-            _resp = httpx.get(f"{api_url.value}/api/replay/status", timeout=2.0)
-            is_connected = _resp.status_code == 200
-            _label = f"✅ 接続成功（status={_resp.status_code}）"
-        except Exception as _e:
-            _label = f"❌ 接続失敗: {_e}"
-    else:
-        _label = "接続確認前"
-    mo.md(f"_状態: {_label}_")
-    return (is_connected,)
-
-
-@app.cell
-def _(mo, is_connected):
+def _(get_conn, mo):
+    is_connected = get_conn()["connected"]
     endpoints_list = [
         ("GET /api/replay/status", "リプレイ状態取得"),
         ("POST /api/replay/toggle", "リプレイ開始/停止"),
@@ -87,7 +92,7 @@ def _(mo, is_connected):
         endpoint_dropdown,
     ]) if is_connected else mo.md("")
     _content
-    return (endpoint_dropdown, endpoint_labels)
+    return endpoint_dropdown, endpoint_labels
 
 
 @app.cell
@@ -99,11 +104,11 @@ def _(endpoint_dropdown, endpoint_labels):
         _path, _desc = endpoint_labels[endpoint_dropdown.value]
         method = "GET" if _path.startswith("GET") else "POST"
         path_only = _path.split(" ", 1)[1]
-    return (path_only, method)
+    return method, path_only
 
 
 @app.cell
-def _(mo, path_only, method):
+def _(method, mo, path_only):
     params_form = None
     if path_only is not None and method == "POST":
         if "replay/order" in path_only:
@@ -135,7 +140,16 @@ def _(mo):
 
 
 @app.cell
-def _(mo, path_only, method, params_form, api_url, httpx, json, request_button):
+def _(
+    api_url,
+    httpx,
+    json,
+    method,
+    mo,
+    params_form,
+    path_only,
+    request_button,
+):
     if path_only is None or not request_button.value:
         _result = mo.md("")
     else:

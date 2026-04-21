@@ -79,6 +79,64 @@ def _(get_count, set_count, mo):
     return increment_btn,
 ```
 
+### 3-1. self-loop と allow_self_loops
+
+`mo.state` のデフォルト動作：**setter を呼び出したセル自身は再実行されない**（`allow_self_loops=False`）。
+
+- **RULE**: `on_click` / `on_change` コールバック内で `set_xxx()` を呼び出し、かつ同じセルで `get_xxx()` を表示している場合、そのセルは再実行されないため画面が更新されない。
+- **解決策**: `mo.state(..., allow_self_loops=True)` を指定する。
+
+```python
+# FAIL: デフォルトでは setter を呼んだセルは再実行されない → 状態表示が更新されない
+@app.cell
+def _(mo):
+    get_s, set_s = mo.state("初期値")    # allow_self_loops=False (デフォルト)
+    return get_s, set_s
+
+@app.cell
+def _(get_s, mo, set_s):
+    btn = mo.ui.button(value=0, label="更新", on_click=lambda v: set_s("更新済") or v + 1)
+    mo.vstack([btn, mo.md(get_s())])     # ← クリックしても "初期値" のまま変わらない
+    return (btn,)
+
+# PASS: allow_self_loops=True で setter 呼び出しセルも再実行される
+@app.cell
+def _(mo):
+    get_s, set_s = mo.state("初期値", allow_self_loops=True)
+    return get_s, set_s
+
+@app.cell
+def _(get_s, mo, set_s):
+    btn = mo.ui.button(value=0, label="更新", on_click=lambda v: set_s("更新済") or v + 1)
+    mo.vstack([btn, mo.md(get_s())])     # ← クリックで "更新済" に変わる
+    return (btn,)
+```
+
+### 3-2. mo.state の初期化セル分離（必須）
+
+- **RULE**: `mo.state()` の初期化は**必ず独立したセルに分離**する。
+- **理由**: getter を呼び出すセルと同じセルに `mo.state()` を置くと、状態変化でそのセルが再実行されるたびに初期値にリセットされる。
+
+```python
+# FAIL: state 初期化と getter 呼び出しが同じセル → 再実行で初期値にリセット
+@app.cell
+def _(mo):
+    get_s, set_s = mo.state("初期値")
+    mo.md(get_s())    # ← セル再実行のたびに mo.state("初期値") が呼ばれリセット
+    return get_s, set_s
+
+# PASS: 初期化セルと使用セルを分離
+@app.cell
+def _(mo):
+    get_s, set_s = mo.state("初期値")    # ← 初期化のみ。このセルは再実行されない
+    return get_s, set_s
+
+@app.cell
+def _(get_s, mo):
+    mo.md(get_s())    # ← 状態変化で再実行されるが、初期化セルは再実行されない
+    return
+```
+
 ---
 
 ## 4. ユーザーインターフェース (UI Elements)
