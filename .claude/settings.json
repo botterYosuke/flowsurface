@@ -126,7 +126,11 @@
       "WebSearch",
       "Bash(python -c \"import json; nb = json.load\\(open\\(r'c:/Users/sasai/Documents/flowsurface/tests/python/api_jupyter.ipynb', encoding='utf-8'\\)\\); [print\\(f'--- cell[{i}] id={c.get\\(\\\\\"id\\\\\",\\\\\"?\\\\\"\\)} type={c[\\\\\"cell_type\\\\\"]} exec_count={c.get\\(\\\\\"execution_count\\\\\"\\)} outputs={len\\(c.get\\(\\\\\"outputs\\\\\", []\\)\\)}'\\) for i, c in enumerate\\(nb['cells']\\)]\")",
       "Bash(python -c ' *)",
-      "Edit(/.claude/skills/jupyter/**)"
+      "Edit(/.claude/skills/jupyter/**)",
+      "Bash(bash tests/e2e/e2e_replay_api.sh)",
+      "Bash(.venv/Scripts/python.exe -c \"import flowsurface as fs; print\\(dir\\(fs\\)\\); print\\(fs.replay\\)\")",
+      "Bash(.venv/Scripts/python.exe -c ' *)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/python/ -v --no-header)"
     ],
     "additionalDirectories": [
       "C:\\Users\\sasai\\Documents\\marimo\\.claude\\plans",
