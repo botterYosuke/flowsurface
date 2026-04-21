@@ -508,9 +508,10 @@ impl KlineChart {
             return vec![];
         };
 
-        let iter = ts.datapoints.iter().filter(move |(t, _)| {
-            since_ts.map_or(true, |s| **t >= s)
-        });
+        let iter = ts
+            .datapoints
+            .iter()
+            .filter(move |(t, _)| since_ts.map_or(true, |s| **t >= s));
 
         let bars: Vec<_> = iter.map(|(t, dp)| (t, &dp.kline)).collect();
 

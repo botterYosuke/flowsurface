@@ -554,10 +554,8 @@ fn query_param(path: &str, key: &str) -> Option<String> {
 fn parse_chart_snapshot_command(path: &str) -> Result<ApiCommand, RouteError> {
     let id_str = query_param(path, "pane_id").ok_or(RouteError::BadRequest)?;
     let pane_id = uuid::Uuid::parse_str(&id_str).map_err(|_| RouteError::BadRequest)?;
-    let limit = query_param(path, "limit")
-        .and_then(|s| s.parse::<usize>().ok());
-    let since_ts = query_param(path, "since_ts")
-        .and_then(|s| s.parse::<u64>().ok());
+    let limit = query_param(path, "limit").and_then(|s| s.parse::<usize>().ok());
+    let since_ts = query_param(path, "since_ts").and_then(|s| s.parse::<u64>().ok());
     Ok(ApiCommand::Pane(PaneCommand::GetChartSnapshot {
         pane_id,
         limit,
@@ -1283,8 +1281,7 @@ mod tests {
 
     #[test]
     fn route_get_chart_snapshot_with_limit_and_since_ts() {
-        let path =
-            "/api/pane/chart-snapshot?pane_id=00000000-0000-0000-0000-000000000010&limit=100&since_ts=1700000000000";
+        let path = "/api/pane/chart-snapshot?pane_id=00000000-0000-0000-0000-000000000010&limit=100&since_ts=1700000000000";
         let cmd = route("GET", path, "").unwrap();
         match unwrap_pane(cmd) {
             PaneCommand::GetChartSnapshot {
