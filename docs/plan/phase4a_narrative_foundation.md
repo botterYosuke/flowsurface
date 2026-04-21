@@ -254,15 +254,22 @@ Phase 2 の `VirtualExchange::on_tick()` が返す `FillEvent`（`src/replay/vir
 
 ### サブフェーズ B: HTTP API（§3.3 エンドポイント表に対応）
 
-- [ ] **B-1**: `POST /api/agent/narrative` — リクエストパース + `idempotency_key` 冪等処理 + store.insert 結線
-  - テスト: `replay_api::tests::accepts_narrative_post()` / `replay_api::tests::idempotent_replay_returns_same_id()`
-- [ ] **B-2**: `GET /api/agent/narratives`（agent_id / ticker / since_ms / limit フィルタ、スナップショット本体は含めない）
-- [ ] **B-3**: `GET /api/agent/narrative/:id`（メタのみ）・404 ハンドリング
-- [ ] **B-4**: `GET /api/agent/narrative/:id/snapshot`（スナップショットを gzip 解凍済み JSON で返す、sha256 不一致は 410）
-- [ ] **B-5**: `PATCH /api/agent/narrative/:id` — `public` の true/false 両方をサポート（取消対応）
-- [ ] **B-6**: `GET /api/agent/narratives/storage`（総件数・総バイトサイズ・256KB 超警告件数）
-- [ ] **B-7**: `GET /api/agent/narratives/orphans`（孤児スナップショット一覧）
-- [ ] **B-8**: バリデーション（不正 JSON、confidence 範囲外、空 agent_id、スナップショットサイズ超過→413）
+- [x] ✅ **B-1**: `POST /api/agent/narrative` — リクエストパース + `idempotency_key` 冪等処理 + store.insert 結線
+  - テスト: `replay_api::tests::route_post_narrative_create` / `narrative::service::tests::idempotent_create_returns_same_id`
+- [x] ✅ **B-2**: `GET /api/agent/narratives`（agent_id / ticker / since_ms / limit フィルタ、スナップショット本体は含めない）
+  - テスト: `replay_api::tests::route_get_narratives_list_{without_filters,with_filters}` / `narrative::service::tests::list_filters_by_agent`
+- [x] ✅ **B-3**: `GET /api/agent/narrative/:id`（メタのみ）・404 ハンドリング
+  - テスト: `replay_api::tests::route_get_narrative_by_id` / `narrative::service::tests::create_then_get_then_patch_then_snapshot_roundtrip`
+- [x] ✅ **B-4**: `GET /api/agent/narrative/:id/snapshot`（スナップショットを gzip 解凍済み JSON で返す、sha256 不一致は 410）
+  - テスト: `replay_api::tests::route_get_narrative_snapshot` / `narrative::service::tests::get_snapshot_returns_410_on_integrity_mismatch`
+- [x] ✅ **B-5**: `PATCH /api/agent/narrative/:id` — `public` の true/false 両方をサポート（取消対応）
+  - テスト: `replay_api::tests::route_patch_narrative_public_{true,false_allowed}` / `narrative::service::tests::patch_returns_404_for_unknown_id`
+- [x] ✅ **B-6**: `GET /api/agent/narratives/storage`（総件数・総バイトサイズ・256KB 超警告件数）
+  - テスト: `replay_api::tests::route_get_narratives_storage`
+- [x] ✅ **B-7**: `GET /api/agent/narratives/orphans`（孤児スナップショット一覧）
+  - テスト: `replay_api::tests::route_get_narratives_orphans`
+- [x] ✅ **B-8**: バリデーション（不正 JSON、confidence 範囲外、空 agent_id、スナップショットサイズ超過→413）
+  - テスト: `route_post_narrative_create_rejects_{empty_agent_id,out_of_range_confidence,bad_side,oversized_snapshot}`
 
 ### サブフェーズ C: FillEvent 連携
 
@@ -354,7 +361,7 @@ Cargo.toml                           # rusqlite（bundled）・flate2・sha2 追
 作業着手時にこのセクションを更新。完了項目に ✅ を付与。
 
 - [x] ✅ サブフェーズ A（Narrative Store）
-- [ ] サブフェーズ B（HTTP API）
+- [x] ✅ サブフェーズ B（HTTP API）
 - [ ] サブフェーズ C（FillEvent 連携）
 - [ ] サブフェーズ D（チャート可視化）
 - [ ] サブフェーズ E（Python SDK 拡張）
@@ -404,3 +411,27 @@ Cargo.toml                           # rusqlite（bundled）・flate2・sha2 追
 - `cargo clippy --lib` は pre-existing な 11 個の clippy エラー（`OpenInterestIndicator` 等）が出るが、これらは 4a のスコープ外。`cargo clippy --lib 2>&1 | grep narrative` で narrative モジュールだけに絞れる。
 - `tokio::sync::Mutex::blocking_lock()` は `spawn_blocking` の中でだけ使うこと。async コンテキストから直接呼ぶと panic する。
 - SQLite の部分インデックス構文 `WHERE idempotency_key IS NOT NULL` は `rusqlite::bundled` 0.32（SQLite 3.46+）で動作確認済み。
+
+### 2026-04-21: サブフェーズ B（HTTP API）完了
+
+**状況**: B-1 〜 B-8 すべて完了。合計 41 個の narrative 関連テストが通過（Phase A の 21 個 + ルートテスト 15 個 + service 層 5 個）。
+
+**新たな知見**:
+
+1. **`ApiCommand::Narrative` を GUI・headless の両方で処理する必要がある** — 計画書は実装先として `src/replay_api.rs` のみ言及していたが、headless.rs の `handle_command` match が非網羅になるため、headless 側にも narrative ハンドラーを実装する必要があった。同じロジックの重複を避けるため、共有サービスレイヤー `src/narrative/service.rs` を新設し、GUI (`src/app/api/narrative.rs`) と headless (`src/headless.rs::handle_narrative_command`) の両方から呼び出す構成にした。
+2. **`HeadlessEngine::handle_command` を async 化する必要があった** — narrative のサービス関数は `async` で、tokio の `spawn_blocking` を内部で使う。headless の select ループで処理させるため `handle_command` に `async` を付与し、呼び出し側を `.await` に変更。
+3. **413 Payload Too Large の検出を 2 段階で行う** — ルート層（`parse_narrative_create`）で early size check（未圧縮バイト数のみ）、write 時に gzip 後サイズ再検証。ルート層で弾けば不要なシリアライズを避けられる。
+4. **iced の `Task::perform` 経由で spawn_blocking を呼んでも問題ない** — iced の tokio runtime は multi-thread 版（default-features に含まれる `"tokio"` feature 経由）なので、`tokio::task::spawn_blocking` が機能する。この点は計画書で懸念されていなかったが、実際に動作確認で問題なしを確認。
+5. **`Message::NarrativeApiReply` は iced Message の Clone 制約を満たすが、`ReplySender` 自体が `Arc<Mutex<Option<oneshot::Sender>>>` でラップされているので同一 reply に対して callback が複数発火しても 2 回目以降は no-op になる** — これは既存の `BuyingPowerApiResult` 等の設計と同じ。
+
+**設計思想と背景**:
+
+- **`NarrativeCommand` は `ApiCommand` のサブ enum にした** — 他の API 系（`VirtualExchangeCommand` / `PaneCommand`）と揃えて一貫性を保つ。`ApiCommand::Narrative(Box<NarrativeCommand>)` としなかった理由: Create バリアントの中身（`NarrativeCreateRequest`）だけが大きいので、`NarrativeCommand::Create(Box<NarrativeCreateRequest>)` で内側だけ Box 化した。
+- **エラー変換は service 層で完結** — `NarrativeStoreError::NotFound` → 404、`SnapshotStoreError::IntegrityMismatch` → 410、`PayloadTooLarge*` → 413。ルート層はバリデーションだけ、それ以外は service が`(u16, String)` を返してくれる。
+- **`Flowsurface` / `HeadlessEngine` の両方で `NarrativeStore::open_default()` を使う** — ファイルパスが同じ `data_path()/narratives.db` なので、GUI モードと headless モードを交互に起動しても同じストアを共有できる（ただし同時起動は SQLite の WAL モードに依存するので Phase 4a では非推奨）。
+
+**Tips**:
+
+- `cargo test --lib -- narrative replay_api` で両モジュールを一括テストできる（`cargo test` は位置引数にパターン、`--` 以降は test harness への引数なので複数指定可）。
+- route handler の path matching は順序依存: `GET /api/agent/narratives/storage` は `GET p if p.starts_with("/api/agent/narratives")` より先に定義すること。実装では `starts_with("/api/agent/narratives?")` で明示的にクエリ境界を確認してパターン衝突を防いだ。
+- `spawn_blocking` 呼び出しは future.await すると `JoinError` が返る可能性がある（タスクがパニックした場合）。service 層で 500 エラーにマッピング済み。

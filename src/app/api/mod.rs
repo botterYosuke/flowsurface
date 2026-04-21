@@ -1,4 +1,5 @@
 pub(crate) mod helpers;
+pub(crate) mod narrative;
 pub(crate) mod pane;
 pub(crate) mod pane_ticker;
 pub(crate) mod replay;
@@ -89,6 +90,9 @@ impl Flowsurface {
             }
             ApiCommand::VirtualExchange(cmd) => {
                 return self.handle_virtual_exchange_commands(cmd, reply_tx);
+            }
+            ApiCommand::Narrative(cmd) => {
+                return self.handle_narrative_api(cmd, reply_tx);
             }
             #[cfg(debug_assertions)]
             ApiCommand::Test(cmd) => {

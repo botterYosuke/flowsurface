@@ -10,5 +10,6 @@
 //! - `marker`: チャート Canvas マーカー描画用
 
 pub mod model;
+pub mod service;
 pub mod snapshot_store;
 pub mod store;

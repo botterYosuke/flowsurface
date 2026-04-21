@@ -53,6 +53,8 @@ struct Flowsurface {
     notifications: Notifications,
     replay: ReplayController,
     virtual_engine: Option<replay::virtual_exchange::VirtualExchangeEngine>,
+    narrative_store: std::sync::Arc<narrative::store::NarrativeStore>,
+    snapshot_store: narrative::snapshot_store::SnapshotStore,
     is_headless: bool,
 }
 
@@ -116,6 +118,11 @@ enum Message {
         reply: replay_api::ReplySender,
         result: Result<u64, String>,
     },
+    NarrativeApiReply {
+        reply: replay_api::ReplySender,
+        status: u16,
+        body: String,
+    },
     Replay(ReplayMessage),
     ReplayApi(replay_api::ApiMessage),
 }
@@ -145,6 +152,13 @@ impl Flowsurface {
             }
             Message::FetchHoldingsApiResult { reply, result } => {
                 self.handle_api_fetch_holdings(reply, result);
+            }
+            Message::NarrativeApiReply {
+                reply,
+                status,
+                body,
+            } => {
+                self.handle_narrative_api_reply(reply, status, body);
             }
             Message::MarketWsEvent(event) => return self.handle_market_ws_event(event),
             Message::Tick(now) => return self.handle_tick(now),

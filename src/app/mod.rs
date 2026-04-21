@@ -62,6 +62,13 @@ impl Flowsurface {
             } else {
                 None
             },
+            narrative_store: std::sync::Arc::new(
+                crate::narrative::store::NarrativeStore::open_default()
+                    .expect("failed to open narrative store"),
+            ),
+            snapshot_store: crate::narrative::snapshot_store::SnapshotStore::new(data::data_path(
+                None,
+            )),
             is_headless: std::env::var("CI").is_ok() || std::env::args().any(|a| a == "--headless"),
         };
 

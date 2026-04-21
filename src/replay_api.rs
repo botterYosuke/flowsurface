@@ -1,3 +1,4 @@
+use crate::narrative::model::NarrativeAction;
 use crate::replay::ReplayCommand;
 use futures::SinkExt;
 use futures::channel::mpsc;
@@ -15,6 +16,8 @@ pub enum ApiCommand {
     Auth(AuthCommand),
     /// 仮想約定エンジンコマンド（Phase 2 互換）。
     VirtualExchange(VirtualExchangeCommand),
+    /// ナラティブ API コマンド（Phase 4a）。
+    Narrative(NarrativeCommand),
     /// 立花証券余力情報を取得する（GET /api/buying-power）。
     FetchBuyingPower,
     /// 立花証券新規注文を発注する（POST /api/tachibana/order）。
@@ -65,6 +68,51 @@ pub enum VirtualExchangeCommand {
     GetState,
     /// pending 注文の一覧を取得する（GET /api/replay/orders）
     GetOrders,
+}
+
+/// ナラティブ API コマンド（Phase 4a）。
+#[derive(Debug, Clone)]
+pub enum NarrativeCommand {
+    /// `POST /api/agent/narrative`: ナラティブを新規作成する。
+    Create(Box<NarrativeCreateRequest>),
+    /// `GET /api/agent/narratives?agent_id=&ticker=&since_ms=&limit=`
+    List(NarrativeListQuery),
+    /// `GET /api/agent/narrative/:id`: メタ JSON を返す。
+    Get { id: uuid::Uuid },
+    /// `GET /api/agent/narrative/:id/snapshot`: 本体 JSON を返す（gzip 解凍 + sha256 検証）。
+    GetSnapshot { id: uuid::Uuid },
+    /// `PATCH /api/agent/narrative/:id {"public": bool}`.
+    Patch { id: uuid::Uuid, public: bool },
+    /// `GET /api/agent/narratives/storage`.
+    StorageStats,
+    /// `GET /api/agent/narratives/orphans`.
+    Orphans,
+}
+
+/// `POST /api/agent/narrative` のリクエストボディ（バリデーション済み）。
+#[derive(Debug, Clone)]
+pub struct NarrativeCreateRequest {
+    pub agent_id: String,
+    pub uagent_address: Option<String>,
+    pub ticker: String,
+    pub timeframe: String,
+    pub observation_snapshot: serde_json::Value,
+    pub reasoning: String,
+    pub action: NarrativeAction,
+    pub confidence: f64,
+    pub linked_order_id: Option<String>,
+    /// クライアント指定がなければサーバー側の `StepClock::now_ms()` を使う。
+    pub timestamp_ms: Option<i64>,
+    pub idempotency_key: Option<String>,
+}
+
+/// `GET /api/agent/narratives` のクエリパラメータ。
+#[derive(Debug, Clone, Default)]
+pub struct NarrativeListQuery {
+    pub agent_id: Option<String>,
+    pub ticker: Option<String>,
+    pub since_ms: Option<i64>,
+    pub limit: Option<usize>,
 }
 
 /// 認証状態確認コマンド。
@@ -304,6 +352,10 @@ async fn run_server(mut sender: mpsc::Sender<ApiMessage>) {
                 .await;
                 continue;
             }
+            Err(RouteError::PayloadTooLarge) => {
+                let _ = write_response(&mut stream, 413, r#"{"error":"Payload Too Large"}"#).await;
+                continue;
+            }
         };
 
         // oneshot で iced app からのレスポンスを待つ
@@ -352,6 +404,7 @@ fn parse_request(raw: &str) -> Option<(String, String, String)> {
 enum RouteError {
     NotFound,
     BadRequest,
+    PayloadTooLarge,
 }
 
 /// body から文字列フィールドを取り出す
@@ -446,6 +499,23 @@ fn route(method: &str, path: &str, body: &str) -> Result<ApiCommand, RouteError>
         ("GET", "/api/replay/orders") => Ok(ApiCommand::VirtualExchange(
             VirtualExchangeCommand::GetOrders,
         )),
+
+        // ── ナラティブ API（Phase 4a）──────────────────────────────────────
+        ("POST", "/api/agent/narrative") => parse_narrative_create(body),
+        ("GET", "/api/agent/narratives/storage") => {
+            Ok(ApiCommand::Narrative(NarrativeCommand::StorageStats))
+        }
+        ("GET", "/api/agent/narratives/orphans") => {
+            Ok(ApiCommand::Narrative(NarrativeCommand::Orphans))
+        }
+        ("GET", p) if p == "/api/agent/narratives" || p.starts_with("/api/agent/narratives?") => {
+            parse_narrative_list(p)
+        }
+        ("GET", p) if p.starts_with("/api/agent/narrative/") && p.ends_with("/snapshot") => {
+            parse_narrative_get_snapshot(p)
+        }
+        ("GET", p) if p.starts_with("/api/agent/narrative/") => parse_narrative_get(p),
+        ("PATCH", p) if p.starts_with("/api/agent/narrative/") => parse_narrative_patch(p, body),
 
         // ── 立花証券余力情報 ──────────────────────────────────────────────
         ("GET", "/api/buying-power") => Ok(ApiCommand::FetchBuyingPower),
@@ -794,6 +864,145 @@ fn parse_sidebar_select_ticker(body: &str) -> Result<ApiCommand, RouteError> {
     }))
 }
 
+/// `POST /api/agent/narrative` のボディを `NarrativeCreateRequest` にパースする。
+fn parse_narrative_create(body: &str) -> Result<ApiCommand, RouteError> {
+    let parsed: serde_json::Value =
+        serde_json::from_str(body).map_err(|_| RouteError::BadRequest)?;
+
+    let agent_id = parsed
+        .get("agent_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .ok_or(RouteError::BadRequest)?;
+    if agent_id.trim().is_empty() {
+        return Err(RouteError::BadRequest);
+    }
+
+    let ticker = parsed
+        .get("ticker")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .ok_or(RouteError::BadRequest)?;
+    let timeframe = parsed
+        .get("timeframe")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .ok_or(RouteError::BadRequest)?;
+
+    let observation_snapshot = parsed
+        .get("observation_snapshot")
+        .cloned()
+        .ok_or(RouteError::BadRequest)?;
+    if !observation_snapshot.is_object() && !observation_snapshot.is_array() {
+        return Err(RouteError::BadRequest);
+    }
+    // 早期サイズチェック（圧縮前）。計画 §3.2 ハード上限 10 MB。
+    let serialized =
+        serde_json::to_vec(&observation_snapshot).map_err(|_| RouteError::BadRequest)?;
+    if serialized.len() as u64 > crate::narrative::snapshot_store::MAX_UNCOMPRESSED_BYTES {
+        return Err(RouteError::PayloadTooLarge);
+    }
+
+    let reasoning = parsed
+        .get("reasoning")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .ok_or(RouteError::BadRequest)?;
+
+    let action_value = parsed.get("action").ok_or(RouteError::BadRequest)?;
+    let action: NarrativeAction =
+        serde_json::from_value(action_value.clone()).map_err(|_| RouteError::BadRequest)?;
+
+    let confidence = parsed
+        .get("confidence")
+        .and_then(|v| v.as_f64())
+        .ok_or(RouteError::BadRequest)?;
+    if !(0.0..=1.0).contains(&confidence) {
+        return Err(RouteError::BadRequest);
+    }
+
+    let uagent_address = parsed
+        .get("uagent_address")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let linked_order_id = parsed
+        .get("linked_order_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let timestamp_ms = parsed.get("timestamp_ms").and_then(|v| v.as_i64());
+    let idempotency_key = parsed
+        .get("idempotency_key")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let req = NarrativeCreateRequest {
+        agent_id,
+        uagent_address,
+        ticker,
+        timeframe,
+        observation_snapshot,
+        reasoning,
+        action,
+        confidence,
+        linked_order_id,
+        timestamp_ms,
+        idempotency_key,
+    };
+    Ok(ApiCommand::Narrative(NarrativeCommand::Create(Box::new(
+        req,
+    ))))
+}
+
+fn parse_narrative_list(path: &str) -> Result<ApiCommand, RouteError> {
+    let agent_id = query_param(path, "agent_id");
+    let ticker = query_param(path, "ticker");
+    let since_ms = query_param(path, "since_ms").and_then(|s| s.parse::<i64>().ok());
+    let limit = query_param(path, "limit").and_then(|s| s.parse::<usize>().ok());
+    Ok(ApiCommand::Narrative(NarrativeCommand::List(
+        NarrativeListQuery {
+            agent_id,
+            ticker,
+            since_ms,
+            limit,
+        },
+    )))
+}
+
+fn parse_narrative_id_from_path(path: &str) -> Result<uuid::Uuid, RouteError> {
+    let (path_part, _) = path.split_once('?').unwrap_or((path, ""));
+    let tail = path_part
+        .strip_prefix("/api/agent/narrative/")
+        .filter(|s| !s.is_empty())
+        .ok_or(RouteError::BadRequest)?;
+    // /api/agent/narrative/{id}/snapshot などのサフィックスを落とす
+    let id_str = tail.split('/').next().ok_or(RouteError::BadRequest)?;
+    uuid::Uuid::parse_str(id_str).map_err(|_| RouteError::BadRequest)
+}
+
+fn parse_narrative_get(path: &str) -> Result<ApiCommand, RouteError> {
+    let id = parse_narrative_id_from_path(path)?;
+    Ok(ApiCommand::Narrative(NarrativeCommand::Get { id }))
+}
+
+fn parse_narrative_get_snapshot(path: &str) -> Result<ApiCommand, RouteError> {
+    let id = parse_narrative_id_from_path(path)?;
+    Ok(ApiCommand::Narrative(NarrativeCommand::GetSnapshot { id }))
+}
+
+fn parse_narrative_patch(path: &str, body: &str) -> Result<ApiCommand, RouteError> {
+    let id = parse_narrative_id_from_path(path)?;
+    let parsed: serde_json::Value =
+        serde_json::from_str(body).map_err(|_| RouteError::BadRequest)?;
+    let public = parsed
+        .get("public")
+        .and_then(|v| v.as_bool())
+        .ok_or(RouteError::BadRequest)?;
+    Ok(ApiCommand::Narrative(NarrativeCommand::Patch {
+        id,
+        public,
+    }))
+}
+
 /// body から省略可能な文字列フィールドを取り出す。
 /// フィールドが存在しない場合、または値が JSON `null` の場合は `None` を返す。
 /// （必須フィールド用の `body_str_field` は null を 400 として拒否する。）
@@ -814,8 +1023,11 @@ async fn write_response(
 ) -> std::io::Result<()> {
     let status_text = match status_code {
         200 => "OK",
+        201 => "Created",
         400 => "Bad Request",
         404 => "Not Found",
+        410 => "Gone",
+        413 => "Payload Too Large",
         500 => "Internal Server Error",
         501 => "Not Implemented",
         _ => "Unknown",
@@ -1094,6 +1306,214 @@ mod tests {
     #[test]
     fn route_post_app_set_mode_invalid() {
         let result = route("POST", "/api/app/set-mode", r#"{"mode":"unknown"}"#);
+        assert!(matches!(result, Err(RouteError::BadRequest)));
+    }
+
+    // ── route tests: narrative（Phase 4a）──
+
+    fn unwrap_narrative(cmd: ApiCommand) -> NarrativeCommand {
+        match cmd {
+            ApiCommand::Narrative(c) => c,
+            _ => panic!("Expected ApiCommand::Narrative, got {cmd:?}"),
+        }
+    }
+
+    fn sample_narrative_body() -> String {
+        serde_json::json!({
+            "agent_id": "agent_alpha",
+            "ticker": "BTCUSDT",
+            "timeframe": "1h",
+            "observation_snapshot": { "ohlcv": [[1, 2, 3, 4, 5]], "rsi": 28.3 },
+            "reasoning": "divergence",
+            "action": { "side": "buy", "qty": 0.1, "price": 92500.0 },
+            "confidence": 0.76,
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn route_post_narrative_create() {
+        let cmd = route("POST", "/api/agent/narrative", &sample_narrative_body()).unwrap();
+        match unwrap_narrative(cmd) {
+            NarrativeCommand::Create(req) => {
+                assert_eq!(req.agent_id, "agent_alpha");
+                assert_eq!(req.ticker, "BTCUSDT");
+                assert_eq!(req.timeframe, "1h");
+                assert!((req.confidence - 0.76).abs() < 1e-9);
+                assert_eq!(req.action.qty, 0.1);
+            }
+            _ => panic!("expected Create"),
+        }
+    }
+
+    #[test]
+    fn route_post_narrative_create_rejects_empty_agent_id() {
+        let body = serde_json::json!({
+            "agent_id": "",
+            "ticker": "BTCUSDT",
+            "timeframe": "1h",
+            "observation_snapshot": {},
+            "reasoning": "x",
+            "action": { "side": "buy", "qty": 1.0, "price": 1.0 },
+            "confidence": 0.5,
+        })
+        .to_string();
+        let result = route("POST", "/api/agent/narrative", &body);
+        assert!(matches!(result, Err(RouteError::BadRequest)));
+    }
+
+    #[test]
+    fn route_post_narrative_create_rejects_out_of_range_confidence() {
+        let body = serde_json::json!({
+            "agent_id": "a",
+            "ticker": "BTCUSDT",
+            "timeframe": "1h",
+            "observation_snapshot": {},
+            "reasoning": "x",
+            "action": { "side": "buy", "qty": 1.0, "price": 1.0 },
+            "confidence": 1.5,
+        })
+        .to_string();
+        let result = route("POST", "/api/agent/narrative", &body);
+        assert!(matches!(result, Err(RouteError::BadRequest)));
+    }
+
+    #[test]
+    fn route_post_narrative_create_rejects_bad_side() {
+        let body = serde_json::json!({
+            "agent_id": "a",
+            "ticker": "BTCUSDT",
+            "timeframe": "1h",
+            "observation_snapshot": {},
+            "reasoning": "x",
+            "action": { "side": "hold", "qty": 1.0, "price": 1.0 },
+            "confidence": 0.5,
+        })
+        .to_string();
+        let result = route("POST", "/api/agent/narrative", &body);
+        assert!(matches!(result, Err(RouteError::BadRequest)));
+    }
+
+    #[test]
+    fn route_post_narrative_create_rejects_oversized_snapshot() {
+        // 11MB of JSON string content → exceeds MAX_UNCOMPRESSED_BYTES (10MB)
+        let big = "x".repeat(11 * 1024 * 1024);
+        let body = serde_json::json!({
+            "agent_id": "a",
+            "ticker": "BTCUSDT",
+            "timeframe": "1h",
+            "observation_snapshot": { "blob": big },
+            "reasoning": "x",
+            "action": { "side": "buy", "qty": 1.0, "price": 1.0 },
+            "confidence": 0.5,
+        })
+        .to_string();
+        let result = route("POST", "/api/agent/narrative", &body);
+        assert!(matches!(result, Err(RouteError::PayloadTooLarge)));
+    }
+
+    #[test]
+    fn route_get_narratives_list_without_filters() {
+        let cmd = route("GET", "/api/agent/narratives", "").unwrap();
+        match unwrap_narrative(cmd) {
+            NarrativeCommand::List(q) => {
+                assert!(q.agent_id.is_none());
+                assert!(q.ticker.is_none());
+                assert!(q.since_ms.is_none());
+                assert!(q.limit.is_none());
+            }
+            _ => panic!("expected List"),
+        }
+    }
+
+    #[test]
+    fn route_get_narratives_list_with_filters() {
+        let path = "/api/agent/narratives?agent_id=alpha&ticker=BTCUSDT&since_ms=1000&limit=50";
+        let cmd = route("GET", path, "").unwrap();
+        match unwrap_narrative(cmd) {
+            NarrativeCommand::List(q) => {
+                assert_eq!(q.agent_id.as_deref(), Some("alpha"));
+                assert_eq!(q.ticker.as_deref(), Some("BTCUSDT"));
+                assert_eq!(q.since_ms, Some(1000));
+                assert_eq!(q.limit, Some(50));
+            }
+            _ => panic!("expected List"),
+        }
+    }
+
+    #[test]
+    fn route_get_narrative_by_id() {
+        let id = uuid::Uuid::new_v4();
+        let path = format!("/api/agent/narrative/{id}");
+        let cmd = route("GET", &path, "").unwrap();
+        match unwrap_narrative(cmd) {
+            NarrativeCommand::Get { id: got } => assert_eq!(got, id),
+            _ => panic!("expected Get"),
+        }
+    }
+
+    #[test]
+    fn route_get_narrative_snapshot() {
+        let id = uuid::Uuid::new_v4();
+        let path = format!("/api/agent/narrative/{id}/snapshot");
+        let cmd = route("GET", &path, "").unwrap();
+        match unwrap_narrative(cmd) {
+            NarrativeCommand::GetSnapshot { id: got } => assert_eq!(got, id),
+            _ => panic!("expected GetSnapshot"),
+        }
+    }
+
+    #[test]
+    fn route_patch_narrative_public_true() {
+        let id = uuid::Uuid::new_v4();
+        let path = format!("/api/agent/narrative/{id}");
+        let cmd = route("PATCH", &path, r#"{"public": true}"#).unwrap();
+        match unwrap_narrative(cmd) {
+            NarrativeCommand::Patch { id: got, public } => {
+                assert_eq!(got, id);
+                assert!(public);
+            }
+            _ => panic!("expected Patch"),
+        }
+    }
+
+    #[test]
+    fn route_patch_narrative_public_false_allowed() {
+        let id = uuid::Uuid::new_v4();
+        let path = format!("/api/agent/narrative/{id}");
+        let cmd = route("PATCH", &path, r#"{"public": false}"#).unwrap();
+        match unwrap_narrative(cmd) {
+            NarrativeCommand::Patch { public, .. } => assert!(!public),
+            _ => panic!("expected Patch"),
+        }
+    }
+
+    #[test]
+    fn route_patch_narrative_rejects_missing_public() {
+        let id = uuid::Uuid::new_v4();
+        let path = format!("/api/agent/narrative/{id}");
+        let result = route("PATCH", &path, r#"{}"#);
+        assert!(matches!(result, Err(RouteError::BadRequest)));
+    }
+
+    #[test]
+    fn route_get_narratives_storage() {
+        let cmd = route("GET", "/api/agent/narratives/storage", "").unwrap();
+        assert!(matches!(
+            unwrap_narrative(cmd),
+            NarrativeCommand::StorageStats
+        ));
+    }
+
+    #[test]
+    fn route_get_narratives_orphans() {
+        let cmd = route("GET", "/api/agent/narratives/orphans", "").unwrap();
+        assert!(matches!(unwrap_narrative(cmd), NarrativeCommand::Orphans));
+    }
+
+    #[test]
+    fn route_get_narrative_invalid_uuid_is_bad_request() {
+        let result = route("GET", "/api/agent/narrative/not-a-uuid", "");
         assert!(matches!(result, Err(RouteError::BadRequest)));
     }
 
