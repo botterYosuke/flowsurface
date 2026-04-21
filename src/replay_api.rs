@@ -112,9 +112,13 @@ pub enum PaneCommand {
     },
     /// 現在の通知（Toast）一覧を取得する。§6.2 #10 backfill 失敗検証用。
     ListNotifications,
-    /// 指定ペインのチャートスナップショット（バー数・タイムスタンプ範囲）を返す。
-    /// クエリパラメータ: `?pane_id=<uuid>`
-    GetChartSnapshot { pane_id: uuid::Uuid },
+    /// 指定ペインのチャートスナップショット（バー数・タイムスタンプ範囲・OHLCV バー配列）を返す。
+    /// クエリパラメータ: `?pane_id=<uuid>[&limit=N][&since_ts=<ms>]`
+    GetChartSnapshot {
+        pane_id: uuid::Uuid,
+        limit: Option<usize>,
+        since_ts: Option<u64>,
+    },
     /// 注文ペインを開く（POST /api/sidebar/open-order-pane）
     /// kind: "OrderEntry" | "OrderList" | "BuyingPower"
     OpenOrderPane { kind: String },
@@ -546,11 +550,19 @@ fn query_param(path: &str, key: &str) -> Option<String> {
     })
 }
 
-/// `GET /api/pane/chart-snapshot?pane_id=<uuid>` をパースして ApiCommand を返す。
+/// `GET /api/pane/chart-snapshot?pane_id=<uuid>[&limit=N][&since_ts=<ms>]` をパースして ApiCommand を返す。
 fn parse_chart_snapshot_command(path: &str) -> Result<ApiCommand, RouteError> {
     let id_str = query_param(path, "pane_id").ok_or(RouteError::BadRequest)?;
     let pane_id = uuid::Uuid::parse_str(&id_str).map_err(|_| RouteError::BadRequest)?;
-    Ok(ApiCommand::Pane(PaneCommand::GetChartSnapshot { pane_id }))
+    let limit = query_param(path, "limit")
+        .and_then(|s| s.parse::<usize>().ok());
+    let since_ts = query_param(path, "since_ts")
+        .and_then(|s| s.parse::<u64>().ok());
+    Ok(ApiCommand::Pane(PaneCommand::GetChartSnapshot {
+        pane_id,
+        limit,
+        since_ts,
+    }))
 }
 
 /// `POST /api/app/set-mode` のボディをパースして ApiCommand を返す。
@@ -1231,11 +1243,17 @@ mod tests {
         let path = "/api/pane/chart-snapshot?pane_id=00000000-0000-0000-0000-000000000010";
         let cmd = route("GET", path, "").unwrap();
         match unwrap_pane(cmd) {
-            PaneCommand::GetChartSnapshot { pane_id } => {
+            PaneCommand::GetChartSnapshot {
+                pane_id,
+                limit,
+                since_ts,
+            } => {
                 assert_eq!(
                     pane_id,
                     uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000010").unwrap()
                 );
+                assert_eq!(limit, None);
+                assert_eq!(since_ts, None);
             }
             _ => panic!("Expected GetChartSnapshot command"),
         }
@@ -1261,6 +1279,28 @@ mod tests {
             "",
         );
         assert!(matches!(result, Err(RouteError::NotFound)));
+    }
+
+    #[test]
+    fn route_get_chart_snapshot_with_limit_and_since_ts() {
+        let path =
+            "/api/pane/chart-snapshot?pane_id=00000000-0000-0000-0000-000000000010&limit=100&since_ts=1700000000000";
+        let cmd = route("GET", path, "").unwrap();
+        match unwrap_pane(cmd) {
+            PaneCommand::GetChartSnapshot {
+                pane_id,
+                limit,
+                since_ts,
+            } => {
+                assert_eq!(
+                    pane_id,
+                    uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000010").unwrap()
+                );
+                assert_eq!(limit, Some(100));
+                assert_eq!(since_ts, Some(1700000000000));
+            }
+            _ => panic!("Expected GetChartSnapshot command"),
+        }
     }
 
     // ── query_param ──

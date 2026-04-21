@@ -495,6 +495,31 @@ impl KlineChart {
         }
     }
 
+    /// pandas DataFrame エクスポート用に OHLCV バーを返す。
+    /// `since_ts`: このタイムスタンプ（ミリ秒）以降のバーのみ返す。
+    /// `limit`: 返す最大バー数（最新 N 本）。
+    /// TickBased チャートには対応していないため空 Vec を返す。
+    pub fn bars_for_export(
+        &self,
+        since_ts: Option<u64>,
+        limit: Option<usize>,
+    ) -> Vec<(&u64, &exchange::Kline)> {
+        let PlotData::TimeBased(ts) = &self.data_source else {
+            return vec![];
+        };
+
+        let iter = ts.datapoints.iter().filter(move |(t, _)| {
+            since_ts.map_or(true, |s| **t >= s)
+        });
+
+        let bars: Vec<_> = iter.map(|(t, dp)| (t, &dp.kline)).collect();
+
+        match limit {
+            Some(n) if n < bars.len() => bars[bars.len() - n..].to_vec(),
+            _ => bars,
+        }
+    }
+
     pub fn update_study_configurator(&mut self, message: study::Message<FootprintStudy>) {
         let KlineChartKind::Footprint {
             ref mut studies, ..

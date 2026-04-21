@@ -31,8 +31,12 @@ impl Flowsurface {
                 let json = self.build_notification_list_json();
                 (200, json, Task::none())
             }
-            PaneCommand::GetChartSnapshot { pane_id } => {
-                let json = self.build_chart_snapshot_json(pane_id);
+            PaneCommand::GetChartSnapshot {
+                pane_id,
+                limit,
+                since_ts,
+            } => {
+                let json = self.build_chart_snapshot_json(pane_id, limit, since_ts);
                 (200, json, Task::none())
             }
             PaneCommand::OpenOrderPane { kind } => self.pane_api_open_order_pane(&kind),
@@ -200,7 +204,12 @@ impl Flowsurface {
             .unwrap_or_else(|_| r#"{"error":"failed to serialize pane list"}"#.to_string())
     }
 
-    pub(crate) fn build_chart_snapshot_json(&self, pane_id: uuid::Uuid) -> String {
+    pub(crate) fn build_chart_snapshot_json(
+        &self,
+        pane_id: uuid::Uuid,
+        limit: Option<usize>,
+        since_ts: Option<u64>,
+    ) -> String {
         use crate::screen::dashboard::pane::Content;
 
         let main_window_id = self.main_window.id;
@@ -213,13 +222,32 @@ impl Flowsurface {
 
         let kind = state.content.kind().to_string();
 
-        let (bar_count, oldest_ts, newest_ts) = match &state.content {
-            Content::Kline { chart: Some(c), .. } => (
-                Some(c.bar_count()),
-                c.oldest_timestamp(),
-                c.newest_timestamp(),
-            ),
-            _ => (None, None, None),
+        let (bar_count, oldest_ts, newest_ts, bars) = match &state.content {
+            Content::Kline { chart: Some(c), .. } => {
+                let raw = c.bars_for_export(since_ts, limit);
+                let bars: Vec<_> = raw
+                    .iter()
+                    .map(|(ts, k)| {
+                        serde_json::json!({
+                            "ts": **ts,
+                            "open": k.open.to_f32(),
+                            "high": k.high.to_f32(),
+                            "low": k.low.to_f32(),
+                            "close": k.close.to_f32(),
+                            "volume": k.volume.total().to_f32_lossy(),
+                            "buy_volume": k.volume.buy_qty().map(|q| q.to_f32_lossy()),
+                            "sell_volume": k.volume.sell_qty().map(|q| q.to_f32_lossy()),
+                        })
+                    })
+                    .collect();
+                (
+                    Some(c.bar_count()),
+                    c.oldest_timestamp(),
+                    c.newest_timestamp(),
+                    bars,
+                )
+            }
+            _ => (None, None, None, vec![]),
         };
 
         let body = serde_json::json!({
@@ -228,6 +256,7 @@ impl Flowsurface {
             "bar_count": bar_count,
             "oldest_ts": oldest_ts,
             "newest_ts": newest_ts,
+            "bars": bars,
         });
         serde_json::to_string(&body)
             .unwrap_or_else(|_| r#"{"error":"failed to serialize chart snapshot"}"#.to_string())
