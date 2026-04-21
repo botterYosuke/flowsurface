@@ -17,10 +17,8 @@ def _():
     import marimo as mo
     import httpx
     import json
-    from datetime import datetime
-
     mo.md("# flowsurface Replay API 疎通確認")
-    return (mo, httpx, json, datetime)
+    return (mo, httpx, json)
 
 
 @app.cell
@@ -32,43 +30,35 @@ def _(mo):
 @app.cell
 def _(mo):
     api_url = mo.ui.text(value="http://127.0.0.1:9876", label="API URL: ")
+    api_url
     return (api_url,)
 
 
 @app.cell
-def _(mo, httpx, api_url):
-    check_button = mo.ui.button(label="✓ 接続確認")
-
-    _status = None
-    if check_button.clicked:
-        try:
-            resp = httpx.get(f"{api_url.value}/api/replay/status", timeout=2.0)
-            _status = f"✅ 接続成功（status={resp.status_code}）"
-        except Exception as e:
-            _status = f"❌ 接続失敗: {e}"
-
-    status_text = mo.md(f"_状態: {_status}_" if _status else "接続確認前")
-
-    mo.vstack([check_button, status_text])
-    return (check_button, status_text)
+def _(mo):
+    check_button = mo.ui.button(value=0, label="✓ 接続確認", on_click=lambda v: v + 1)
+    check_button
+    return (check_button,)
 
 
 @app.cell
-def _(mo, check_button, api_url, httpx):
-    if not check_button.clicked:
-        mo.md("接続確認ボタンを押してください")
-        return (None,)
+def _(mo, httpx, api_url, check_button):
+    is_connected = False
+    if check_button.value:
+        try:
+            _resp = httpx.get(f"{api_url.value}/api/replay/status", timeout=2.0)
+            is_connected = _resp.status_code == 200
+            _label = f"✅ 接続成功（status={_resp.status_code}）"
+        except Exception as _e:
+            _label = f"❌ 接続失敗: {_e}"
+    else:
+        _label = "接続確認前"
+    mo.md(f"_状態: {_label}_")
+    return (is_connected,)
 
-    try:
-        resp = httpx.get(f"{api_url.value}/api/replay/status", timeout=2.0)
-        is_connected = resp.status_code == 200
-    except:
-        is_connected = False
 
-    if not is_connected:
-        mo.md("❌ API に接続できません")
-        return (None,)
-
+@app.cell
+def _(mo, is_connected):
     endpoints_list = [
         ("GET /api/replay/status", "リプレイ状態取得"),
         ("POST /api/replay/toggle", "リプレイ開始/停止"),
@@ -86,141 +76,88 @@ def _(mo, check_button, api_url, httpx):
         ("GET /api/tachibana/orders", "注文一覧（立花）"),
         ("GET /api/tachibana/holdings", "保有株数"),
     ]
-
     endpoint_dropdown = mo.ui.dropdown(
         options=[f"{path} — {desc}" for path, desc in endpoints_list],
-        label="エンドポイント選択:"
+        label="エンドポイント選択:",
     )
-
     endpoint_labels = {f"{path} — {desc}": (path, desc) for path, desc in endpoints_list}
 
-    mo.vstack([
+    _content = mo.vstack([
         mo.md("## エンドポイント選択"),
         endpoint_dropdown,
-    ])
+    ]) if is_connected else mo.md("")
+    _content
     return (endpoint_dropdown, endpoint_labels)
 
 
 @app.cell
-def _(mo, endpoint_dropdown, endpoint_labels):
+def _(endpoint_dropdown, endpoint_labels):
     if endpoint_dropdown.value is None:
-        return (None, None, None)
-
-    path, desc = endpoint_labels[endpoint_dropdown.value]
-    method = "GET" if path.startswith("GET") else "POST"
-    path_only = path.split(" ", 1)[1]
-
-    mo.md(f"### 選択: {path}")
-    return (path_only, method, desc)
+        path_only = None
+        method = None
+    else:
+        _path, _desc = endpoint_labels[endpoint_dropdown.value]
+        method = "GET" if _path.startswith("GET") else "POST"
+        path_only = _path.split(" ", 1)[1]
+    return (path_only, method)
 
 
 @app.cell
 def _(mo, path_only, method):
-    if path_only is None:
-        return (None,)
-
-    # POST エンドポイントの場合のみパラメータフォーム
-    if method == "POST":
-        if "replay/play" in path_only:
-            form_start = mo.ui.text(label="start: ", value="2026-04-21 09:00")
-            form_end = mo.ui.text(label="end: ", value="2026-04-21 15:00")
-            params_form = mo.ui.form(mo.vstack([form_start, form_end]))
-
-        elif "replay/order" in path_only:
-            form_ticker = mo.ui.text(label="ticker: ", value="BinanceLinear:BTCUSDT")
-            form_side = mo.ui.dropdown(options=["buy", "sell"], label="side: ")
-            form_qty = mo.ui.number(label="qty: ", value=0.01)
-            params_form = mo.ui.form(mo.vstack([form_ticker, form_side, form_qty]))
-
+    params_form = None
+    if path_only is not None and method == "POST":
+        if "replay/order" in path_only:
+            params_form = mo.ui.dictionary({
+                "ticker": mo.ui.text(label="ticker", value="BinanceLinear:BTCUSDT"),
+                "side": mo.ui.dropdown(options=["buy", "sell"], label="side", value="buy"),
+                "qty": mo.ui.number(label="qty", start=0.001, stop=1000.0, step=0.001, value=0.01),
+            })
         elif "pane/set-ticker" in path_only:
-            form_pane_id = mo.ui.text(label="pane_id: ", value="00000000-0000-0000-0000-000000000001")
-            form_ticker = mo.ui.text(label="ticker: ", value="BinanceLinear:BTCUSDT")
-            params_form = mo.ui.form(mo.vstack([form_pane_id, form_ticker]))
+            params_form = mo.ui.dictionary({
+                "pane_id": mo.ui.text(label="pane_id", value="00000000-0000-0000-0000-000000000001"),
+                "ticker": mo.ui.text(label="ticker", value="BinanceLinear:BTCUSDT"),
+            })
+        elif "replay/speed" in path_only:
+            params_form = mo.ui.dictionary({
+                "speed": mo.ui.number(label="speed", start=0.1, stop=100.0, step=0.5, value=1.0),
+            })
 
-        else:
-            params_form = None
-
-        if params_form:
-            mo.md("### パラメータ")
-            return (params_form,)
-    else:
-        return (None,)
+    _content = mo.vstack([mo.md("### パラメータ"), params_form]) if params_form else mo.md("")
+    _content
+    return (params_form,)
 
 
 @app.cell
-def _(mo, path_only, method, params_form, api_url, httpx, json):
-    if path_only is None:
-        return
+def _(mo):
+    request_button = mo.ui.button(value=0, label="📤 リクエスト送信", on_click=lambda v: v + 1)
+    request_button
+    return (request_button,)
 
-    request_button = mo.ui.button(label="📤 リクエスト送信")
 
-    _response = None
-    if request_button.clicked:
-        try:
-            url = f"{api_url.value}{path_only}"
-
-            if method == "GET":
-                resp = httpx.get(url, timeout=5.0)
-            else:  # POST
-                body = {}
-                if params_form:
-                    form_val = params_form.value
-                    if isinstance(form_val, tuple) and len(form_val) == 2:
-                        body = {
-                            "start": form_val[0].value,
-                            "end": form_val[1].value,
-                        }
-                    elif isinstance(form_val, tuple) and len(form_val) == 3:
-                        body = {
-                            "ticker": form_val[0].value,
-                            "side": form_val[1].value,
-                            "qty": form_val[2].value,
-                        }
-                    elif isinstance(form_val, tuple) and len(form_val) == 2:
-                        body = {
-                            "pane_id": form_val[0].value,
-                            "ticker": form_val[1].value,
-                        }
-
-                resp = httpx.post(url, json=body, timeout=5.0)
-
-            _response = {
-                "status": resp.status_code,
-                "body": resp.text,
-            }
-            try:
-                _response["json"] = resp.json()
-            except:
-                pass
-        except Exception as e:
-            _response = {"error": str(e)}
-
-    if _response:
-        if "error" in _response:
-            result = mo.md(f"❌ エラー: {_response['error']}")
-        else:
-            status = _response["status"]
-            status_icon = "✅" if 200 <= status < 300 else "⚠️"
-            resp_text = json.dumps(
-                _response.get("json") or _response["body"],
-                indent=2,
-                ensure_ascii=False
-            )
-            result = mo.md(
-                f"""
-### レスポンス {status_icon}
-
-**Status**: {status}
-
-```json
-{resp_text}
-```
-                """
-            )
+@app.cell
+def _(mo, path_only, method, params_form, api_url, httpx, json, request_button):
+    if path_only is None or not request_button.value:
+        _result = mo.md("")
     else:
-        result = None
+        try:
+            _url = f"{api_url.value}{path_only}"
+            if method == "GET":
+                _resp = httpx.get(_url, timeout=5.0)
+            else:
+                _body = dict(params_form.value) if params_form else {}
+                _resp = httpx.post(_url, json=_body, timeout=5.0)
 
-    mo.vstack([request_button, result] if result else [request_button])
+            _code = _resp.status_code
+            _icon = "✅" if 200 <= _code < 300 else "⚠️"
+            try:
+                _text = json.dumps(_resp.json(), indent=2, ensure_ascii=False)
+            except Exception:
+                _text = _resp.text
+            _result = mo.md(f"### レスポンス {_icon}\n\n**Status**: {_code}\n\n```json\n{_text}\n```")
+        except Exception as _e:
+            _result = mo.md(f"❌ エラー: {_e}")
+
+    _result
     return
 
 

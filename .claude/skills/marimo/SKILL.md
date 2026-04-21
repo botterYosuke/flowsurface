@@ -85,36 +85,208 @@ def _(get_count, set_count, mo):
 
 marimo の `mo.ui.*` はリアクティブなコンポーネントです。ユーザーがUIを操作すると、そのコンポーネントの `value` (またはコンポーネント自体) に依存しているセルが自動的に再実行されます。
 
-- **RULE**: 「UIコンポーネントを定義するセル」と、「その値を使って計算を行うセル」を明確に分離する。
-  分離することで、重い計算を伴う再レンダリングループや、ダッシュボードのフリーズを防ぎます。
+### 4-1. UIコンポーネントのセル分離（必須）
+
+- **RULE**: 「UIコンポーネントを定義するセル」と、「その値を使って計算を行うセル」を**必ず**別のセルに分離する。
+- **理由**: 同一セル内で `widget.value` にアクセスすると `RuntimeError` が発生する（marimo の制約）。
+  分離することで、重い計算を伴う再レンダリングループや、ダッシュボードのフリーズも防ぎます。
 
 ```python
-# PASS: セルの分離（Good Practice）
+# FAIL: 定義と値アクセスが同一セル → RuntimeError
 @app.cell
 def _(mo):
-    slider = mo.ui.slider(1, 100)
-    # UIエレメント自体を返す
-    return slider,
+    btn = mo.ui.button(label="送信")
+    if btn.value:          # ← RuntimeError: Accessing the value of a UIElement
+        do_something()     #   in the cell that created it is not allowed.
+    return btn,
+
+# PASS: セルを分離（定義セル）
+@app.cell
+def _(mo):
+    btn = mo.ui.button(label="送信")
+    btn                    # ← スタンドアロン式で表示（必須。return だけでは表示されない）
+    return btn,
+
+# PASS: セルを分離（値アクセスセル）
+@app.cell
+def _(btn):
+    if btn.value:
+        do_something()
+    return
+```
+
+### 4-2. UIコンポーネントの表示（スタンドアロン式）
+
+- **RULE**: UI要素を画面に表示するには、セル内で**スタンドアロン式**（変数名だけの行）として書く。`return (widget,)` だけでは表示されない。
+- **RULE**: UI要素は**定義したセルでのみ表示する**。別のセルの `mo.vstack` 等に含めると非インタラクティブなコピーになり、クリックしても `value` が更新されない。
+
+```python
+# FAIL: return だけでは表示されない
+@app.cell
+def _(mo):
+    btn = mo.ui.button(label="送信")
+    return btn,             # ← 他セルには export されるが画面には表示されない
+
+# FAIL: 別セルで vstack に含める → 非インタラクティブ（クリック無効）
+@app.cell
+def _(mo, btn):
+    mo.vstack([btn, mo.md("説明")])   # ← btn は定義セルと別セルなので dead copy
+
+# PASS: 定義セルでスタンドアロン式として表示
+@app.cell
+def _(mo):
+    btn = mo.ui.button(label="送信")
+    btn                     # ← これで画面に表示される（インタラクティブ）
+    return btn,
+
+# PASS: 別セルには別の要素だけ表示
+@app.cell
+def _(mo, btn):
+    _result = mo.md("クリックされました！") if btn.value else mo.md("")
+    _result                 # ← btn は表示しない、結果だけ表示
+```
+
+### 4-3. ボタンの正しい初期化パターン
+
+`mo.ui.button` は **`on_click` を指定しないと `value` が更新されない**。クリックカウンターとして使うには `value=0` と `on_click=lambda v: v + 1` が必須。
+
+| 用途 | 正しい書き方 | 誤った書き方 |
+|------|------------|------------|
+| クリックカウンター | `mo.ui.button(value=0, on_click=lambda v: v + 1)` | `mo.ui.button(label="送信")` のみ ← value が更新されない |
+| クリック判定 | `if btn.value:` | `if btn.clicked:` ← AttributeError |
+
+```python
+# FAIL: on_click なし → クリックしても value が None のまま
+@app.cell
+def _(mo):
+    btn = mo.ui.button(label="送信")
+    btn
+    return btn,
+
+# PASS: on_click でクリックごとに value をインクリメント
+@app.cell
+def _(mo):
+    btn = mo.ui.button(value=0, label="送信", on_click=lambda v: v + 1)
+    btn
+    return btn,
 
 @app.cell
-def _(slider, expensive_function):
-    # スライダーが操作されるたびに、このセルのみが再評価される
-    result = expensive_function(slider.value)
-    return result,
+def _(btn):
+    if btn.value:    # 1回以上クリックされたら truthy
+        do_something()
+    return
+```
+
+### 4-4. 条件付きUI表示パターン
+
+接続状態などの条件でUI要素の表示・非表示を切り替える場合、UI要素は**常に定義**して表示だけを条件分岐する。
+
+```python
+# FAIL: 条件ブランチ内で定義すると early return で NameError が起きる
+@app.cell
+def _(mo, is_connected):
+    if not is_connected:
+        return (None,)          # ← downstream が dropdown を期待してエラー
+    dropdown = mo.ui.dropdown(options=[...])
+    dropdown
+    return (dropdown,)
+
+# PASS: 常に定義し、表示だけ切り替える
+@app.cell
+def _(mo, is_connected):
+    dropdown = mo.ui.dropdown(options=[...])
+    _content = dropdown if is_connected else mo.md("")
+    _content
+    return (dropdown,)
+```
+
+### 4-5. 複数フィールドのフォームパターン
+
+複数の入力フィールドをまとめるには `mo.ui.dictionary` を使う。`mo.ui.form(mo.vstack([...]))` は `.value` が機能しないため使用しない。
+
+```python
+# FAIL: mo.vstack は UIElement ではないため form.value が取得できない
+params_form = mo.ui.form(mo.vstack([
+    mo.ui.text(label="ticker"),
+    mo.ui.number(label="qty"),
+]))
+
+# PASS: mo.ui.dictionary でまとめる → .value が dict で返る
+params_form = mo.ui.dictionary({
+    "ticker": mo.ui.text(label="ticker", value="BTC"),
+    "qty": mo.ui.number(label="qty", start=0.001, stop=1000.0, step=0.001, value=0.01),
+})
+
+# 使用側: params_form.value は {"ticker": "BTC", "qty": 0.01} の dict
+body = dict(params_form.value) if params_form else {}
+```
+
+### 4-6. セルローカル変数（`_` プレフィックス）
+
+変数名を `_` で始めると、そのセルのローカル変数になり、他セルには export されない。
+
+```python
+@app.cell
+def _(mo):
+    _tmp = "このセルだけで使う一時変数"   # ← export されない
+    result = _tmp.upper()               # ← export される
+    result
+    return (result,)
 ```
 
 ---
 
-## 5. Anti-Patterns (避けるべきコードの臭い)
+## 5. セルの return 一貫性
+
+- **RULE**: セル内の全ブランチで `return` するタプルの変数名セットを統一する。Early return でシグネチャが変わると、下流セルで `NameError` が発生する。
+
+```python
+# FAIL: ブランチによって return シグネチャが異なる
+@app.cell
+def _(mo, condition):
+    if not condition:
+        return (None,)          # ← path_only だけ。method は未定義
+    path_only = "/api/foo"
+    method = "GET"
+    return (path_only, method)  # ← 2変数
+
+# PASS: デフォルト値で統一する
+@app.cell
+def _(mo, condition):
+    path_only = None
+    method = None
+    if condition:
+        path_only = "/api/foo"
+        method = "GET"
+    return (path_only, method)  # ← 常に同じシグネチャ
+```
+
+---
+
+## 6. Anti-Patterns (避けるべきコードの臭い)
 
 1. **セルの肥大化（God Cells）**:
    1つの `@app.cell` 内に、データの読み込み、UI定義、前処理、描画などをすべて同居させることは避けてください。役割（設定、データ抽出、UI定義、ビジネスロジック）ごとに細かくセルを分割します。
-   
-2. **暗黙のループや副作用 (Side Effects)**:
+
+2. **同一セル内での UIElement.value アクセス**:
+   `mo.ui.*` を定義したセルの中でその `.value` を読み取ると `RuntimeError` になります。
+   必ず別セルに分離してください（→ 4-1 参照）。
+
+3. **定義セル以外での UI 要素の表示**:
+   別セルの `mo.vstack` 等に UI 要素を含めると非インタラクティブなコピーになります（→ 4-2 参照）。
+
+4. **`on_click` なしのボタン**:
+   `mo.ui.button` は `on_click` がないと `value` が更新されません（→ 4-3 参照）。
+
+5. **存在しない属性の使用**:
+   - `button.clicked` → 存在しない。`.value` を使う。
+   - `button.is_pressed` → 存在しない。`.value` を使う。
+
+6. **暗黙のループや副作用 (Side Effects)**:
    `while True` や過度な `sleep` によるポーリングは、データフローの評価をブロックします。
    定期的な更新が必要な処理などは、UIイベント等に紐づけて駆動させてください。
 
-3. **import の乱用とスコープ漏れ**:
+7. **import の乱用とスコープ漏れ**:
    特定のセルでのみ使用し、他のセルで再利用しないモジュールは、そのセル内で閉じる（`return` しない）ようにします。
 
 ---
