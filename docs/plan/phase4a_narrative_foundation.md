@@ -62,11 +62,13 @@ pub struct Narrative {
     pub action: NarrativeAction,       // side, qty, price
     pub confidence: f64,               // 0.0 .. 1.0
     pub outcome: Option<NarrativeOutcome>, // 約定後に自動更新
-    pub linked_order_id: Option<Uuid>, // Phase 2 の VirtualOrder.order_id と紐付け
+    pub linked_order_id: Option<String>, // Phase 2 の VirtualOrder.order_id と紐付け（src/replay/virtual_exchange/order_book.rs:18 の String 型に合わせる）
     pub public: bool,                  // デフォルト false
     pub created_at_ms: i64,            // 実時間（監査用）
 }
 ```
+
+> **型整合性メモ**: Phase 2 の `VirtualOrder.order_id` / `FillEvent.order_id` は `String` で実装済みのため、`linked_order_id` もこれに揃える。`Narrative.id` 自体はローカル主キーなので `Uuid` のまま（SQLite には TEXT として保存）。
 
 ### 3.2 ストレージ分離戦略（メタ = SQLite / スナップショット = ファイル）
 
@@ -152,12 +154,61 @@ CREATE INDEX idx_narratives_order ON narratives(linked_order_id);
 
 既存の `RouteError` / `parse_*_command()` パターンを踏襲する（axum/hyper 導入しない）。
 
+#### エンドポイント一覧（唯一の真実 — §4-B はこれに従う）
+
 | メソッド | パス | ボディ/クエリ | レスポンス |
 |---|---|---|---|
-| `POST` | `/api/agent/narrative` | Narrative JSON（`id`・`outcome`・`created_at_ms` は省略可） | `{ "id": "<uuid>" }` 201 |
-| `GET` | `/api/agent/narratives` | クエリ: `agent_id`, `ticker`, `limit`, `since_ms` | `{ "narratives": [...] }` 200 |
-| `GET` | `/api/agent/narrative/:id` | — | Narrative JSON 200 / 404 |
-| `POST` | `/api/agent/narrative/:id/publish` | `{ "public": true }` | `{ "id": "<uuid>", "public": true }` 200 |
+| `POST` | `/api/agent/narrative` | Narrative 作成リクエスト JSON（下記参照） | `{ "id": "<uuid>" }` 201 / `400` / `413` |
+| `GET` | `/api/agent/narratives` | クエリ: `agent_id`, `ticker`, `limit`（default=100, max=1000）, `since_ms` | `{ "narratives": [...] }` 200 |
+| `GET` | `/api/agent/narrative/:id` | — | Narrative メタ JSON 200 / 404 |
+| `GET` | `/api/agent/narrative/:id/snapshot` | — | `observation_snapshot` 本体 JSON 200 / 404 / 410（sha256 不一致）|
+| `PATCH` | `/api/agent/narrative/:id` | `{ "public": true \| false }` | 更新後の Narrative メタ JSON 200 / 404 |
+| `GET` | `/api/agent/narratives/storage` | — | `{ "total_count": N, "total_bytes": N, "warn_count": N }` 200 |
+| `GET` | `/api/agent/narratives/orphans` | — | `{ "orphan_files": [...] }` 200（削除は Phase 4a 非スコープ）|
+
+> **ロードマップ差分メモ**: 親計画 [🔄ai_agent_platform_roadmap.md:135](🔄ai_agent_platform_roadmap.md#L135) の `POST /api/agent/narrative/publish` は、REST 的整合性（リソース指向）と `public: false` への取消対応を考慮し、`PATCH /api/agent/narrative/:id` に一般化した。
+
+#### POST `/api/agent/narrative` リクエスト例
+
+```jsonc
+{
+  "agent_id": "user_A_agent_v3",
+  "uagent_address": null,
+  "ticker": "BTCUSDT",
+  "timeframe": "1h",
+  "observation_snapshot": {            // ← 大容量ペイロード。サーバー側で gzip 圧縮・別ファイル保存
+    "ohlcv": [{ "t": 1704067200000, "o": 92100, "h": 92800, "l": 91900, "c": 92500, "v": 1234.5 }],
+    "indicators": { "rsi_4h": 28.3, "volume_ratio": 1.42 }
+  },
+  "reasoning": "RSI divergence on 4h, volume confirmed above 1.4x average",
+  "action": { "side": "buy", "qty": 0.1, "price": 92500 },
+  "confidence": 0.76,
+  "linked_order_id": "ord_01JG...",    // ← オプショナル。先に POST /api/replay/order で取得した String を渡す
+  "timestamp_ms": 1704067200000,       // ← オプショナル。省略時はサーバー側 StepClock::now_ms() を使用
+  "idempotency_key": "agent_A#step_42" // ← オプショナル。指定時は重複 POST を防ぐ（下記）
+}
+```
+
+**レスポンス**:
+- 201 Created: `{ "id": "<uuid>", "snapshot_bytes": 12345, "idempotent_replay": false }`
+- 400 Bad Request: 不正 JSON、confidence 範囲外（0.0..=1.0）、空 agent_id、不明な side
+- 413 Payload Too Large: `observation_snapshot` が圧縮前 10 MB / 圧縮後 2 MB を超過
+
+#### ID 生成責任と冪等性（Open Question #4 への回答）
+
+- **`Narrative.id`（UUID）は常にサーバー側で生成**。クライアントが `id` を指定しても無視する（ID 衝突事故の防止）
+- **冪等性が必要な場合は `idempotency_key` を利用**:
+  - `idempotency_key` + `agent_id` の複合 UNIQUE 制約を SQLite に追加
+  - 同一キーでの再送時は、新規 INSERT せず既存 Narrative を返す（`idempotent_replay: true`）
+  - キー指定がない場合は常に新規 INSERT（破壊的ではないので許容）
+- **SQLite スキーマ追加**（§3.2 に反映する差分）:
+
+```sql
+ALTER TABLE narratives ADD COLUMN idempotency_key TEXT;
+CREATE UNIQUE INDEX idx_narratives_idempotency
+    ON narratives(agent_id, idempotency_key)
+    WHERE idempotency_key IS NOT NULL;  -- NULL 許容＝未指定時は制約を適用しない
+```
 
 ### 3.4 FillEvent → outcome 自動更新
 
@@ -179,34 +230,37 @@ Phase 2 の `VirtualExchange::on_tick()` が返す `FillEvent`（`src/replay/vir
 
 ### サブフェーズ A: Narrative Store（永続化基盤）
 
-- [ ] **A-1**: `Cargo.toml` に `rusqlite`（`bundled` feature）・`flate2`・`sha2` を追加、`data_path()` 配下に DB を開く helper を作成
-  - テスト: `narrative_store::tests::opens_db_in_data_path()`
-- [ ] **A-2**: `Narrative` / `SnapshotRef` / `NarrativeAction` / `NarrativeOutcome` モデル定義・serde 往復テスト
-  - テスト: `narrative::model::tests::roundtrip_json()`
-- [ ] **A-3**: `SnapshotStore`（ファイル書き込み層）実装
-  - `write(snapshot_json) -> SnapshotRef`: gzip 圧縮 → 年月日ディレクトリ作成 → 書き込み → sha256 計算
-  - `read(snapshot_ref) -> serde_json::Value`: 読み込み → sha256 検証 → 解凍
+- [x] ✅ **A-1**: `Cargo.toml` に `rusqlite`（`bundled` feature）・`flate2`・`sha2` を追加、`data_path()` 配下に DB を開く helper を作成
+  - テスト: `narrative::store::tests::opens_db_in_data_path` / `creates_parent_directory_if_missing`
+- [x] ✅ **A-2**: `Narrative` / `SnapshotRef` / `NarrativeAction` / `NarrativeOutcome` モデル定義・serde 往復テスト
+  - テスト: `narrative::model::tests::roundtrip_json` 他 3 件
+- [x] ✅ **A-3**: `SnapshotStore`（ファイル書き込み層）実装
+  - `write(id, timestamp_ms, &Value) -> SnapshotRef`: gzip 圧縮 → 年月日ディレクトリ作成 → 書き込み → sha256 計算
+  - `read(&SnapshotRef) -> Value`: 読み込み → sha256 検証 → 解凍
   - サイズ上限（圧縮前 10 MB / 圧縮後 2 MB）超過時のエラー
-  - テスト: 一時ディレクトリで書き込み→読み戻し、sha256 不一致検出、サイズ上限
-- [ ] **A-4**: `NarrativeStore::insert()` — SnapshotStore に書き出した後 SQLite INSERT（ファイル書き込み失敗時は INSERT しないアトミック性）
-  - テスト: ファイル I/O 失敗を注入して SQLite に残らないことを確認
-- [ ] **A-5**: `NarrativeStore::get()` / `list()`（filter: agent_id / ticker / since_ms / limit）
-  - テスト: インメモリ DB（`:memory:`）で CRUD 全ケース。`list()` はスナップショット本体を読まないことも検証
-- [ ] **A-6**: `NarrativeStore::load_snapshot(id)` — 明示取得（lazy load）
-- [ ] **A-7**: `NarrativeStore::update_outcome()` ・ `set_public()`
-- [ ] **A-8**: マイグレーション（初回起動時に CREATE TABLE IF NOT EXISTS）
-- [ ] **A-9**: `NarrativeStore::gc_orphans()` — 孤児スナップショット検出（ログ出力のみ、削除はしない）
-- [ ] **A-10**: `NarrativeStore::storage_stats()` — 総件数・総バイトサイズ・最大ファイルサイズを返す
+  - テスト: `write_then_read_roundtrip` / `read_detects_sha256_mismatch` / `rejects_payload_over_uncompressed_limit` / `write_creates_year_month_day_subdirectories`
+- [x] ✅ **A-4**: `NarrativeStore::insert()` — `spawn_blocking` + `tokio::Mutex` で直列化。`idempotency_key` による冪等リプレイ対応
+  - テスト: `insert_and_get_roundtrip` / `idempotency_key_prevents_duplicate_insert`
+- [x] ✅ **A-5**: `NarrativeStore::get()` / `list()`（filter: agent_id / ticker / since_ms / limit）
+  - テスト: `list_filters_by_agent_ticker_since` / `list_limit_is_clamped_to_max` / `get_returns_none_for_unknown_id`
+- [x] ✅ **A-6**: `NarrativeStore::snapshot_ref_of(id)` — lazy load 用の snapshot_ref 取得 API
+- [x] ✅ **A-7**: `NarrativeStore::update_outcome_by_order_id()` ・ `set_public()`（true/false 両対応）
+  - テスト: `update_outcome_by_order_id_sets_outcome` / `set_public_toggles_flag` / `set_public_returns_not_found_for_unknown_id`
+- [x] ✅ **A-8**: マイグレーション（`CREATE TABLE IF NOT EXISTS` + インデックス + idempotency 用 UNIQUE 部分インデックス）
+- [x] ✅ **A-9**: `NarrativeStore::gc_orphans()` — 孤児スナップショット検出（ログ出力のみ、削除はしない）
+  - テスト: `gc_orphans_detects_files_without_rows` / `gc_orphans_ignores_registered_files`
+- [x] ✅ **A-10**: `NarrativeStore::storage_stats()` — 総件数・総バイトサイズ・WARN しきい値超過件数
+  - テスト: `storage_stats_counts_bytes_and_entries`
 
-### サブフェーズ B: HTTP API
+### サブフェーズ B: HTTP API（§3.3 エンドポイント表に対応）
 
-- [ ] **B-1**: `POST /api/agent/narrative` — リクエストパースと store.insert 結線
-  - テスト: `replay_api::tests::accepts_narrative_post()`
+- [ ] **B-1**: `POST /api/agent/narrative` — リクエストパース + `idempotency_key` 冪等処理 + store.insert 結線
+  - テスト: `replay_api::tests::accepts_narrative_post()` / `replay_api::tests::idempotent_replay_returns_same_id()`
 - [ ] **B-2**: `GET /api/agent/narratives`（agent_id / ticker / since_ms / limit フィルタ、スナップショット本体は含めない）
-- [ ] **B-3**: `GET /api/agent/narrative/:id`（メタ + スナップショット本体を含む）・404 ハンドリング
-- [ ] **B-4**: `GET /api/agent/narrative/:id/snapshot`（スナップショットのみを gzip 解凍済み JSON で返す）
-- [ ] **B-5**: `POST /api/agent/narrative/:id/publish`
-- [ ] **B-6**: `GET /api/agent/narratives/storage`（総件数・総バイトサイズ・最大ファイルサイズ）
+- [ ] **B-3**: `GET /api/agent/narrative/:id`（メタのみ）・404 ハンドリング
+- [ ] **B-4**: `GET /api/agent/narrative/:id/snapshot`（スナップショットを gzip 解凍済み JSON で返す、sha256 不一致は 410）
+- [ ] **B-5**: `PATCH /api/agent/narrative/:id` — `public` の true/false 両方をサポート（取消対応）
+- [ ] **B-6**: `GET /api/agent/narratives/storage`（総件数・総バイトサイズ・256KB 超警告件数）
 - [ ] **B-7**: `GET /api/agent/narratives/orphans`（孤児スナップショット一覧）
 - [ ] **B-8**: バリデーション（不正 JSON、confidence 範囲外、空 agent_id、スナップショットサイズ超過→413）
 
@@ -231,10 +285,13 @@ Phase 2 の `VirtualExchange::on_tick()` が返す `FillEvent`（`src/replay/vir
 
 ### サブフェーズ F: E2E テスト
 
-- [ ] **F-1**: `tests/s33_narrative_crud.py`（POST → GET → publish のライフサイクル）
-- [ ] **F-2**: `tests/s34_narrative_outcome_link.py`（注文 → 約定 → outcome 自動更新）
-- [ ] **F-3**: `tests/s35_narrative_chart_overlay.py`（GUI 起動時のみ、マーカー描画確認）
-- [ ] **F-4**: CI（`e2e.yml`）に headless ステップ追加（S33/S34）
+> **テスト番号**: 既存の `s33`〜`s50` は使用済み（`s33_sidebar_split_pane` 〜 `s50_tachibana_login`）。ナラティブ系は `s51` から割り当てる。
+
+- [ ] **F-1**: `tests/e2e/s51_narrative_crud.py`（POST → GET → PATCH publish のライフサイクル、idempotency_key 再送）
+- [ ] **F-2**: `tests/e2e/s52_narrative_outcome_link.py`（注文 → 約定 → outcome 自動更新、`linked_order_id` で紐付け）
+- [ ] **F-3**: `tests/e2e/s53_narrative_snapshot_size.py`（サイズ上限超過で 413、sha256 不一致で 410）
+- [ ] **F-4**: `tests/e2e/s54_narrative_chart_overlay.py`（GUI 起動時のみ、マーカー描画確認）
+- [ ] **F-5**: CI（`e2e.yml`）に headless ステップ追加（S51 / S52 / S53）
 
 ---
 
@@ -255,8 +312,10 @@ Phase 2 の `VirtualExchange::on_tick()` が返す `FillEvent`（`src/replay/vir
 | スナップショットファイルが数十 GB に肥大化 | ディスク逼迫 | サイズ上限（圧縮後 2 MB）+ `storage_stats` API で可観測化。GC は 4b 以降 |
 | ファイル書き込み後 SQLite INSERT が失敗 → 孤児ファイル | ディスクリーク | A-9 の `gc_orphans()` で検出可能にする。削除は手動 |
 | SQLite INSERT 後に OS クラッシュ → ファイル欠損 | データ不整合 | `load_snapshot` 時に sha256 検証し、欠損は 404 + ログ。起動時の GC でも検出 |
-| `linked_order_id` が Phase 2 の `VirtualOrder.order_id` と型互換でない | 結線失敗 | 初手で両者の Uuid フォーマット互換性をテスト（A-5 に含める） |
+| ~~`linked_order_id` が Phase 2 と型互換でない~~ | ~~結線失敗~~ | ✅ 解決: `Option<String>` に統一（order_book.rs:18 確認済み）|
 | Canvas 描画の座標変換が既存インジケーターと競合 | UI 崩れ | D-1 でビジュアルテストを先に書き、退行を検出 |
+| リプレイ高速再生（100x）で FillEvent バースト → `spawn_blocking` + Mutex で詰まる | 約定記録遅延 | C-2 で書き込みキュー長を `tracing` で可観測化。キュー長 > 1000 で WARN ログ |
+| Live モード時のマーカー描画挙動が未定義 | UI 不整合 | Phase 4a は **リプレイモード専用**。Live 時は Narrative 記録可能だがマーカー非表示（D-2 の範囲絞り込みで自然に実現）|
 
 ---
 
@@ -279,12 +338,13 @@ src/chart/indicator.rs               # マーカーレイヤー組み込み
 
 python/flowsurface/narrative.py      # SDK 拡張（Python 側）
 
-tests/s33_narrative_crud.py          # 新規 E2E
-tests/s34_narrative_outcome_link.py
-tests/s35_narrative_chart_overlay.py
+tests/e2e/s51_narrative_crud.py           # 新規 E2E（s33〜s50 は使用済み）
+tests/e2e/s52_narrative_outcome_link.py
+tests/e2e/s53_narrative_snapshot_size.py
+tests/e2e/s54_narrative_chart_overlay.py
 
-Cargo.toml                           # rusqlite 追加
-.github/workflows/e2e.yml            # S33/S34 headless ステップ追加
+Cargo.toml                           # rusqlite（bundled）・flate2・sha2 追加
+.github/workflows/e2e.yml            # S51/S52/S53 headless ステップ追加
 ```
 
 ---
@@ -293,7 +353,7 @@ Cargo.toml                           # rusqlite 追加
 
 作業着手時にこのセクションを更新。完了項目に ✅ を付与。
 
-- [ ] サブフェーズ A（Narrative Store）
+- [x] ✅ サブフェーズ A（Narrative Store）
 - [ ] サブフェーズ B（HTTP API）
 - [ ] サブフェーズ C（FillEvent 連携）
 - [ ] サブフェーズ D（チャート可視化）
@@ -308,7 +368,39 @@ Cargo.toml                           # rusqlite 追加
 
 1. ~~**SQLite 書き込みスレッド**~~ → ✅ **確定（2026-04-21）**: `Arc<tokio::sync::Mutex<Connection>>` で 1 本の接続を共有。書き込み・読み込みは `tokio::task::spawn_blocking` 内で実行し UI をブロックしない。`NarrativeStore` trait で抽象化し、将来 `r2d2_sqlite` プールへ差し替え可能にする（詳細: 3.2「並行性モデル」）
 2. ~~**ナラティブの最大サイズ制限**~~ → ✅ **確定（2026-04-21）**: 別ストレージ分離方式を採用。メタは SQLite、`observation_snapshot` は `narratives/snapshots/{yyyy}/{mm}/{dd}/{uuid}.json.gz` に gzip + sha256 付きで保存。圧縮前 10 MB / 圧縮後 2 MB をハード上限、256 KB で WARN ログ
-3. **マーカー表示の ON/OFF**: 常時表示か、設定でトグルできるようにするか？（サイドバー「ナラティブ表示」チェックボックス）
-4. **agent_id の重複許容**: 同一 agent_id を複数ユーザーが使うケースは想定外としてよいか？（Phase 4b で `uagent_address` が一意識別子になるため、4a では緩くしてよい想定）
+3. ~~**マーカー表示の ON/OFF**~~ → ✅ **確定（2026-04-21）**: **常時表示**。サイドバートグル等は実装しない。Phase 4a のナラティブは自分のエージェントのものだけ（4b 以降に他者のナラティブが入ると非表示ニーズが出てくる可能性があるが、その時点で再検討）
+4. ~~**agent_id の重複許容**~~ → ✅ **確定（2026-04-21）**: **緩い方針を採用**。`agent_id` は Python 側が自由に付けられる表示名（ニックネーム）として扱い、SQLite 側で `UNIQUE` 制約は付けない。Phase 4b で `uagent_address`（Fetch.ai の暗号学的アドレス `agent1qt2uqhx...`）が導入された時点で真の一意識別子が確立する。4a ではローカル完結で衝突リスクなし
+5. ~~**`linked_order_id` の型**~~ → ✅ **確定（2026-04-21 レビュー対応）**: `Option<String>`。Phase 2 の `VirtualOrder.order_id: String`（`src/replay/virtual_exchange/order_book.rs:18`）に合わせる。`Uuid` への移行は Phase 2 全体のマイグレーションが必要なため 4a 非スコープ
+6. ~~**ID 生成責任と冪等性**~~ → ✅ **確定（2026-04-21 レビュー対応）**: `Narrative.id`（UUID）はサーバー側で常に生成。クライアント指定は無視。冪等性が必要なら `idempotency_key` をクライアントから渡す（`(agent_id, idempotency_key)` で UNIQUE 制約、NULL 許容）
+7. ~~**`publish` の取消対応**~~ → ✅ **確定（2026-04-21 レビュー対応）**: `POST :id/publish` ではなく `PATCH :id { public: bool }` に一般化。`false` で公開取消も可能
+8. ~~**Live モードのマーカー挙動**~~ → ✅ **確定（2026-04-21 レビュー対応）**: Phase 4a は **リプレイモード専用描画**。Live 時は Narrative 記録は可能（API は動く）だがマーカーは描画しない
 
-サブフェーズ A 着手前に残り 2 問（Q3・Q4）を確定させる。
+**全 Open Questions 解決済み**。サブフェーズ A に着手可能。
+
+---
+
+## 9. 実装ログ（作業者追記）
+
+### 2026-04-21: サブフェーズ A（Narrative Store）完了
+
+**状況**: A-1 〜 A-10 すべて完了。21 個のユニットテストが通過。narrative モジュール内の clippy 警告はゼロ（pre-existing な他モジュールの lint エラーは別課題）。
+
+**新たな知見**:
+
+1. **`uuid` クレートに `serde` feature が未有効だった** — 計画書では想定外。`Cargo.toml` workspace 依存の `uuid` features に `"serde"` を追加することで `#[derive(Serialize, Deserialize)]` が通るようになった。
+2. **`rusqlite::params!` マクロは `bool` → `i64` 変換を自動で行わない** — `public as i64` で明示キャストが必要。
+3. **`rusqlite::Row` からの取り出しで `serde_json` エラーは `FromSqlConversionFailure` に包む必要がある** — `row_to_narrative` で `action_json` / `outcome_json` をデシリアライズする際に利用。
+4. **計画 §3.2 の "ファイル書き込み失敗時は INSERT しないアトミック性" は `NarrativeStore::insert()` の**呼び出し側責務**に切り出した** — 計画では A-4 にまとめて書かれていたが、`SnapshotStore::write()` と `NarrativeStore::insert()` を分離して HTTP ハンドラー側（サブフェーズ B）で「write → insert」の順序を守る設計に変更。ストアを責務単位で分けると単体テストがシンプルになる。B-1 の POST ハンドラで write→insert を逐次実行し、insert 失敗時はファイルが孤児になるが `gc_orphans()` で検出できる（計画 §3.2 の "孤児スナップショット" 運用と整合）。
+
+**設計思想と背景**:
+
+- **`NarrativeSide` は計画 §3.1 のサンプルコードにない独立 enum にした**: Phase 2 の `PositionSide` (`Long` / `Short`) を直接使うと API レスポンス JSON が `"Long"` / `"Short"` になり、Python SDK から扱いにくい。ナラティブ API の JSON では `"buy"` / `"sell"` が自然（計画 §3.3 の POST 例も `"side": "buy"` 形式）のため、API 層では `NarrativeSide { Buy, Sell }` を使い、Phase 2 との境界でマッピングする方針に変更。
+- **`open_in_memory()` は `#[cfg(test)]` で公開**: プロダクションコードからは使えないが、テストで同期ランタイム上から高速にストアを扱える。
+- **`update_outcome_by_order_id()` のシグネチャ**: 計画 A-7 の `update_outcome()` は ID 指定か order_id 指定か曖昧だったが、FillEvent 連携（サブフェーズ C）で使うのは **order_id による一括更新**（同じ order_id に紐付くナラティブが複数ある可能性を考慮）のため、この命名に決定。
+
+**Tips**:
+
+- `cargo test --lib narrative` で narrative モジュールのテストだけを走らせられる。TDD 中は毎回フルテストを回すより速い。
+- `cargo clippy --lib` は pre-existing な 11 個の clippy エラー（`OpenInterestIndicator` 等）が出るが、これらは 4a のスコープ外。`cargo clippy --lib 2>&1 | grep narrative` で narrative モジュールだけに絞れる。
+- `tokio::sync::Mutex::blocking_lock()` は `spawn_blocking` の中でだけ使うこと。async コンテキストから直接呼ぶと panic する。
+- SQLite の部分インデックス構文 `WHERE idempotency_key IS NOT NULL` は `rusqlite::bundled` 0.32（SQLite 3.46+）で動作確認済み。

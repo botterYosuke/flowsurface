@@ -8,6 +8,7 @@ mod headless;
 mod layout;
 mod logger;
 mod modal;
+mod narrative;
 mod notify;
 mod replay;
 mod replay_api;

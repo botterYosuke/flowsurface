@@ -14,6 +14,7 @@ pub mod headless;
 pub mod layout;
 pub mod logger;
 pub mod modal;
+pub mod narrative;
 pub mod notify;
 pub mod replay;
 pub mod replay_api;
