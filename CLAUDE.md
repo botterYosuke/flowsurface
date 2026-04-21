@@ -62,6 +62,9 @@ bash tests/s2_persistence.sh        # 例：bash スクリプト
 | `rust-testing` | Rust テスト作成、property-based testing、カバレッジ計測 | `/rust-testing` |
 | `benchmark` | PR 前後のパフォーマンス計測、criterion ベンチマーク作成 | `/benchmark` |
 | `architecture-decision-records` | 重要な技術的意思決定（フレームワーク・設計パターン・ライブラリ選定）を記録 | `/architecture-decision-records` または `ADR this` |
+| `jupyter` | VS Code Jupyter ノートブック開発（Output widget 重複描画・ハンドラ重複登録・セル再実行の状態汚染） | `/jupyter` |
+| `marimo` | marimo ノートブック開発（リアクティブ実行・mo.state 管理・UI コンポーネント分離） | `/marimo` |
+| `tachibana` | 立花証券 e支店 API 連携（認証フロー・仮想 URL・発注ルール・デモ環境使用） | `/tachibana` |
 
 ## コーディングルール
 
