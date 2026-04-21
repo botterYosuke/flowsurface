@@ -1004,7 +1004,8 @@ impl Dashboard {
         kline_targets
     }
 
-    /// StepBackward 用: kline 収集をせずチャートデータのみクリアする。
+    /// replay_mode=true でチャートを再構築する。
+    /// Live→Replay 切り替えおよび StepBackward の両方で使用する。
     pub fn clear_chart_for_replay(&mut self, main_window: window::Id) {
         for (_, _, state) in self.iter_all_panes_mut(main_window) {
             state.rebuild_content_for_replay();
