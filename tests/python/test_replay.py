@@ -5,13 +5,17 @@
 """
 from __future__ import annotations
 
+import time
+
 import httpx
 
 BASE_URL = "http://127.0.0.1:9876"
 
 TICKER = "BinanceLinear:BTCUSDT"
-START = "2024-01-15 09:00:00"
-END = "2024-01-15 15:30:00"
+# API の日時フォーマットは "%Y-%m-%d %H:%M"（秒なし）。
+# 参照: src/replay_api.rs validate_datetime_str / 既存 E2E スクリプト全件。
+START = "2024-01-15 09:00"
+END = "2024-01-15 15:30"
 
 
 def _get(path: str, **params) -> dict:
@@ -34,6 +38,10 @@ def test_status_returns_dict():
 
 
 def test_status_has_status_field():
+    # ReplayStatus.status は Option<String> + skip_serializing_if="Option::is_none" で、
+    # Idle セッション／Live モードでは JSON から omit される（src/replay/mod.rs:93）。
+    # Active／Loading セッション中のみ present であることを検証する。
+    _post("/api/replay/play", {"start": START, "end": END})
     result = _get("/api/replay/status")
     assert "status" in result
 
@@ -93,8 +101,25 @@ def test_cycle_speed_returns_dict():
 # ── virtual exchange ──────────────────────────────────────────────────────────
 
 def test_state_returns_dict():
-    result = _get("/api/replay/state")
-    assert isinstance(result, dict)
+    # GET /api/replay/state は ReplaySession::Active のときのみ 200 を返す。
+    # Idle は 400、Loading は 503（src/app/api/replay.rs:224-272）。
+    # play を呼び、Active 遷移を最大 10 秒ポーリングする。
+    _post("/api/replay/play", {"start": START, "end": END})
+    deadline = time.monotonic() + 10.0
+    last = None
+    while time.monotonic() < deadline:
+        r = httpx.get(f"{BASE_URL}/api/replay/state", timeout=5.0)
+        last = r
+        if r.status_code == 200:
+            result = r.json()
+            assert isinstance(result, dict)
+            return
+        # Loading 中は 503 が返るため短い間隔でリトライ
+        time.sleep(0.2)
+    raise AssertionError(
+        f"/api/replay/state が 10 秒以内に Active にならなかった: "
+        f"status={last.status_code if last else 'N/A'} body={last.text if last else 'N/A'}"
+    )
 
 
 def test_portfolio_returns_dict():
@@ -120,8 +145,11 @@ def test_order_buy_returns_dict():
 # ── エラー: アプリ未起動 ──────────────────────────────────────────────────────
 
 def test_not_running_error_on_wrong_port():
+    # Windows では未バインドポートへの TCP が即時 RST ではなくタイムアウトまで
+    # 待つため、httpx は ConnectTimeout を送出する。httpx 1.x で ConnectTimeout は
+    # ConnectError の兄弟（サブクラスではない）ため、両方を許容する。
     try:
         httpx.get("http://127.0.0.1:19999/api/replay/status", timeout=2.0)
-        assert False, "httpx.ConnectError が送出されるべき"
-    except httpx.ConnectError:
+        assert False, "httpx.ConnectError または httpx.ConnectTimeout が送出されるべき"
+    except (httpx.ConnectError, httpx.ConnectTimeout):
         pass

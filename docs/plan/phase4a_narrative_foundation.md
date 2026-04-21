@@ -376,6 +376,7 @@ Cargo.toml                           # rusqlite（bundled）・flate2・sha2 追
 - [x] ✅ サブフェーズ D（チャート可視化）
 - [x] ✅ サブフェーズ E（Python SDK 拡張）
 - [x] ✅ サブフェーズ F（E2E テスト — S51/S52/S53 実装、S54 は保留）
+- [x] ✅ 実アプリ検証（「アプリを使ってみる」セッション 2026-04-21）— 2 件の実行時バグを発見・修正（§9 末尾ログ参照）
 - [ ] `/verification-loop` 通過
 - [ ] PR 作成・CI 全 PASS
 
@@ -487,3 +488,24 @@ Cargo.toml                           # rusqlite（bundled）・flate2・sha2 追
 - E2E テストを GitHub Actions CI の headless マトリクスに追加する際は `tests/e2e/` 配下を正しく指すようパスを `s51_narrative_crud.py` 形式で書く（`s51_narrative_crud.py` のみ、`tests/e2e/` プレフィックスなし — ワークフロー側で `tests/e2e/${{ matrix.script }}` と連結される）。
 - `FLOWSURFACE_DATA_PATH` 環境変数が設定されていれば `data::data_path(None)` はそのパスを返すため、E2E テストで temp dir を差し替えたい場合は環境変数経由で。
 - S53 のファイル破壊テストは Windows で動作する（`Path.write_bytes()` はロックされない）。
+
+### 2026-04-21: 実アプリ検証（「アプリを使ってみる」セッション）で追加修正 2 件
+
+**状況**: サブフェーズ F 完了後、E2E テストだけでは発見できなかった実環境バグを 2 件修正。最終的に S51/S52/S53 が release ビルドに対して 15/15 PASS、Python 側 `tests/python/test_narrative.py` が 11/11 PASS、`cargo test --lib` が 437/437 PASS を確認。
+
+**修正バグ 1: headless `step_forward` が FillEvent を捨てる** (`src/headless.rs:420-447`)
+- 症状: headless モードで `/api/replay/order` → `/api/replay/step-forward` の順に叩くと約定は発生する（`orders: []` で pending から消える）が、`linked_order_id` で紐付けたナラティブの `outcome` が null のまま。S52 が `TC-S52-04 outcome was not populated within 30s` で失敗。
+- 原因: `tick()` では `virtual_engine.on_tick()` の戻り値 `fills` を受けて `update_outcome_from_fill` を発火させていたが、`step_forward()` では同じ `on_tick()` を呼びながら戻り値を破棄していた（計画 §C-2 は `headless.rs::tick` と GUI 側 `step_forward` しか挙げておらず、**headless の `step_forward` が配線漏れ**）。
+- 修正: `step_forward` 内で fills を集めて `tokio::spawn(update_outcome_from_fill)` を発火する処理を `tick` と同型で追加。
+- 教訓: `on_tick()` が `Vec<FillEvent>` を返す API である以上、**戻り値を `_` で捨てる場所はないか** grep で全箇所を棚卸しすべきだった。現状は `tick` と `step_forward` の 2 箇所のみだが、将来追加される第 3 の同期エントリーポイントで同じバグが再発するリスクあり。
+
+**修正バグ 2: HTTP サーバーが 512 KB 超のボディで接続を黙って切断** (`src/replay_api.rs:244-307`)
+- 症状: S53 の 11 MB スナップショット POST が `requests.exceptions.ConnectionError: Connection aborted` で失敗。計画書は「圧縮前 10 MB 超過時に 413」だが、サーバーがボディを読み切る前に接続を切るため route 層の 413 判定まで到達しない。
+- 原因: `read_full_request()` が固定 512 KB バッファで、Content-Length がそれを超えると `None` を返し、caller が `continue` で接続を捨てるだけだった（413 ステータスを返さない）。
+- 修正: バッファを動的拡張（初期 16 KB、ヘッダー 64 KB 上限、ボディ 16 MB 上限 = 10 MB ナラティブ + 余裕）。戻り値を `Option<String>` から `enum ReadRequestOutcome { Ok(String), TooLarge, Invalid }` に変更し、`TooLarge` で明示的に 413 を返す。
+- 教訓: route 層のテスト（`cargo test --lib replay_api`）は JSON ボディ文字列を直接渡すため、**TCP 層のバッファ制限を通らない**。HTTP 契約テスト（サイズ上限 413）は必ず実サーバー経由の E2E で検証すべき。
+
+**既存バグ（今回は未修正・報告のみ）: `data::data_path()` が env 上書き時に `path_name` を無視** (`data/src/lib.rs:133-144`)
+- 症状: `FLOWSURFACE_DATA_PATH=/tmp/somewhere` を設定して起動すると、`NarrativeStore::open_default()` が `data_path(Some("narratives.db"))` を呼ぶが、env が設定されていると **path_name の suffix が捨てられる**。結果として SQLite は `/tmp/somewhere` というパスをファイルとして作成し、後続の `SnapshotStore::new(data_path(None))` が `/tmp/somewhere/narratives/snapshots/...` を作ろうとして 500（OS error 183 "既に存在するファイルを作成することはできません"）。
+- 影響範囲: env で差し替えた temp dir で起動すると narrative 書き込みが全滅。default `AppData/flowsurface/` で起動する分には問題なし。
+- スコープ判定: Phase 4a 非スコープの既存バグだが、計画 §488 Tips の「FLOWSURFACE_DATA_PATH 環境変数が設定されていれば...temp dir を差し替えたい場合は環境変数経由で」が path_name=Some の場合に誤誘導となる。Phase 4b 以降の `data` クレート修正課題として残す。

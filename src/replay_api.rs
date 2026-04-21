@@ -241,49 +241,70 @@ fn parse_content_length_from_headers(headers: &str) -> usize {
     0
 }
 
+/// 上限: ヘッダー 64KB + ボディ 16MB（Phase 4a のスナップショット 10MB ＋余裕を見た値）。
+const MAX_HEADER_BYTES: usize = 64 * 1024;
+const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
+
+pub(crate) enum ReadRequestOutcome {
+    /// リクエストを全量受信した（ヘッダー + ボディ）
+    Ok(String),
+    /// Content-Length がサーバー上限を超えた → 413 を返すべき
+    TooLarge,
+    /// 接続断・ヘッダー解析失敗など。呼び出し側は 400/黙って切断を選べる
+    Invalid,
+}
+
 /// HTTP リクエストを完全に読み込む（Content-Length に従ってボディも確保）。
-/// TCP が分割して届いても正しく結合する。
-async fn read_full_request(stream: &mut tokio::net::TcpStream) -> Option<String> {
-    // 512KB バッファ（inject-daily-history 等の大きなボディに対応）
-    let mut buf = vec![0u8; 524288];
+/// TCP が分割して届いても正しく結合し、ボディサイズに応じてバッファを動的拡張する。
+pub(crate) async fn read_full_request(stream: &mut tokio::net::TcpStream) -> ReadRequestOutcome {
+    let mut buf = vec![0u8; 16 * 1024];
     let mut total = 0usize;
 
     loop {
+        if total == buf.len() {
+            if buf.len() >= MAX_HEADER_BYTES {
+                return ReadRequestOutcome::Invalid;
+            }
+            let new_size = (buf.len() * 2).min(MAX_HEADER_BYTES);
+            buf.resize(new_size, 0);
+        }
+
         let n = match stream.read(&mut buf[total..]).await {
-            Ok(0) | Err(_) => return None,
+            Ok(0) | Err(_) => return ReadRequestOutcome::Invalid,
             Ok(n) => n,
         };
         total += n;
 
-        // ヘッダー末尾 \r\n\r\n を探す
         let Some(header_end) = buf[..total].windows(4).position(|w| w == b"\r\n\r\n") else {
-            if total >= buf.len() {
-                return None; // バッファ枯渇
-            }
-            continue; // ヘッダーがまだ届いていない
+            continue;
         };
 
         let body_start = header_end + 4;
-        let headers_raw = std::str::from_utf8(&buf[..header_end]).ok()?;
+        let Ok(headers_raw) = std::str::from_utf8(&buf[..header_end]) else {
+            return ReadRequestOutcome::Invalid;
+        };
         let content_length = parse_content_length_from_headers(headers_raw);
+
+        if content_length > MAX_BODY_BYTES {
+            return ReadRequestOutcome::TooLarge;
+        }
 
         let body_received = total - body_start;
         if body_received >= content_length {
-            // 完全なリクエストを受信済み
-            return Some(String::from_utf8_lossy(&buf[..total]).into_owned());
+            return ReadRequestOutcome::Ok(String::from_utf8_lossy(&buf[..total]).into_owned());
         }
 
-        // ボディの残りバイトを読む
-        let remaining = content_length - body_received;
-        if total + remaining > buf.len() {
-            return None; // バッファ超過
+        let total_len = body_start + content_length;
+        if buf.len() < total_len {
+            buf.resize(total_len, 0);
         }
-        match stream.read_exact(&mut buf[total..total + remaining]).await {
+        match stream.read_exact(&mut buf[total..total_len]).await {
             Ok(_) => {
-                total += remaining;
-                return Some(String::from_utf8_lossy(&buf[..total]).into_owned());
+                return ReadRequestOutcome::Ok(
+                    String::from_utf8_lossy(&buf[..total_len]).into_owned(),
+                );
             }
-            Err(_) => return None,
+            Err(_) => return ReadRequestOutcome::Invalid,
         }
     }
 }
@@ -313,11 +334,14 @@ async fn run_server(mut sender: mpsc::Sender<ApiMessage>) {
         };
 
         // 1 リクエスト / 接続（keep-alive なし）
-        // 512KB バッファ: inject-daily-history で多数 kline を送る場合に備えて確保
-        // Content-Length に従って完全なボディを受信する（TCP 分割対策）
+        // ヘッダー 64KB / ボディ 16MB まで動的に拡張する（Phase 4a のスナップショット 10MB 対応）
         let request_string = match read_full_request(&mut stream).await {
-            Some(s) => s,
-            None => continue,
+            ReadRequestOutcome::Ok(s) => s,
+            ReadRequestOutcome::TooLarge => {
+                let _ = write_response(&mut stream, 413, r#"{"error":"Payload Too Large"}"#).await;
+                continue;
+            }
+            ReadRequestOutcome::Invalid => continue,
         };
         let request = request_string.as_str();
         let (method, path, body) = match parse_request(request) {
