@@ -45,20 +45,25 @@ pub async fn perform_login(
     is_demo: bool,
 ) -> Result<TachibanaSession, String> {
     let base = base_url(is_demo);
-    perform_login_with_base_url(base, user_id, password).await
+    perform_login_with_base_url(base, user_id, password, is_demo).await
 }
 
 /// テスト可能なログイン実装（base_url を引数で受け取る）。
+///
+/// `is_demo` は `exchange::adapter::tachibana::login` の戻り値には含まれないため、
+/// 呼び出し側で受け取った値を TachibanaSession に上書き設定する。
+/// これにより、セッション単位でデモ/本番を区別できる。
 pub async fn perform_login_with_base_url(
     base_url: &str,
     user_id: String,
     password: String,
+    is_demo: bool,
 ) -> Result<TachibanaSession, String> {
     let client = reqwest::Client::new();
-    let session = exchange::adapter::tachibana::login(&client, base_url, user_id, password)
+    let mut session = exchange::adapter::tachibana::login(&client, base_url, user_id, password)
         .await
         .map_err(tachibana_error_to_message)?;
-
+    session.is_demo = is_demo;
     Ok(session)
 }
 
@@ -188,6 +193,7 @@ mod tests {
             url_price: "https://price.test/".to_string(),
             url_event: "https://event.test/".to_string(),
             url_event_ws: "wss://ws.test/".to_string(),
+            is_demo: false,
         };
         store_session(session);
         let retrieved = get_session().expect("セッションが取得できるべき");
@@ -206,6 +212,7 @@ mod tests {
             url_price: "https://price.test/".to_string(),
             url_event: "https://event.test/".to_string(),
             url_event_ws: "wss://ws.test/".to_string(),
+            is_demo: false,
         };
         store_session(session);
         clear_session();
@@ -223,6 +230,7 @@ mod tests {
             url_price: "https://persist.test/price/".to_string(),
             url_event: "https://persist.test/event/".to_string(),
             url_event_ws: "wss://persist.test/ws/".to_string(),
+            is_demo: false,
         };
 
         persist_session(&session);
@@ -260,9 +268,13 @@ mod tests {
             .await;
 
         let base = format!("{}/", server.url());
-        let result =
-            perform_login_with_base_url(&base, "testuser".to_string(), "testpass".to_string())
-                .await;
+        let result = perform_login_with_base_url(
+            &base,
+            "testuser".to_string(),
+            "testpass".to_string(),
+            true,
+        )
+        .await;
 
         let session = result.expect("ログイン成功でセッションが返るべき");
         assert_eq!(session.url_price, "https://virtual.test/price/");
@@ -289,7 +301,8 @@ mod tests {
 
         let base = format!("{}/", server.url());
         let result =
-            perform_login_with_base_url(&base, "wrong".to_string(), "wrong".to_string()).await;
+            perform_login_with_base_url(&base, "wrong".to_string(), "wrong".to_string(), true)
+                .await;
 
         let err = result.expect_err("認証失敗でエラーが返るべき");
         assert!(
@@ -325,12 +338,82 @@ mod tests {
 
         let base = format!("{}/", server.url());
         let result =
-            perform_login_with_base_url(&base, "user".to_string(), "pass".to_string()).await;
+            perform_login_with_base_url(&base, "user".to_string(), "pass".to_string(), true).await;
 
         let err = result.expect_err("未読書面エラーが返るべき");
         assert!(
             err.contains("書面") || err.contains("未読"),
             "未読書面のメッセージであるべき: {err}"
+        );
+    }
+
+    // ── tachibana_demo_guard: perform_login が is_demo を session に反映 ────
+
+    #[tokio::test]
+    async fn perform_login_with_base_url_sets_is_demo_true_on_returned_session() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("POST", mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                    "sCLMID": "CLMAuthLoginAck",
+                    "sResultCode": "0",
+                    "sUrlRequest": "https://demo.test/request/",
+                    "sUrlMaster": "https://demo.test/master/",
+                    "sUrlPrice": "https://demo.test/price/",
+                    "sUrlEvent": "https://demo.test/event/",
+                    "sUrlEventWebSocket": "wss://demo.test/ws/",
+                    "sKinsyouhouMidokuFlg": "0",
+                    "sResultText": ""
+                }"#,
+            )
+            .create_async()
+            .await;
+
+        let base = format!("{}/", server.url());
+        let session =
+            perform_login_with_base_url(&base, "user".to_string(), "pass".to_string(), true)
+                .await
+                .expect("ログイン成功");
+        assert!(
+            session.is_demo,
+            "is_demo=true で呼び出した場合は session.is_demo=true であるべき"
+        );
+    }
+
+    #[tokio::test]
+    async fn perform_login_with_base_url_sets_is_demo_false_on_returned_session() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("POST", mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                    "sCLMID": "CLMAuthLoginAck",
+                    "sResultCode": "0",
+                    "sUrlRequest": "https://prod.test/request/",
+                    "sUrlMaster": "https://prod.test/master/",
+                    "sUrlPrice": "https://prod.test/price/",
+                    "sUrlEvent": "https://prod.test/event/",
+                    "sUrlEventWebSocket": "wss://prod.test/ws/",
+                    "sKinsyouhouMidokuFlg": "0",
+                    "sResultText": ""
+                }"#,
+            )
+            .create_async()
+            .await;
+
+        let base = format!("{}/", server.url());
+        let session =
+            perform_login_with_base_url(&base, "user".to_string(), "pass".to_string(), false)
+                .await
+                .expect("ログイン成功");
+        assert!(
+            !session.is_demo,
+            "is_demo=false で呼び出した場合は session.is_demo=false であるべき"
         );
     }
 }

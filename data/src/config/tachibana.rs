@@ -69,6 +69,7 @@ mod tests {
             url_price: "https://price.test/".to_string(),
             url_event: "https://event.test/".to_string(),
             url_event_ws: "wss://ws.test/".to_string(),
+            is_demo: false,
         };
 
         save_session(&session);
@@ -94,6 +95,7 @@ mod tests {
             url_price: "https://price.test/".to_string(),
             url_event: "https://event.test/".to_string(),
             url_event_ws: "wss://ws.test/".to_string(),
+            is_demo: false,
         };
 
         save_session(&session);
