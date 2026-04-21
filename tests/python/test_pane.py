@@ -1,15 +1,29 @@
-"""test_pane.py — Pane クラスの実アプリ疎通テスト"""
+"""test_pane.py — Pane HTTP API の実アプリ疎通テスト"""
 from __future__ import annotations
 
-import flowsurface as fs
+import httpx
+
+BASE_URL = "http://127.0.0.1:9876"
 
 START = "2024-01-15 09:00:00"
 END = "2024-01-15 15:30:00"
 
 
+def _get(path: str, **params) -> dict:
+    r = httpx.get(f"{BASE_URL}{path}", params=params, timeout=5.0)
+    r.raise_for_status()
+    return r.json()
+
+
+def _post(path: str, body: dict | None = None) -> dict:
+    r = httpx.post(f"{BASE_URL}{path}", json=body, timeout=5.0)
+    r.raise_for_status()
+    return r.json()
+
+
 def _first_pane_id() -> str:
-    body = fs.pane.list
-    panes = body.get("panes", [])  # type: ignore[union-attr]
+    body = _get("/api/pane/list")
+    panes = body.get("panes", [])
     assert panes, "ペインが存在しない"
     return panes[0]["id"]
 
@@ -17,12 +31,12 @@ def _first_pane_id() -> str:
 # ── list ──────────────────────────────────────────────────────────────────────
 
 def test_pane_list_returns_dict():
-    result = fs.pane.list
+    result = _get("/api/pane/list")
     assert isinstance(result, dict)
 
 
 def test_pane_list_has_panes_key():
-    result = fs.pane.list
+    result = _get("/api/pane/list")
     assert "panes" in result
 
 
@@ -30,7 +44,7 @@ def test_pane_list_has_panes_key():
 
 def test_chart_snapshot_returns_dict():
     pane_id = _first_pane_id()
-    result = fs.pane.chart_snapshot(pane_id)
+    result = _get("/api/pane/chart-snapshot", pane_id=pane_id)
     assert isinstance(result, dict)
 
 
@@ -38,7 +52,10 @@ def test_chart_snapshot_returns_dict():
 
 def test_set_ticker_returns_dict():
     pane_id = _first_pane_id()
-    result = fs.pane.set_ticker(pane_id, "BinanceLinear:BTCUSDT")
+    result = _post(
+        "/api/pane/set-ticker",
+        {"pane_id": pane_id, "ticker": "BinanceLinear:BTCUSDT"},
+    )
     assert isinstance(result, dict)
 
 
@@ -46,7 +63,10 @@ def test_set_ticker_returns_dict():
 
 def test_set_timeframe_returns_dict():
     pane_id = _first_pane_id()
-    result = fs.pane.set_timeframe(pane_id, "1m")
+    result = _post(
+        "/api/pane/set-timeframe",
+        {"pane_id": pane_id, "timeframe": "1m"},
+    )
     assert isinstance(result, dict)
 
 
@@ -54,13 +74,16 @@ def test_set_timeframe_returns_dict():
 
 def test_split_and_close():
     pane_id = _first_pane_id()
-    split_result = fs.pane.split(pane_id, axis="Vertical")
+    split_result = _post(
+        "/api/pane/split",
+        {"pane_id": pane_id, "axis": "Vertical"},
+    )
     assert isinstance(split_result, dict)
 
-    after = fs.pane.list
-    panes = after.get("panes", [])  # type: ignore[union-attr]
+    after = _get("/api/pane/list")
+    panes = after.get("panes", [])
     new_ids = [p["id"] for p in panes if p["id"] != pane_id]
     assert new_ids, "分割後に新しいペインが存在しない"
 
-    close_result = fs.pane.close(new_ids[0])
+    close_result = _post("/api/pane/close", {"pane_id": new_ids[0]})
     assert isinstance(close_result, dict)
