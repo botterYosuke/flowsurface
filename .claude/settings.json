@@ -116,7 +116,12 @@
       "Bash(python tests/s19_tachibana_chart_snapshot.py)",
       "Bash(python tests/s6_mixed_timeframes.py)",
       "Bash(python tests/s23_mid_replay_ticker_change.py)",
-      "Bash(xargs -I{} grep -c \"#\\\\[test\\\\]\" {})"
+      "Bash(xargs -I{} grep -c \"#\\\\[test\\\\]\" {})",
+      "Bash(dir \"c:\\\\Users\\\\sasai\\\\Documents\\\\flowsurface\\\\tests\\\\python\")",
+      "Edit(/.claude/skills/marimo/**)",
+      "Bash(xargs -I {} echo {})",
+      "Edit(/.claude/skills/立花証券・ｅ支店・ＡＰＩ/**)",
+      "Edit(/.claude/skills/tachibana/**)"
     ],
     "additionalDirectories": [
       "C:\\Users\\sasai\\Documents\\marimo\\.claude\\plans",

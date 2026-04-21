@@ -7,7 +7,7 @@ export default defineConfig({
   base: '/flowsurface/',
 
   // plan/ は開発者向け作業ドキュメントのため除外
-  srcExclude: ['plan/**', 'spec/tachibana/**', `spec/kabucom/**`],
+  srcExclude: ['plan/**'],
 
   // plan/ は srcExclude で除外済み、../src/ は Rust ソースファイルのため無視
   ignoreDeadLinks: [
