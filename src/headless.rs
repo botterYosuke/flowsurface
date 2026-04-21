@@ -771,8 +771,12 @@ impl HeadlessEngine {
                 reply.send(self.step_forward());
             }
             ApiCommand::Replay(ReplayCommand::Toggle) => {
-                // headless では常に Replay モードなので no-op
-                reply.send(self.get_status_json());
+                let result = if self.is_playing() {
+                    self.pause()
+                } else {
+                    self.resume()
+                };
+                reply.send(result);
             }
             ApiCommand::Replay(ReplayCommand::SetMode { .. }) => {
                 // headless では常に Replay モードなので no-op

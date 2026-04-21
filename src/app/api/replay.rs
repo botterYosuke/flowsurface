@@ -67,7 +67,12 @@ impl Flowsurface {
                 }
             }
             replay::ReplayCommand::Toggle => {
-                let task = self.handle_replay(ReplayMessage::User(ReplayUserMessage::ToggleMode));
+                let msg = if self.replay.is_playing() {
+                    ReplayMessage::User(ReplayUserMessage::Pause)
+                } else {
+                    ReplayMessage::User(ReplayUserMessage::Resume)
+                };
+                let task = self.handle_replay(msg);
                 reply_tx.send(reply_replay_status(self));
                 return task;
             }
