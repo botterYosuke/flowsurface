@@ -161,6 +161,8 @@ pub struct KlineChart {
     last_tick: Instant,
     /// リプレイ中は true。fetch_missing_data による live API fetch を抑制する。
     replay_mode: bool,
+    /// Phase 4a: ナラティブマーカー。リプレイ時のエントリー/エグジット可視化用。
+    pub(crate) narrative_markers: Vec<crate::narrative::marker::NarrativeMarker>,
 }
 
 impl KlineChart {
@@ -252,6 +254,7 @@ impl KlineChart {
                     study_configurator: study::Configurator::new(),
                     last_tick: Instant::now(),
                     replay_mode: false,
+                    narrative_markers: Vec::new(),
                 }
             }
             Basis::Tick(interval) => {
@@ -309,6 +312,7 @@ impl KlineChart {
                     study_configurator: study::Configurator::new(),
                     last_tick: Instant::now(),
                     replay_mode: false,
+                    narrative_markers: Vec::new(),
                 }
             }
         }
@@ -457,6 +461,15 @@ impl KlineChart {
 
     pub fn raw_trades(&self) -> Vec<Trade> {
         self.raw_trades.clone()
+    }
+
+    /// Phase 4a: ナラティブマーカーを設定する。設定後はチャート再描画が必要。
+    pub fn set_narrative_markers(
+        &mut self,
+        markers: Vec<crate::narrative::marker::NarrativeMarker>,
+    ) {
+        self.narrative_markers = markers;
+        self.chart.cache.clear_all();
     }
 
     pub fn set_handle(&mut self, handle: Handle) {

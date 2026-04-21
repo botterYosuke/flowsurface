@@ -279,10 +279,18 @@ Phase 2 の `VirtualExchange::on_tick()` が返す `FillEvent`（`src/replay/vir
 
 ### サブフェーズ D: チャート可視化
 
-- [ ] **D-1**: `NarrativeMarker` 構造体・Canvas への描画実装
-  - ビジュアルテスト（`e2e` 内スクショ比較）
-- [ ] **D-2**: リプレイの `current_time` 範囲内のナラティブのみ描画
-- [ ] **D-3**: マーカー種別の色分け（buy=緑三角 / sell=赤三角）
+- [x] ✅ **D-1**: `NarrativeMarker` 構造体（`src/narrative/marker.rs`）・Canvas への描画実装
+  - `from_narrative()` で 1 ナラティブ → 1〜2 マーカー（エントリー必須、outcome があればエグジット追加）
+  - `draw_markers()` で可視範囲フィルタ + 三角形/矩形描画
+  - `KlineChart::set_narrative_markers()` セッター + `draw.rs` でリプレイモード時のみ描画
+  - テスト: `narrative::marker::tests::{narrative_without_outcome_yields_only_entry, narrative_with_outcome_yields_entry_and_exit, buy_and_sell_get_different_colors, draw_markers_skips_outside_visible_range}`
+- [x] ✅ **D-2**: リプレイの `current_time` 範囲内のナラティブのみ描画（`draw_markers` 内で `visible_range_ms` によりフィルタ、`replay_mode` true の時だけ描画）
+- [x] ✅ **D-3**: マーカー種別の色分け（buy=緑三角 / sell=赤三角 / エグジットは矩形 + アルファ 0.75）
+
+**データ配信経路**: `Message::SetNarrativeMarkers(Vec<NarrativeMarker>)` を新設し、
+- POST /api/agent/narrative 成功（status 201）時
+- FillEvent 発火時
+の両方から `refresh_narrative_markers_task()` を Task::perform で起動 → 全 Kline ペインに配信。
 
 ### サブフェーズ E: Python SDK 拡張
 
@@ -363,7 +371,7 @@ Cargo.toml                           # rusqlite（bundled）・flate2・sha2 追
 - [x] ✅ サブフェーズ A（Narrative Store）
 - [x] ✅ サブフェーズ B（HTTP API）
 - [x] ✅ サブフェーズ C（FillEvent 連携）
-- [ ] サブフェーズ D（チャート可視化）
+- [x] ✅ サブフェーズ D（チャート可視化）
 - [ ] サブフェーズ E（Python SDK 拡張）
 - [ ] サブフェーズ F（E2E テスト）
 - [ ] `/verification-loop` 通過

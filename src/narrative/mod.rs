@@ -9,6 +9,7 @@
 //! - `store`: SQLite メタデータストア（`NarrativeStore` trait + rusqlite 実装）
 //! - `marker`: チャート Canvas マーカー描画用
 
+pub mod marker;
 pub mod model;
 pub mod service;
 pub mod snapshot_store;

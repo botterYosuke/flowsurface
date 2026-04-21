@@ -229,6 +229,10 @@ impl Flowsurface {
                     let ticker = stream.ticker_info().ticker.to_string();
                     let clock_ms = self.replay.current_time_ms().unwrap_or(0);
                     let fills = engine.on_tick(&ticker, &trades, clock_ms);
+                    if !fills.is_empty() {
+                        // Phase 4a D-1: outcome 反映後にマーカー再描画を依頼。
+                        all_tasks.push(self.refresh_narrative_markers_task());
+                    }
                     for fill in fills {
                         // ナラティブ outcome 自動更新（Phase 4a C-1）
                         let narrative_store = self.narrative_store.clone();

@@ -123,6 +123,9 @@ enum Message {
         status: u16,
         body: String,
     },
+    /// アクティブダッシュボード上の全 KlineChart に最新ナラティブマーカーを配信する。
+    /// POST /api/agent/narrative 成功時と FillEvent 発火時にトリガーされる。
+    SetNarrativeMarkers(Vec<narrative::marker::NarrativeMarker>),
     Replay(ReplayMessage),
     ReplayApi(replay_api::ApiMessage),
     /// 完了は気にしないファイア・アンド・フォーゲットの async 結果用。
@@ -161,7 +164,10 @@ impl Flowsurface {
                 status,
                 body,
             } => {
-                self.handle_narrative_api_reply(reply, status, body);
+                return self.handle_narrative_api_reply(reply, status, body);
+            }
+            Message::SetNarrativeMarkers(markers) => {
+                self.handle_set_narrative_markers(markers);
             }
             Message::Noop => {}
             Message::MarketWsEvent(event) => return self.handle_market_ws_event(event),
