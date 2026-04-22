@@ -80,6 +80,11 @@ pub enum VirtualExchangeCommand {
 pub enum AgentSessionCommand {
     /// `POST /api/agent/session/:id/step`: 1 バー進行 + 副作用同梱。
     Step { session_id: String },
+    /// `POST /api/agent/session/:id/order`: 仮想注文（冪等性あり）。
+    PlaceOrder {
+        session_id: String,
+        request: Box<crate::api::order_request::AgentOrderRequest>,
+    },
 }
 
 /// ナラティブ API コマンド（Phase 4a）。
@@ -503,6 +508,19 @@ fn parse_agent_session_step(path: &str) -> Result<ApiCommand, RouteError> {
     }))
 }
 
+fn parse_agent_session_order(path: &str, body: &str) -> Result<ApiCommand, RouteError> {
+    let session_id = extract_agent_session_id(path, "order")?;
+    if session_id != "default" {
+        return Err(RouteError::NotImplemented);
+    }
+    let request = crate::api::order_request::parse_agent_order_request(body)
+        .map_err(|_| RouteError::BadRequest)?;
+    Ok(ApiCommand::AgentSession(AgentSessionCommand::PlaceOrder {
+        session_id: session_id.to_string(),
+        request: Box::new(request),
+    }))
+}
+
 /// "YYYY-MM-DD HH:MM" 形式の日時文字列を検証する。不正なら RouteError::BadRequest を返す。
 fn validate_datetime_str(s: &str) -> Result<(), RouteError> {
     chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M")
@@ -599,6 +617,9 @@ fn route(method: &str, path: &str, body: &str) -> Result<ApiCommand, RouteError>
         // ── Agent 専用 Replay API（Phase 4b-1）────────────────────────────
         ("POST", p) if p.starts_with("/api/agent/session/") && p.ends_with("/step") => {
             parse_agent_session_step(p)
+        }
+        ("POST", p) if p.starts_with("/api/agent/session/") && p.ends_with("/order") => {
+            parse_agent_session_order(p, body)
         }
 
         // ── 立花証券余力情報 ──────────────────────────────────────────────
@@ -1281,6 +1302,96 @@ mod tests {
             "",
         );
         assert!(matches!(result, Err(RouteError::NotImplemented)));
+    }
+
+    // ── route tests: agent session order (Phase 4b-1 サブフェーズ E) ──
+
+    const VALID_ORDER_BODY: &str = r#"{
+        "client_order_id": "cli_42",
+        "ticker": {"exchange": "HyperliquidLinear", "symbol": "BTC"},
+        "side": "buy",
+        "qty": 0.1,
+        "order_type": {"market": {}}
+    }"#;
+
+    #[test]
+    fn route_agent_session_order_accepts_default_with_valid_body() {
+        let cmd = route(
+            "POST",
+            "/api/agent/session/default/order",
+            VALID_ORDER_BODY,
+        )
+        .unwrap();
+        match cmd {
+            ApiCommand::AgentSession(AgentSessionCommand::PlaceOrder { session_id, request }) => {
+                assert_eq!(session_id, "default");
+                assert_eq!(request.client_order_id.as_str(), "cli_42");
+                assert_eq!(request.ticker.symbol, "BTC");
+            }
+            other => panic!("expected PlaceOrder, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn route_agent_session_order_rejects_non_default_session() {
+        let result = route("POST", "/api/agent/session/other/order", VALID_ORDER_BODY);
+        assert!(matches!(result, Err(RouteError::NotImplemented)));
+    }
+
+    #[test]
+    fn route_agent_session_order_rejects_string_ticker() {
+        let body = r#"{
+            "client_order_id": "cli_1",
+            "ticker": "HyperliquidLinear:BTC",
+            "side": "buy",
+            "qty": 0.1,
+            "order_type": {"market": {}}
+        }"#;
+        let result = route("POST", "/api/agent/session/default/order", body);
+        assert!(matches!(result, Err(RouteError::BadRequest)), "got {result:?}");
+    }
+
+    #[test]
+    fn route_agent_session_order_rejects_missing_order_type() {
+        let body = r#"{
+            "client_order_id": "cli_1",
+            "ticker": {"exchange": "X", "symbol": "Y"},
+            "side": "buy",
+            "qty": 0.1
+        }"#;
+        let result = route("POST", "/api/agent/session/default/order", body);
+        assert!(matches!(result, Err(RouteError::BadRequest)));
+    }
+
+    #[test]
+    fn route_agent_session_order_rejects_missing_client_order_id() {
+        let body = r#"{
+            "ticker": {"exchange": "X", "symbol": "Y"},
+            "side": "buy",
+            "qty": 0.1,
+            "order_type": {"market": {}}
+        }"#;
+        let result = route("POST", "/api/agent/session/default/order", body);
+        assert!(matches!(result, Err(RouteError::BadRequest)));
+    }
+
+    #[test]
+    fn route_agent_session_order_rejects_invalid_client_order_id_charset() {
+        let body = r#"{
+            "client_order_id": "cli 42",
+            "ticker": {"exchange": "X", "symbol": "Y"},
+            "side": "buy",
+            "qty": 0.1,
+            "order_type": {"market": {}}
+        }"#;
+        let result = route("POST", "/api/agent/session/default/order", body);
+        assert!(matches!(result, Err(RouteError::BadRequest)));
+    }
+
+    #[test]
+    fn route_agent_session_order_rejects_get_method() {
+        let result = route("GET", "/api/agent/session/default/order", VALID_ORDER_BODY);
+        assert!(matches!(result, Err(RouteError::NotFound)));
     }
 
     #[test]

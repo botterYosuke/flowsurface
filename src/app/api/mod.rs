@@ -95,14 +95,14 @@ impl Flowsurface {
                 return self.handle_narrative_api(cmd, reply_tx);
             }
             ApiCommand::AgentSession(cmd) => {
-                // Phase 4b-1 サブフェーズ B: ルーティングのみ実装済み。
-                // サブフェーズ C 以降で step の副作用同梱レスポンスを実装する。
+                // GUI 側は Phase 4b-1 全サブフェーズで 501 スタブを維持
+                // （agent API の主要ユースケースは Python SDK + Headless）。
                 use replay_api::AgentSessionCommand;
                 match cmd {
-                    AgentSessionCommand::Step { .. } => {
+                    AgentSessionCommand::Step { .. } | AgentSessionCommand::PlaceOrder { .. } => {
                         reply_tx.send_status(
                             501,
-                            r#"{"error":"agent session step not yet implemented (Phase 4b-1 subphase C pending)"}"#
+                            r#"{"error":"agent session commands not yet supported in GUI mode; use headless"}"#
                                 .to_string(),
                         );
                     }

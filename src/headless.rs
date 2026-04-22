@@ -144,6 +144,10 @@ struct HeadlessEngine {
     narrative_store: std::sync::Arc<crate::narrative::store::NarrativeStore>,
     snapshot_store: crate::narrative::snapshot_store::SnapshotStore,
     data_root: std::path::PathBuf,
+    /// Agent 専用 Replay API の "default" セッション state（Phase 4b-1 サブフェーズ E）。
+    /// `client_order_id` 冪等性マップを持ち、`VirtualExchange::session_generation()`
+    /// の変化で自動クリアされる。
+    agent_session_state: crate::api::agent_session_state::AgentSessionState,
 }
 
 impl HeadlessEngine {
@@ -177,6 +181,7 @@ impl HeadlessEngine {
             ),
             snapshot_store: crate::narrative::snapshot_store::SnapshotStore::new(data_root.clone()),
             data_root,
+            agent_session_state: crate::api::agent_session_state::AgentSessionState::new(),
         }
     }
 
@@ -213,6 +218,8 @@ impl HeadlessEngine {
         self.state.range_input.start = start.to_string();
         self.state.range_input.end = end.to_string();
         self.virtual_engine.reset();
+        // ADR-0001 SessionLifecycleEvent::Started — agent state map をクリアさせる。
+        self.virtual_engine.mark_session_started();
 
         // kline ロードを別タスクで実行
         let tx = self.load_tx.clone();
@@ -467,6 +474,7 @@ impl HeadlessEngine {
                 clock.seek(start);
             }
             self.virtual_engine.reset();
+            self.virtual_engine.mark_session_reset();
             return serde_json::json!({"ok": true}).to_string();
         }
 
@@ -507,8 +515,9 @@ impl HeadlessEngine {
             clock.seek(new_time);
         }
 
-        // 時刻が後退したため仮想エンジンをリセット
+        // 時刻が後退したため仮想エンジンをリセット + lifecycle Reset 発火
         self.virtual_engine.reset();
+        self.virtual_engine.mark_session_reset();
 
         serde_json::json!({"ok": true, "current_time": new_time}).to_string()
     }
@@ -629,6 +638,98 @@ impl HeadlessEngine {
                 })
             }
             _ => None,
+        }
+    }
+
+    /// `POST /api/agent/session/default/order` を処理する（Phase 4b-1 サブフェーズ E）。
+    ///
+    /// ADR-0001 / phase4b_agent_replay_api.md §3.3, §4.4, §4.5 に基づく。
+    /// - session 未起動は 404 + hint
+    /// - `client_order_id` 重複 & body 一致 → 200 + `idempotent_replay: true`
+    /// - `client_order_id` 重複 & body 相違 → 409 Conflict
+    /// - 新規 → 201 Created
+    fn agent_session_place_order(
+        &mut self,
+        request: crate::api::order_request::AgentOrderRequest,
+    ) -> (u16, String) {
+        use crate::api::agent_session_state::PlaceOrderOutcome;
+        use crate::api::order_request::{AgentOrderSide, AgentOrderType};
+        use crate::replay::virtual_exchange::{
+            PositionSide, VirtualOrder, VirtualOrderStatus, VirtualOrderType,
+        };
+
+        // session 状態チェック（step と同じ 404 / 503 ルール）。
+        match &self.state.session {
+            ReplaySession::Idle => {
+                return (
+                    404,
+                    r#"{"error":"session not started","hint":"start a replay session first (see agent_replay_api.md Getting Started)"}"#
+                        .to_string(),
+                );
+            }
+            ReplaySession::Loading { .. } => {
+                return (503, r#"{"error":"session loading"}"#.to_string());
+            }
+            ReplaySession::Active { .. } => {}
+        }
+
+        // 発注前に lifecycle イベントを観測して map を必要に応じクリア。
+        self.agent_session_state
+            .observe_generation(self.virtual_engine.session_generation());
+
+        let key = request.to_key();
+        // 仮 UUID を採番（idempotent replay や conflict では使われない = 捨てられる）。
+        let prospective_order_id = uuid::Uuid::new_v4().to_string();
+        let outcome = self.agent_session_state.place_or_replay(
+            request.client_order_id.clone(),
+            key,
+            prospective_order_id,
+        );
+
+        match outcome {
+            PlaceOrderOutcome::Created { order_id } => {
+                // VirtualExchange に実発注。
+                let side = match request.side {
+                    AgentOrderSide::Buy => PositionSide::Long,
+                    AgentOrderSide::Sell => PositionSide::Short,
+                };
+                let order_type = match request.order_type {
+                    AgentOrderType::Market {} => VirtualOrderType::Market,
+                    AgentOrderType::Limit { price } => VirtualOrderType::Limit { price },
+                };
+                let virtual_order = VirtualOrder {
+                    order_id: order_id.clone(),
+                    // VirtualOrder.ticker は現状 symbol 単体。
+                    ticker: request.ticker.symbol.clone(),
+                    side,
+                    qty: request.qty,
+                    order_type,
+                    placed_time_ms: self.state.current_time(),
+                    status: VirtualOrderStatus::Pending,
+                };
+                self.virtual_engine.place_order(virtual_order);
+                let body = serde_json::json!({
+                    "order_id": order_id,
+                    "client_order_id": request.client_order_id.as_str(),
+                    "idempotent_replay": false,
+                });
+                (201, body.to_string())
+            }
+            PlaceOrderOutcome::IdempotentReplay { order_id } => {
+                let body = serde_json::json!({
+                    "order_id": order_id,
+                    "client_order_id": request.client_order_id.as_str(),
+                    "idempotent_replay": true,
+                });
+                (200, body.to_string())
+            }
+            PlaceOrderOutcome::Conflict { existing_order_id } => {
+                let body = serde_json::json!({
+                    "error": "client_order_id conflict with different request body",
+                    "existing_order_id": existing_order_id,
+                });
+                (409, body.to_string())
+            }
         }
     }
 
@@ -766,10 +867,21 @@ impl HeadlessEngine {
             }
         };
 
-        // client_order_id はサブフェーズ E で埋める。本サブフェーズでは None 固定。
+        // サブフェーズ E: fill.order_id から agent_session_state を逆引きして
+        // client_order_id を埋める。他経路（UI リモコン `/api/replay/order`）発注の fill
+        // は agent の map に無いため None のまま（設計通り）。
+        // 世代変化を先に観測してから逆引きする（世代跨ぎの取り違えを防ぐ）。
+        self.agent_session_state
+            .observe_generation(self.virtual_engine.session_generation());
         let step_fills: Vec<StepFill> = fills
             .iter()
-            .map(|f| StepFill::from_event(f, None))
+            .map(|f| {
+                let client_order_id = self
+                    .agent_session_state
+                    .client_order_id_for(&f.order_id)
+                    .map(|c| c.as_str().to_string());
+                StepFill::from_event(f, client_order_id)
+            })
             .collect();
 
         let resp = StepResponse::new(new_time, reached_end, observation, step_fills)
@@ -1032,6 +1144,7 @@ impl HeadlessEngine {
                 clock.seek(start);
             }
             self.virtual_engine.reset();
+            self.virtual_engine.mark_session_reset();
         }
         serde_json::json!({ "ok": true }).to_string()
     }
@@ -1200,6 +1313,13 @@ impl HeadlessEngine {
             }) => {
                 // session_id は route 層で "default" に限定済み（非 default は 501 で既に拒否）。
                 let (status, body) = self.agent_session_step().await;
+                reply.send_status(status, body);
+            }
+            ApiCommand::AgentSession(crate::replay_api::AgentSessionCommand::PlaceOrder {
+                session_id: _,
+                request,
+            }) => {
+                let (status, body) = self.agent_session_place_order(*request);
                 reply.send_status(status, body);
             }
             // headless で未対応のコマンドは 501 を返す
@@ -1873,7 +1993,8 @@ mod tests {
         let mut engine =
             make_active_engine_with_klines(start_ms, start_ms + step_ms * 5, step_ms, start_ms);
 
-        // narrative を linked_order_id="ord_1" 付きで事前登録。
+        // 永続 SQLite の蓄積を避けるため、このテスト実行固有の UUID を order_id に採用。
+        let unique_order_id = format!("ord_d_sync_{}", uuid::Uuid::new_v4());
         let narrative_id = uuid::Uuid::new_v4();
         let narrative = Narrative {
             id: narrative_id,
@@ -1895,9 +2016,9 @@ mod tests {
             },
             confidence: 0.5,
             outcome: None,
-            // 共有 SQLite（デフォルト store）のテスト並行実行で "ord_1" が
-            // 他テストと衝突するため、本テスト専用のユニーク order_id を使う。
-            linked_order_id: Some("ord_d_sync_unique".to_string()),
+            // 共有 SQLite（デフォルト store）はテスト間で永続化されるため、
+            // 毎回ユニークな order_id を生成して蓄積による衝突を防ぐ。
+            linked_order_id: Some(unique_order_id.clone()),
             public: false,
             created_at_ms: start_ms as i64,
             idempotency_key: None,
@@ -1906,7 +2027,7 @@ mod tests {
 
         // 成行注文を置いて step — 次 tick で即約定する。
         engine.virtual_engine.place_order(VirtualOrder {
-            order_id: "ord_d_sync_unique".to_string(),
+            order_id: unique_order_id.clone(),
             ticker: "BTC".to_string(),
             side: PositionSide::Long,
             qty: 0.1,
@@ -1937,5 +2058,143 @@ mod tests {
         let outcome = stored.outcome.expect("outcome must be populated");
         assert!(outcome.fill_price > 0.0);
         assert_eq!(outcome.fill_time_ms, (start_ms + step_ms) as i64);
+    }
+
+    // ── agent_session_place_order (Phase 4b-1 サブフェーズ E) ────────────────
+
+    fn sample_order_request(cli_id: &str, qty: f64) -> crate::api::order_request::AgentOrderRequest {
+        use crate::api::contract::{ClientOrderId, TickerContract};
+        use crate::api::order_request::{AgentOrderRequest, AgentOrderSide, AgentOrderType};
+        AgentOrderRequest {
+            client_order_id: ClientOrderId::new(cli_id).unwrap(),
+            ticker: TickerContract::new("HyperliquidLinear", "BTC"),
+            side: AgentOrderSide::Buy,
+            qty,
+            order_type: AgentOrderType::Market {},
+        }
+    }
+
+    #[tokio::test]
+    async fn place_order_returns_404_when_session_idle() {
+        let ticker = parse_ticker_str("HyperliquidLinear:BTC").unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let mut engine = HeadlessEngine::new(ticker, Timeframe::M1, tx);
+        let (status, body) = engine.agent_session_place_order(sample_order_request("cli_1", 0.1));
+        assert_eq!(status, 404, "body: {body}");
+    }
+
+    #[tokio::test]
+    async fn place_order_creates_new_order_and_returns_201() {
+        let start_ms = 1_000_000u64;
+        let step_ms = 60_000u64;
+        let mut engine =
+            make_active_engine_with_klines(start_ms, start_ms + step_ms * 5, step_ms, start_ms);
+        let (status, body) = engine.agent_session_place_order(sample_order_request("cli_1", 0.1));
+        assert_eq!(status, 201, "body: {body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["client_order_id"], "cli_1");
+        assert_eq!(v["idempotent_replay"], false);
+        assert!(v["order_id"].is_string());
+        // VirtualExchange にも登録されている。
+        assert_eq!(engine.virtual_engine.get_orders().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn place_order_returns_200_idempotent_replay_on_exact_rerun() {
+        let start_ms = 1_000_000u64;
+        let step_ms = 60_000u64;
+        let mut engine =
+            make_active_engine_with_klines(start_ms, start_ms + step_ms * 5, step_ms, start_ms);
+
+        let (s1, b1) = engine.agent_session_place_order(sample_order_request("cli_1", 0.1));
+        assert_eq!(s1, 201);
+        let v1: serde_json::Value = serde_json::from_str(&b1).unwrap();
+        let first_order_id = v1["order_id"].as_str().unwrap().to_string();
+
+        // 同じ client_order_id + 同じ body → 200 + idempotent_replay: true
+        let (s2, b2) = engine.agent_session_place_order(sample_order_request("cli_1", 0.1));
+        assert_eq!(s2, 200, "body: {b2}");
+        let v2: serde_json::Value = serde_json::from_str(&b2).unwrap();
+        assert_eq!(v2["idempotent_replay"], true);
+        assert_eq!(v2["order_id"], first_order_id);
+
+        // VirtualExchange には 1 件のみ。
+        assert_eq!(engine.virtual_engine.get_orders().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn place_order_returns_409_conflict_on_different_body_same_client_order_id() {
+        let start_ms = 1_000_000u64;
+        let step_ms = 60_000u64;
+        let mut engine =
+            make_active_engine_with_klines(start_ms, start_ms + step_ms * 5, step_ms, start_ms);
+
+        let (s1, _) = engine.agent_session_place_order(sample_order_request("cli_1", 0.1));
+        assert_eq!(s1, 201);
+
+        // 同じ cli_1 で qty 違い → 409
+        let (s2, b2) = engine.agent_session_place_order(sample_order_request("cli_1", 0.2));
+        assert_eq!(s2, 409, "body: {b2}");
+        let v: serde_json::Value = serde_json::from_str(&b2).unwrap();
+        assert!(v["error"].as_str().unwrap().contains("conflict"));
+        assert!(v["existing_order_id"].is_string());
+
+        // VirtualExchange には 1 件のみ（衝突時は新規発注しない）。
+        assert_eq!(engine.virtual_engine.get_orders().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn place_order_different_client_order_ids_both_accepted() {
+        let start_ms = 1_000_000u64;
+        let step_ms = 60_000u64;
+        let mut engine =
+            make_active_engine_with_klines(start_ms, start_ms + step_ms * 5, step_ms, start_ms);
+
+        let (s1, _) = engine.agent_session_place_order(sample_order_request("cli_1", 0.1));
+        let (s2, _) = engine.agent_session_place_order(sample_order_request("cli_2", 0.2));
+        assert_eq!(s1, 201);
+        assert_eq!(s2, 201);
+        assert_eq!(engine.virtual_engine.get_orders().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn place_order_map_cleared_after_session_lifecycle_event() {
+        // ADR-0001 不変条件: UI リモコン /play 等が走ると agent map がクリアされる。
+        let start_ms = 1_000_000u64;
+        let step_ms = 60_000u64;
+        let mut engine =
+            make_active_engine_with_klines(start_ms, start_ms + step_ms * 5, step_ms, start_ms);
+
+        let (s1, _) = engine.agent_session_place_order(sample_order_request("cli_1", 0.1));
+        assert_eq!(s1, 201);
+
+        // lifecycle event 発火（実運用では /play / step-backward が呼ぶ）。
+        engine.virtual_engine.mark_session_reset();
+
+        // 同じ cli_1 で qty 違い → 新規受付（クリア後なので 201）。
+        let (s2, b2) = engine.agent_session_place_order(sample_order_request("cli_1", 0.2));
+        assert_eq!(
+            s2, 201,
+            "after lifecycle event, same client_order_id can be reused: {b2}"
+        );
+    }
+
+    #[tokio::test]
+    async fn step_fill_carries_client_order_id_when_placed_via_agent_api() {
+        // サブフェーズ E の重要不変条件: agent API で発注した注文の fill は
+        // step レスポンスの fills 配列で client_order_id を返す。
+        let start_ms = 1_000_000u64;
+        let step_ms = 60_000u64;
+        let mut engine =
+            make_active_engine_with_klines(start_ms, start_ms + step_ms * 5, step_ms, start_ms);
+
+        let (s1, _) = engine.agent_session_place_order(sample_order_request("cli_trace", 0.1));
+        assert_eq!(s1, 201);
+
+        let (_status, body) = engine.agent_session_step().await;
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let fills = v["fills"].as_array().expect("fills array");
+        assert_eq!(fills.len(), 1);
+        assert_eq!(fills[0]["client_order_id"], "cli_trace");
     }
 }
