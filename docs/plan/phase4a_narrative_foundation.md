@@ -576,3 +576,71 @@ Cargo.toml                           # rusqlite（bundled）・flate2・sha2 追
 4. **paused 状態の決定性**: `GET /api/replay/state` を 3 連続呼んでも `current_time_ms` も `klines[-1].close` もまったく同一。エージェントが同じ状態で複数回判断しても観測ぶれは発生しない。
 
 **結論**: Phase 4a は引き続き release ビルドで完全に動作。新規バグ 0 件。次フェーズ Phase 4b の前提として安定している。
+
+### 2026-04-22: 4 回目の実アプリ検証（GUI モード・「人間ではなくエージェント」として体験）
+
+**狙い**: これまでの検証は実質 headless 経路に依存していた。今回は **GUI バイナリを起動したまま**（ウィンドウは開いたまま、人間は触らない）、HTTP API のみで 5 サイクル回し、GUI 経路特有のイベント配線・ストリーム再描画がナラティブ基盤と整合しているかを検査する。
+
+**前提**: debug ビルドで起動（`#[cfg(debug_assertions)]` でのみ `DEV_USER_ID`/`DEV_PASSWORD` による自動ログインが有効）。`.env` から立花デモ環境セッションが keyring に既に永続化されていたため、**自動ログインは発火せず keyring から復元**された。
+
+**結果サマリ**: **新規バグ 2 件発見・1 件根本修正・1 件は既存設計上の制約として記録（Phase 4b 課題）**。`cargo test --lib` **440/440 PASS**（新規ユニットテスト 3 件追加）。
+
+---
+
+**修正バグ 1: GUI 経路で SerTicker 形式の発注がサイレントに永遠 Pending** (`src/replay_api.rs:584-598`)
+
+- **症状**: GUI 起動 → `/api/pane/set-ticker` で `BinanceLinear:BTCUSDT` を貼り → リプレイ paused → `POST /api/replay/order {"ticker":"BinanceLinear:BTCUSDT", ...}` で発注 → 201 で `order_id` 取得 → `step-forward` を 15 回回しても `orders[].status` が `Pending` のまま、`linked_order_id` を持つナラティブの `outcome` も `null` のまま。`/api/replay/portfolio` も `open_positions=[]`。エラーログも 400/4xx も一切出ない。
+- **根本原因**: `/api/replay/state` のレスポンスは `klines[].stream = "BinanceLinear:BTCUSDT:1m"` (SerTicker 形式 + timeframe) で返るのに、エージェントが自然にコピー＆貼り付けする `BinanceLinear:BTCUSDT` を `/api/replay/order` に渡すと、order の内部表現は `ticker = "BinanceLinear:BTCUSDT"` で保存される。一方、約定マッチング側 (`order_book.rs::on_tick` `order.ticker != ticker`) が比較対象として渡される `ticker` は `Ticker::Display`（= `as_str()`）で symbol 単体 `"BTCUSDT"`（src/app/dashboard.rs:375 / src/app/handlers.rs:229 / src/headless.rs:320）。文字列が一致せず**全注文がスキップされ続け**、Pending のまま。エラー伝搬も Toast もないので**完全にサイレント**。
+- **発覚契機**: 自分が初手で `/api/replay/state` の `stream` フィールドをそのまま reuse して `ticker` フィールドに `"BinanceLinear:BTCUSDT"` を入れたことで踏んだ。E2E テスト (`s52_narrative_outcome_link.py:117`) は `"BTCUSDT"` を直接送るので踏まない。仕様 (`docs/spec/replay.md:800,809`) は bare symbol 想定だが、**サイレント受理は DX として最悪**で、エージェントは原因不明の Pending に陥る。
+- **修正**: `parse_virtual_order_command` で `"Exchange:Symbol"` 形式を受け付けて symbol だけを抽出するよう正規化（`src/replay_api.rs:584-598`）。`"Exchange:"` だけで symbol が空の場合は 400 で拒否。後方互換のため bare `"BTCUSDT"` もそのまま通す。
+- **追加テスト** (`src/replay_api.rs:1888-1928`):
+  - `place_order_normalizes_ser_ticker_prefix`: `"BinanceLinear:BTCUSDT"` → 内部 ticker = `"BTCUSDT"`
+  - `place_order_accepts_bare_symbol`: `"BTCUSDT"` がそのまま通る
+  - `place_order_rejects_empty_symbol_after_prefix`: `"BinanceLinear:"` → 400
+- **教訓**: `/api/replay/state` が SerTicker 形式を返す以上、エージェントはそれを再投入する。受信側 API の入力フォーマット契約は**寛容に・ただし silent-broken 経路を作らない**。`order_book::on_tick` の比較ロジック側を SerTicker 一貫にする方が長期的には筋が良い（multi-exchange を考えると）が、Phase 4a スコープでは入力正規化で十分。
+- **再検証**: 修正後 GUI debug build で 5 サイクル全て成功。Cycle 1 (market buy 0.005) は `step-forward x3` で `outcome.fill_price=36310.5` 自動更新、Cycle 2 (limit sell @ +0.05% / `step-forward x10`) は `outcome.fill_price=36309.9` で確定（指値より高値で約定 = 仕様通り）。
+
+---
+
+**未修正バグ 2: GUI 起動時に `--ticker` / `--timeframe` CLI 引数が完全無視される** (`src/main.rs:419-449`)
+
+- **症状**: `./target/release/flowsurface.exe --ticker BinanceLinear:BTCUSDT --timeframe M1` で起動しても、ダッシュボードは保存済み layout（このマシンでは `Tachibana:7203`）をロードし、CLI 引数は一切反映されない。`/api/pane/list` も Tachibana のままで、BinanceLinear 用 kline ストリームは購読されない。
+- **影響**: `tests/e2e/s52_narrative_outcome_link.py` を GUI モード（`IS_HEADLESS` 未設定）で `FLOWSURFACE_BIN=release` 指定して実行すると、`FlowsurfaceEnv._start_process()` が `--ticker BinanceLinear:BTCUSDT --timeframe M1` で spawn するが、GUI はこれを無視するため BTCUSDT ペインが立たない → `synthetic_trades_at_current_time()` が空 → `on_tick()` 呼び出されず → 注文が永遠 Pending → **TC-S52-04 で 30 秒タイムアウト**。一方 S51（純粋にナラティブ CRUD）と S53（payload size）は GUI モードでも 9/9・3/3 PASS。
+- **根本原因**: `src/main.rs:423-429` の `args` 解析は `"--headless"` の有無しか見ていない。clap で `--ticker` / `--timeframe` を取るのは headless 専用 (`HeadlessArgs`)。GUI 起動時はこれらの値を読みもしないし、`Flowsurface::new` も初期 ticker を受け付けるシグネチャになっていない。
+- **回避策（今回はこれで済ませた）**: GUI 起動後に手動で `/api/pane/set-ticker` + `/api/pane/set-timeframe` を呼んで pane を BinanceLinear:BTCUSDT M1 に切り替え、その後リプレイ開始。Cycles 1–5 はこの段取りで全て成功。
+- **判断**: Phase 4a スコープ外（GUI 初期化シーケンスのリファクタが必要、`Flowsurface::new` のシグネチャ変更含む）。Phase 4b で対応。それまでは GUI で E2E を回す側が起動後に pane を構成する必要がある（CLAUDE.md / e2e-testing スキルへの注記推奨）。
+
+---
+
+**5 サイクルの内訳（GUI debug ビルド・修正後）**:
+
+| # | 注文 | snapshot | idempotency_key | public 往復 | outcome 自動 | 結果 |
+|---|---|---|---|---|---|---|
+| 1 | market buy 0.005 | 極小（4 フィールド） | あり（再送 → `idempotent_replay=true`、同 ID） | — | ✅ fill_price=36310.5 (`step-forward x3`) | OK |
+| 2 | limit sell 0.003 @ +0.05% | 極小 | — | true→false | ✅ fill_price=36309.9 (`step-forward x10`、指値より高値で約定) | OK |
+| 3 | 観測のみ x3 連続 | — | — | — | — | `current_time_ms` / `klines[-1].close` 完全一致（決定性 OK） |
+| 4 | market buy 0.001 + 600 KB raw snapshot | 600 KB → gzip 693 B | — | — | （未追跡） | 大容量 201。11 MB は **413 Payload Too Large** で拒否（前回修正の動的バッファが GUI debug でも生きている）|
+| 5 | Python SDK 経由 (`fs.narrative.*`) | 極小 | — | publish→unpublish | — | `create / get / list / publish / unpublish / snapshot / storage_stats` 全 OK（GUI 起動中に外部プロセスから叩く構成）|
+
+**ナラティブ振り返り** (`GET /api/agent/narratives?agent_id=agent-gui-verify-20260422`):
+
+- 全 4 件取得（修正前の cycle 1 試行で `outcome=null` のまま残った 1 件 + 修正後 cycles 1/2 + cycle 4）
+- `GET /api/agent/narrative/:id/snapshot` で cycle 1 の観測（`klines_n: 50`, `last_close: 36329.9`, `time_ms: 1699965000000`）が完全に復元できることを確認 — gzip 解凍 + sha256 検証パス
+- `GET /api/agent/narratives/storage` で `total_count=113`, `total_bytes=11971`, `warn_count=0`
+
+**E2E テスト（release バイナリ起動・GUI モード `IS_HEADLESS` 未設定・`E2E_TICKER=BinanceLinear:BTCUSDT`）**:
+
+- `tests/e2e/s51_narrative_crud.py`: **9/9 PASS**
+- `tests/e2e/s52_narrative_outcome_link.py`: **2/3 FAIL**（TC-S52-04 が outcome タイムアウト。**ナラティブ配線ではなく上記バグ 2（GUI が CLI 引数を無視）が原因**。同テストは headless では従来どおり全 PASS）
+- `tests/e2e/s53_narrative_snapshot_size.py`: **3/3 PASS**
+- `tests/python/test_narrative.py`: **11/11 PASS**（release GUI を background 起動した状態で pytest 実行）
+- `cargo test --lib`: **440/440 PASS**（新規 3 件 + 既存 437 件）
+
+**今回の作業中に得た DX 観察**:
+
+1. **`NarrativeAction.price` は `f64`（Optional ではない）** — market 注文でも `price: 0.0` を入れる必要がある。`null` を渡すと `serde_json::from_value::<NarrativeAction>` が失敗して 400「invalid JSON body」となるが、エラー本文に「price required」のような手掛かりはない。バグ 1 の調査初期にここで 400 を踏んで snapshot 構造の不正を疑ってしまった。Phase 4b で `price: Option<f64>` に変更する設計議論候補（市場注文で価格不明のままナラティブを書く方が自然）。
+2. **GUI 起動シーケンスの遅延**: Tachibana セッション復元 → master 4566 件 disk cache ロード → master HTTP fetch（一部 early return）まで起動から ~3 秒。この間 `/api/pane/set-ticker BinanceLinear:BTCUSDT` を叩くと「ticker info not loaded yet」が返る。リトライ前提の wait ループが必要（実装では retry を入れた）。
+3. **既存ポート衝突への注意**: 今回も最初は別の release プロセスが port 9876 を握っていて、debug binary が `os error 10048` で bind 失敗 → 静かに無能化。GUI でこの状態に陥っても CLI に何も出ない（ファイルログ追跡が必要）。CLAUDE.md / e2e-testing スキルの「ポート衝突」項に既述。
+4. **release バイナリでは `DEV_USER_ID/PASSWORD` 自動ログインが効かない** — `#[cfg(debug_assertions)]` ガード（[`src/screen/login.rs:140`](../../src/screen/login.rs#L140) / [`src/connector/auth.rs:91-100`](../../src/connector/auth.rs#L91)）。E2E を release で回したい場合は事前に keyring セッションを作っておく前提（手動 ID/PW 入力 1 回 → 以降は自動復元）。今回もそのパス。
+
+**結論**: バグ 1（ticker 正規化）は **GUI / headless 両方の API 契約上の silent failure** だったが GUI 経路の体験で初めて踏み抜けた典型例。修正済み・テスト追加済み。バグ 2（GUI が CLI 引数無視）は GUI 起動シーケンスの設計上の制約で Phase 4b 課題。**Phase 4a のナラティブ基盤本体は GUI 起動中でも完全に機能する**ことを再確認。次フェーズ進行に支障なし。

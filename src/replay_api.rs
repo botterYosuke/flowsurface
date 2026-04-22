@@ -581,11 +581,20 @@ fn parse_virtual_order_command(body: &str) -> Result<ApiCommand, RouteError> {
     let parsed: serde_json::Value =
         serde_json::from_str(body).map_err(|_| RouteError::BadRequest)?;
 
-    let ticker = parsed
+    let ticker_raw = parsed
         .get("ticker")
         .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
         .ok_or(RouteError::BadRequest)?;
+    // SerTicker 形式 `"Exchange:Symbol"` で来ても受け付ける。内部の
+    // `on_tick` 比較は Symbol 単体（`Ticker::Display`）なので、ここで
+    // prefix を剥がさないとサイレントに Pending のまま残る。
+    let ticker = ticker_raw
+        .split_once(':')
+        .map(|(_, sym)| sym.to_string())
+        .unwrap_or_else(|| ticker_raw.to_string());
+    if ticker.is_empty() {
+        return Err(RouteError::BadRequest);
+    }
 
     let side = parsed
         .get("side")
@@ -1875,6 +1884,50 @@ mod tests {
         // POST はマッチしない（GET のみ）
         let result = route("POST", "/api/replay/orders", "");
         assert!(matches!(result, Err(RouteError::NotFound)));
+    }
+
+    /// SerTicker 形式（"Exchange:Symbol"）も bare symbol に正規化して受ける。
+    /// `/api/replay/state` が `"stream":"BinanceLinear:BTCUSDT:1m"` を返すため
+    /// エージェントが自然に SerTicker を送り返すパスがある。on_tick 側は
+    /// bare symbol でしか比較しないので、ここで剥がさないとサイレントに
+    /// Pending のまま fill せず、linked narrative の outcome も埋まらない。
+    #[test]
+    fn place_order_normalizes_ser_ticker_prefix() {
+        let body =
+            r#"{"ticker":"BinanceLinear:BTCUSDT","side":"buy","qty":0.005,"order_type":"market"}"#;
+        let cmd = route("POST", "/api/replay/order", body).unwrap();
+        match cmd {
+            ApiCommand::VirtualExchange(VirtualExchangeCommand::PlaceOrder { ticker, .. }) => {
+                assert_eq!(ticker, "BTCUSDT", "SerTicker prefix must be stripped");
+            }
+            _ => panic!("expected PlaceOrder"),
+        }
+    }
+
+    /// bare symbol はそのまま通す（既存 E2E との後方互換）。
+    #[test]
+    fn place_order_accepts_bare_symbol() {
+        let body = r#"{"ticker":"BTCUSDT","side":"sell","qty":0.01,"order_type":"market"}"#;
+        let cmd = route("POST", "/api/replay/order", body).unwrap();
+        match cmd {
+            ApiCommand::VirtualExchange(VirtualExchangeCommand::PlaceOrder {
+                ticker,
+                side,
+                ..
+            }) => {
+                assert_eq!(ticker, "BTCUSDT");
+                assert_eq!(side, "sell");
+            }
+            _ => panic!("expected PlaceOrder"),
+        }
+    }
+
+    /// プレフィックスだけの "Exchange:" は空文字 ticker として 400。
+    #[test]
+    fn place_order_rejects_empty_symbol_after_prefix() {
+        let body = r#"{"ticker":"BinanceLinear:","side":"buy","qty":0.005}"#;
+        let result = route("POST", "/api/replay/order", body);
+        assert!(matches!(result, Err(RouteError::BadRequest)));
     }
 
     // ── body_opt_str_field tests ──
