@@ -941,6 +941,15 @@ impl HeadlessEngine {
             ApiCommand::Narrative(cmd) => {
                 self.handle_narrative_command(cmd, reply).await;
             }
+            ApiCommand::AgentSession(_) => {
+                // Phase 4b-1 サブフェーズ B: ルーティングのみ実装済み。
+                // サブフェーズ C 以降で step の副作用同梱レスポンスを実装する。
+                reply.send_status(
+                    501,
+                    r#"{"error":"agent session step not yet implemented (Phase 4b-1 subphase C pending)"}"#
+                        .to_string(),
+                );
+            }
             // headless で未対応のコマンドは 501 を返す
             ApiCommand::Pane(_)
             | ApiCommand::Auth(_)

@@ -94,6 +94,20 @@ impl Flowsurface {
             ApiCommand::Narrative(cmd) => {
                 return self.handle_narrative_api(cmd, reply_tx);
             }
+            ApiCommand::AgentSession(cmd) => {
+                // Phase 4b-1 サブフェーズ B: ルーティングのみ実装済み。
+                // サブフェーズ C 以降で step の副作用同梱レスポンスを実装する。
+                use replay_api::AgentSessionCommand;
+                match cmd {
+                    AgentSessionCommand::Step { .. } => {
+                        reply_tx.send_status(
+                            501,
+                            r#"{"error":"agent session step not yet implemented (Phase 4b-1 subphase C pending)"}"#
+                                .to_string(),
+                        );
+                    }
+                }
+            }
             #[cfg(debug_assertions)]
             ApiCommand::Test(cmd) => {
                 let (body, task) = self.handle_test_api(cmd);
