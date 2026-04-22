@@ -18,6 +18,13 @@ Reconfigure URL/timeout::
 """
 
 from ._client import ApiError, Client, FlowsurfaceNotRunningError
+from .agent_session import (
+    AgentAdvanceResponse,
+    AgentFill,
+    AgentOrderResponse,
+    AgentSessionApi,
+    AgentStepResponse,
+)
 from .env import FlowsurfaceEnv
 from .narrative import Narrative, NarrativeAction, NarrativeApi, NarrativeOutcome
 
@@ -29,6 +36,12 @@ __all__ = [
     "NarrativeAction",
     "NarrativeOutcome",
     "NarrativeApi",
+    "agent_session",
+    "AgentSessionApi",
+    "AgentStepResponse",
+    "AgentAdvanceResponse",
+    "AgentOrderResponse",
+    "AgentFill",
     "FlowsurfaceNotRunningError",
     "ApiError",
 ]
@@ -36,6 +49,7 @@ __all__ = [
 _client = Client()
 
 narrative: NarrativeApi = NarrativeApi(_client)
+agent_session: AgentSessionApi = AgentSessionApi(_client)
 
 
 def configure(
@@ -48,6 +62,7 @@ def configure(
         base_url: Base URL of the flowsurface HTTP API.
         timeout:  Request timeout in seconds.
     """
-    global _client, narrative
+    global _client, narrative, agent_session
     _client = Client(base_url=base_url, timeout=timeout)
     narrative = NarrativeApi(_client)
+    agent_session = AgentSessionApi(_client)
