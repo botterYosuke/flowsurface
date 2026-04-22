@@ -174,7 +174,11 @@
       "Bash(FLOWSURFACE_BINARY=\"$\\(pwd\\)/target/release/flowsurface.exe\" IS_HEADLESS=true uv run tests/e2e/s51_narrative_crud.py)",
       "Bash(FLOWSURFACE_BINARY=\"$\\(pwd\\)/target/release/flowsurface.exe\" IS_HEADLESS=true uv run tests/e2e/s52_narrative_outcome_link.py)",
       "Bash(FLOWSURFACE_BINARY=\"$\\(pwd\\)/target/release/flowsurface.exe\" IS_HEADLESS=true uv run tests/e2e/s53_narrative_snapshot_size.py)",
-      "Edit(/.claude/skills/agent-experience-verification/**)"
+      "Edit(/.claude/skills/agent-experience-verification/**)",
+      "Bash(./target/release/flowsurface.exe --ticker BinanceLinear:BTCUSDT --timeframe M1)",
+      "Bash(echo \"started PID=$!\")",
+      "Bash(taskkill //PID 6376 //F)",
+      "Bash(tail -15 C:\\\\\\\\Users\\\\\\\\sasai\\\\\\\\AppData\\\\\\\\Local\\\\\\\\Temp\\\\\\\\claude\\\\\\\\c--Users-sasai-Documents-flowsurface\\\\\\\\995a1586-d8d5-4df4-8b36-a534bd0b9b9f\\\\\\\\tasks\\\\\\\\blhv1vqbl.output)"
     ],
     "additionalDirectories": [
       "C:\\Users\\sasai\\Documents\\marimo\\.claude\\plans",
