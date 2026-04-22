@@ -35,6 +35,7 @@
    - [3.8 銘柄検索](#38-銘柄検索)
    - [3.9 Exchange/Venue 定義](#39-exchangevenue-定義)
    - [3.10 注文機能](#310-注文機能)
+   - [3.11 HTTP API（flowsurface 側ファサード）](#311-http-apiflowsurface-側ファサード)
 4. [制約・前提条件](#4-制約前提条件)
 5. [テスト](#5-テスト)
 6. [未対応・将来課題](#6-未対応将来課題)
@@ -484,6 +485,162 @@ keyring 設定（`data/src/config/tachibana.rs`）:
 - `cash_margin`: `"0"` = 現物、`"2"` = 信用新規(制度6ヶ月)、`"4"` = 信用返済(制度)、`"6"` = 信用新規(一般)、`"8"` = 信用返済(一般)
 - `condition`: `"0"` = 指定なし、`"2"` = 寄付、`"4"` = 引け、`"6"` = 不成
 - `price`: `"0"` = 成行、数値文字列 = 指値
+
+### 3.11 HTTP API（flowsurface 側ファサード）
+
+`src/replay_api.rs`（ポート 9876）が立花証券注文・照会機能を HTTP でも公開している。E2E テストと外部エージェントが同一 API を利用する。**全エンドポイントでログイン済みセッションが必須**（未ログイン時は `{"error": "..."}` を返す）。
+
+| メソッド | パス | リクエスト | レスポンス |
+|---|---|---|---|
+| GET  | `/api/buying-power` | — | 現物 + 信用余力（下記）|
+| POST | `/api/tachibana/order` | `NewOrderBody`（下記）| 新規注文受付結果（下記）|
+| GET  | `/api/tachibana/orders[?eig_day=YYYYMMDD]` | — | `{"orders": [OrderRecord, ...]}` |
+| GET  | `/api/tachibana/order/:order_num[?eig_day=YYYYMMDD]` | — | `{"executions": [ExecutionRecord, ...]}` |
+| POST | `/api/tachibana/order/correct` | `CorrectOrderBody`（下記）| 訂正結果（下記 `ModifyResult`）|
+| POST | `/api/tachibana/order/cancel` | `CancelOrderBody`（下記）| 取消結果（下記 `ModifyResult`）|
+| GET  | `/api/tachibana/holdings?issue_code=XXXX` | — | `{"holdings_qty": <u64>}` |
+
+いずれのエンドポイントも失敗時は HTTP 200 で `{"error": "<message>"}` を返す（リプレイ API 共通の応答規約）。
+
+#### `GET /api/buying-power`
+
+`connector::order::fetch_buying_power()` が現物余力 (`CLMZanKaiSummary`) と信用余力 (`CLMMarginZanKaiSummary`) を `tokio::join!` で並列取得する。
+
+```jsonc
+{
+  "cash_buying_power":       "1234567",   // 現物買付余力（円）文字列
+  "nisa_growth_buying_power": "500000",   // NISA 成長投資枠（円）
+  "shortage_flag":           "0",         // 不足フラグ（立花生値）
+  "margin_new_order_power":  "2000000",   // 信用新規建余力
+  "maintenance_margin_rate": "30.00",     // 委託保証金維持率 %
+  "margin_call_flag":        "0"          // 追証フラグ
+}
+```
+
+> **命名規則**: 立花 API の生レスポンス（`CLMZanKaiSummary` の `sUritukeKanougaku` 等）を snake_case に正規化してから返す。[§2.4 レスポンスフィールド名の命名規則](#24-レスポンスフィールド名の命名規則) を参照。
+
+#### `POST /api/tachibana/order`（新規注文）
+
+`NewOrderBody`:
+
+```jsonc
+{
+  "issue_code":      "7203",       // 必須。銘柄コード
+  "qty":             "100",        // 必須。数量（文字列）
+  "side":            "3",          // 必須。"1"=売 "3"=買（立花 API 生値）
+  "price":           "0",          // 必須。"0"=成行 / 数値文字列=指値
+  "account_type":    "1",          // 任意（default "1"）。口座区分
+  "market_code":     "00",         // 任意（default "00"）。市場コード
+  "condition":       "0",          // 任意（default "0"）。執行条件
+  "cash_margin":     "0",          // 任意（default "0"）。現物 / 信用区分
+  "expire_day":      "0",          // 任意（default "0"）。当日=0
+  "second_password": "xxxx"        // 必須（本番ビルド）。下記フォールバック参照
+}
+```
+
+各フィールドの意味は [§3.10 注文機能](#310-注文機能-srcconnectororderrs) を参照。
+
+**`second_password` のフォールバック**:
+- 本番ビルド (`--release`): ボディに含まれないと 400。
+- debug ビルド: ボディ省略時は環境変数 `DEV_SECOND_PASSWORD` をフォールバックとして使用する。E2E テストで平文パスワードを JSON に載せないための措置。
+
+レスポンス:
+
+```jsonc
+{
+  "order_number":    "12345678",
+  "eig_day":         "20260422",
+  "delivery_amount": "4205000",
+  "commission":      "275",
+  "consumption_tax": "27",
+  "order_datetime":  "20260422090000",
+  "warning_code":    "0000",
+  "warning_text":    ""
+}
+```
+
+#### `GET /api/tachibana/orders`
+
+`eig_day` (YYYYMMDD) を渡すと当日以外の注文も絞れる。省略時は全件。
+
+`OrderRecord`:
+
+```jsonc
+{
+  "order_num":      "12345678",
+  "issue_code":     "7203",
+  "order_qty":      "100",
+  "current_qty":    "100",
+  "order_price":    "4205",
+  "order_datetime": "20260422090000",
+  "status_text":    "注文中",
+  "executed_qty":   "0",
+  "executed_price": "0",
+  "eig_day":        "20260422"
+}
+```
+
+#### `GET /api/tachibana/order/:order_num`
+
+特定注文の約定明細を取得。`eig_day` を渡すと当該営業日の約定に絞る。
+
+`ExecutionRecord`:
+
+```jsonc
+{
+  "exec_qty":      "100",
+  "exec_price":    "4205",
+  "exec_datetime": "20260422090015"
+}
+```
+
+#### `POST /api/tachibana/order/correct`（訂正）
+
+`CorrectOrderBody`:
+
+```jsonc
+{
+  "order_number":    "12345678",   // 必須
+  "eig_day":         "20260422",   // 必須
+  "condition":       "0",          // 任意（default "*"=変更なし）
+  "price":           "4200",       // 任意（default "*"）
+  "qty":             "100",        // 任意（default "*"）
+  "expire_day":      "0",          // 任意（default "*"）
+  "second_password": "xxxx"        // debug では DEV_SECOND_PASSWORD フォールバックあり
+}
+```
+
+立花 API の訂正仕様に従い、**変更しないフィールドは `"*"` を送る**。ボディ省略時のデフォルト `"*"` はこのためのもの。
+
+#### `POST /api/tachibana/order/cancel`（取消）
+
+`CancelOrderBody`:
+
+```jsonc
+{
+  "order_number":    "12345678",
+  "eig_day":         "20260422",
+  "second_password": "xxxx"
+}
+```
+
+#### `ModifyResult`（訂正 / 取消共通のレスポンス）
+
+```jsonc
+{
+  "order_number":   "12345678",
+  "eig_day":        "20260422",
+  "order_datetime": "20260422091200"
+}
+```
+
+#### `GET /api/tachibana/holdings?issue_code=XXXX`
+
+`issue_code` は必須。売付可能株数（保有数量）を返す。全数量ボタンの初期値表示で使用する。
+
+```jsonc
+{ "holdings_qty": 300 }
+```
 
 ---
 

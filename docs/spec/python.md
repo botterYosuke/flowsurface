@@ -6,8 +6,9 @@
 > | HTTP API エンドポイント全覧 | [replay.md §11](replay.md#11-http-制御-api) |
 > | 仮想注文 API・ポートフォリオ API | [order.md §7.6](order.md#76-http-api) |
 > | リプレイ状態モデル・StepClock | [replay.md](replay.md) |
+> | Agent ナラティブ基盤（Python SDK: `fs.narrative.*`）| [narrative.md §9](narrative.md#9-python-sdk) |
 
-**最終更新**: 2026-04-19
+**最終更新**: 2026-04-22
 **対象ブランチ**: `sasa/develop`
 
 ---
@@ -81,8 +82,21 @@ tests/
 └── helpers.py              ※ 各スクリプトの冒頭で sys.path.insert して import
 
 python/
-├── __init__.py             `from flowsurface import FlowsurfaceEnv`
-└── env.py                  FlowsurfaceEnv（Gymnasium 互換）
+├── __init__.py             `from flowsurface import FlowsurfaceEnv` / `fs.narrative.*`
+├── env.py                  FlowsurfaceEnv（Gymnasium 互換）+ record_narrative / list_narratives / publish_narrative
+├── narrative.py            Narrative / NarrativeAction / NarrativeOutcome dataclass + NarrativeApi
+└── _client.py              内部 HTTP クライアント（httpx）・ApiError / FlowsurfaceNotRunningError
+
+tests/python/                 Python ユニットテスト（pytest）
+├── test_narrative.py          11 件（CRUD / idempotency / validation / dataclass）
+├── test_replay.py
+├── test_pane.py
+└── test_app_auth.py / test_tachibana_order.py
+
+tests/e2e/                    ナラティブ系 E2E（S51〜S53）
+├── s51_narrative_crud.py
+├── s52_narrative_outcome_link.py
+└── s53_narrative_snapshot_size.py
 ```
 
 ---
@@ -483,6 +497,13 @@ PEND は終了コードに影響しない。CI では PEND が多すぎないか
 | S47 | `s47_outside_hours.py` | 営業時間外 |
 | S48 | `s48_invalid_issue.py` | 無効銘柄 |
 | S49 | `s49_account_info.py` | 口座情報 |
+| S50 | `tests/e2e/s50_tachibana_login.py` | 立花ログインフロー |
+| **S51** | `tests/e2e/s51_narrative_crud.py` | ナラティブ CRUD（POST→GET→LIST→PATCH→idempotency→storage、9 TC）|
+| **S52** | `tests/e2e/s52_narrative_outcome_link.py` | 仮想注文 → 約定 → outcome 自動更新（`linked_order_id` 紐付け、3 TC） |
+| **S53** | `tests/e2e/s53_narrative_snapshot_size.py` | 11 MB → 413 / 正常 POST / sha256 改ざん → 410（3 TC） |
+| S54 | — | **保留**（チャートオーバーレイ pixel-diff、Phase 4b 以降） |
+
+> S51〜S53 の詳細は [narrative.md §10](narrative.md#10-e2e-テスト) を参照。
 
 ---
 
@@ -591,3 +612,5 @@ requests
 | 5 | `api_post_code()` に `dict` 以外（`str` / `bytes`）を渡す場合は `Content-Type: application/json` が自動付与される |
 | 6 | `secondary_ticker()` / `tertiary_ticker()` は取引所ベースの固定マッピング。新取引所追加時は `helpers.py` のマッピングを更新する |
 | 7 | 立花証券スイート（S5・S19〜S22・S29）は実認証が必要。`wait_tachibana_session()` で最大 120s 待機する |
+| 8 | ナラティブ系テスト（S51〜S53）は headless / GUI 両モードで動作。ただし S52 を GUI モードで回す場合、起動時 `--ticker` が無視されるため事前に `/api/pane/set-ticker` で銘柄を合わせること（[narrative.md §13.3](narrative.md#133-既存バグ未修正phase-4b-課題) 参照）|
+| 9 | `fs.narrative.create()` の `action` 引数は `dict` または `NarrativeAction` のみ。個別の `side`/`qty`/`price` キーワードは受けない（`FlowsurfaceEnv.record_narrative()` 側で展開）|

@@ -6,8 +6,9 @@
 > | 注文パネル・仮想約定エンジンの型定義・UI 設計 | [order.md](order.md) |
 > | 立花証券 API プロトコル・認証・EVENT I/F | [tachibana.md](tachibana.md) |
 > | 立花証券リプレイ固有の設計判断（なぜ D1 のみか等） | [tachibana.md §8](tachibana.md#8-リプレイ対応の設計判断) |
+> | Agent ナラティブ基盤（`/api/agent/narrative` 系）| [narrative.md](narrative.md) |
 
-**最終更新**: 2026-04-17
+**最終更新**: 2026-04-22
 **対象ブランチ**: `sasa/develop`（仮想約定エンジン統合・R4 リファクタリング完了）
 
 **実装計画ドキュメント**:
@@ -755,7 +756,10 @@ fn subscription(&self) -> Subscription<Message> {
 | Protocol | HTTP/1.1, `Connection: close`, `Access-Control-Allow-Origin: *` |
 | Content-Type | `application/json` (レスポンス・リクエスト) |
 | Keep-alive | 非対応（1 リクエスト / 接続）|
-| 最大リクエストサイズ | 8192 バイト |
+| 最大ヘッダーサイズ | 64 KB（`MAX_HEADER_BYTES`）|
+| 最大ボディサイズ | 16 MB（`MAX_BODY_BYTES`）— 超過時は 413 Payload Too Large |
+
+> **補足**: HTTP ボディは動的バッファ（初期 16 KB → 最大 16 MB）で読み込む。これは Phase 4a で `/api/agent/narrative` が最大 10 MB の `observation_snapshot` を受ける要件のため拡張された。従来の固定 8192 バイトから変更されている。詳細は [narrative.md §11.1](narrative.md#111-定数) 参照。
 
 **ステータスコード**:
 
@@ -822,24 +826,60 @@ REPLAY モード専用。LIVE モード時は 400 を返す。
 
 | メソッド | パス | リクエストボディ | レスポンス | 対応コマンド |
 |---|---|---|---|---|
-| GET | `/api/auth/tachibana/status` | — | `{"session":"present"\|"none"}` | `TachibanaSessionStatus` |
+| GET | `/api/auth/tachibana/status` | — | `{"session":"present","environment":"demo"\|"prod"}` または `{"session":"none"}` | `TachibanaSessionStatus` |
+| POST | `/api/auth/tachibana/logout` | — | `{"ok":true,"action":"logout"}` | `TachibanaLogout` |
+
+`/api/auth/tachibana/logout`: メモリセッションと keyring 永続セッションを**両方**クリアする。CI teardown で次テストとの残留セッション衝突を防ぐ目的。ログアウト後の `/api/auth/tachibana/status` は `{"session":"none"}` を返す。
 
 #### アプリ制御 (`/api/app/*`)
 
-| メソッド | パス | 用途 |
-|---|---|---|
-| POST | `/api/app/save` | アプリ状態をディスクに保存 (E2E テスト用)|
-| POST | `/api/app/screenshot` | デスクトップ全体を `C:/tmp/screenshot.png` に保存（レスポンス: `{"ok":true}` or `{"ok":false,"error":"..."}`）|
+| メソッド | パス | リクエストボディ | 用途 / レスポンス |
+|---|---|---|---|
+| POST | `/api/app/save` | — | アプリ状態をディスクに保存 (E2E テスト用)|
+| POST | `/api/app/screenshot` | — | デスクトップ全体を `C:/tmp/screenshot.png` に保存（`{"ok":true}` or `{"ok":false,"error":"..."}`）|
+| POST | `/api/app/set-mode` | `{"mode": "live"\|"replay"}` | モード切替。レスポンスは切替後の `ReplayStatus`。mode は大文字小文字を区別しない。既に目的モードなら no-op（レスポンスは返す）|
+
+`/api/app/set-mode` の用途: E2E テストやエージェントが Live ↔ Replay を明示的に切り替えるため。`/api/replay/toggle` との違いは、**現在のモードに依らず目的モードへ直接遷移**する冪等操作である点（`toggle` は現在値を反転するため並列呼び出し時に race する）。
 
 #### ペイン CRUD (`/api/pane/*`)
 
-| メソッド | パス | リクエストボディ | 用途 |
+| メソッド | パス | リクエストボディ / クエリ | 用途 |
 |---|---|---|---|
 | GET | `/api/pane/list` | — | 全ペイン + EventStore ロード状態を返す |
 | POST | `/api/pane/split` | `{"pane_id": "<uuid>", "axis": "Vertical"\|"Horizontal"}` | ペイン分割 |
 | POST | `/api/pane/close` | `{"pane_id": "<uuid>"}` | ペイン削除 |
 | POST | `/api/pane/set-ticker` | `{"pane_id": "<uuid>", "ticker": "BinanceLinear:BTCUSDT"}` | ticker 差し替え |
 | POST | `/api/pane/set-timeframe` | `{"pane_id": "<uuid>", "timeframe": "M1"\|...\|"D1"}` | timeframe 変更 |
+| GET | `/api/pane/chart-snapshot?pane_id=<uuid>[&limit=N][&since_ts=<ms>]` | — | チャートの OHLCV バー配列を JSON 化して返す（下記 `ChartSnapshot` 参照）|
+
+##### `ChartSnapshot` (`GET /api/pane/chart-snapshot`)
+
+```jsonc
+{
+  "pane_id": "00000000-0000-0000-0000-000000000010",
+  "type": "Kline",              // pane content kind 文字列。Kline 以外では bars は [] になる
+  "bar_count": 500,              // チャートが内部保持する総バー数。Kline 以外では null
+  "oldest_ts": 1700000000000,    // Unix ms。Kline 以外では null
+  "newest_ts": 1700050000000,    // Unix ms。Kline 以外では null
+  "bars": [
+    {
+      "ts": 1700000000000,       // Unix ms（バーの開始時刻）
+      "open":  42000.0,
+      "high":  42100.0,
+      "low":   41950.0,
+      "close": 42050.0,
+      "volume":    123.4,
+      "buy_volume":  60.1,       // 取引所が buy/sell を区別しない場合は null
+      "sell_volume": 63.3        // 同上
+    }
+  ]
+}
+```
+
+- `limit`: 返すバー数の上限（省略時はチャート保持分すべて）。
+- `since_ts`: 指定した Unix ms **以降** のバーのみを返す（export 範囲フィルタ）。
+- `pane_id` が不正 UUID の場合は 400。ペインが見つからない場合は 200 + `{"error":"pane not found: <uuid>"}`。
+- エージェントが観測スナップショットを構築する用途を想定（ナラティブの `observation_snapshot` に埋め込む）。
 
 #### Sidebar 経由 (`/api/sidebar/*`)
 
@@ -853,6 +893,49 @@ REPLAY モード専用。LIVE モード時は 400 を返す。
 | メソッド | パス | リクエストボディ | 用途 |
 |---|---|---|---|
 | GET | `/api/notification/list` | — | 現在の Toast 通知一覧を返す（E2E テスト検証用）|
+
+#### Agent ナラティブ (`/api/agent/*`)
+
+| メソッド | パス | 用途 |
+|---|---|---|
+| POST  | `/api/agent/narrative` | ナラティブ作成（`observation_snapshot` を gzip + sha256 で永続化）|
+| GET   | `/api/agent/narratives` | 一覧取得（`agent_id` / `ticker` / `since_ms` / `limit` フィルタ）|
+| GET   | `/api/agent/narrative/:id` | メタ取得 |
+| GET   | `/api/agent/narrative/:id/snapshot` | 解凍済みスナップショット本体 |
+| PATCH | `/api/agent/narrative/:id` | `{"public": bool}` で公開フラグ切替 |
+| GET   | `/api/agent/narratives/storage` | 総件数・総バイト・WARN 件数 |
+| GET   | `/api/agent/narratives/orphans` | 孤児スナップショット一覧 |
+
+詳細は [narrative.md §5](narrative.md#5-http-api) を参照。
+
+#### 立花証券実発注 (`/api/tachibana/*`, `/api/buying-power`)
+
+立花証券 API の HTTP ファサード（新規注文・訂正・取消・注文一覧・約定明細・余力・保有）は [tachibana.md §3.11](tachibana.md#311-http-apiflowsurface-側ファサード) に集約してある。
+
+| メソッド | パス | 用途 |
+|---|---|---|
+| GET  | `/api/buying-power` | 現物 + 信用余力を並列取得 |
+| POST | `/api/tachibana/order` | 新規注文 |
+| GET  | `/api/tachibana/orders[?eig_day=]` | 注文一覧 |
+| GET  | `/api/tachibana/order/:order_num[?eig_day=]` | 約定明細 |
+| POST | `/api/tachibana/order/correct` | 訂正 |
+| POST | `/api/tachibana/order/cancel` | 取消 |
+| GET  | `/api/tachibana/holdings?issue_code=XXXX` | 保有数量 |
+
+#### E2E テスト専用 (`/api/test/*`)（debug ビルド限定）
+
+本番ビルド (`--release`) では**ルーティング自体が存在しない**（`#[cfg(debug_assertions)]` ガード）。CI / ローカル E2E 専用。
+
+| メソッド | パス | 用途 / レスポンス |
+|---|---|---|
+| POST | `/api/test/tachibana/delete-persisted-session` | メモリセッション + keyring を両方クリア。`{"ok":true,"action":"delete-persisted-session"}` |
+| POST | `/api/test/tachibana/inject-session` | 偽セッションを注入（認証をスキップして後続 API をテストする用途）|
+| POST | `/api/test/tachibana/inject-master` | 銘柄マスタデータを注入 |
+| POST | `/api/test/tachibana/inject-daily-history` | 日足履歴を注入 |
+| POST | `/api/test/tachibana/inject-market-price` | 時価データを注入 |
+| POST | `/api/test/tachibana/persist-session` | 現在のメモリセッションを keyring に永続化 |
+
+`/api/auth/tachibana/logout` との違い: logout は**本番 API** として常時利用可能（CI teardown にも使える）。`delete-persisted-session` は debug 限定で、さらに keyring からの強制削除をテスト駆動で行う。
 
 ### 11.3 レスポンススキーマ
 
@@ -1117,6 +1200,16 @@ curl -X POST http://127.0.0.1:9876/api/pane/set-ticker \
 
 # 状態をディスクに保存
 curl -X POST http://127.0.0.1:9876/api/app/save
+
+# Replay モードへ直接切替（現在値に依らない冪等操作）
+curl -X POST http://127.0.0.1:9876/api/app/set-mode \
+  -d '{"mode":"replay"}'
+
+# チャートスナップショット取得（エージェント観測用）
+curl "http://127.0.0.1:9876/api/pane/chart-snapshot?pane_id=<uuid>&limit=50"
+
+# 立花証券セッションを明示的に破棄（CI teardown）
+curl -X POST http://127.0.0.1:9876/api/auth/tachibana/logout
 ```
 
 ---
@@ -1131,7 +1224,8 @@ curl -X POST http://127.0.0.1:9876/api/app/save
 | `BASE_STEP_DELAY_MS` | `100` | [src/replay/clock.rs](../src/replay/clock.rs) | 1x speed での wall delay (ms/bar)。1x で 100ms ≒ 10bar/s |
 | `PRE_START_HISTORY_BARS` | `300` | [src/replay/mod.rs](../src/replay/mod.rs) | リプレイ開始前のコンテキスト用 kline 本数 |
 | API port (default) | `9876` | [src/replay_api.rs](../src/replay_api.rs) | `FLOWSURFACE_API_PORT` で上書き |
-| HTTP buffer size | `8192` | [src/replay_api.rs](../src/replay_api.rs) | リクエスト読み取りバッファ |
+| `MAX_HEADER_BYTES` | `64 * 1024` | [src/replay_api.rs](../src/replay_api.rs) | リクエスト行 + ヘッダの上限 |
+| `MAX_BODY_BYTES` | `16 * 1024 * 1024` | [src/replay_api.rs](../src/replay_api.rs) | リクエストボディの上限（10 MB narrative に余裕を見た値）|
 | mpsc channel bound | `32` | [src/replay_api.rs](../src/replay_api.rs) | API → iced キュー |
 
 ### 12.2 時間範囲

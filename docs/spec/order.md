@@ -6,8 +6,9 @@
 > | HTTP API エンドポイント全覧 | [replay.md §11](replay.md#11-http-制御-api) |
 > | リプレイ状態モデル・StepClock・EventStore | [replay.md](replay.md) |
 > | 立花証券 API プロトコル・認証・EVENT I/F | [tachibana.md](tachibana.md) |
+> | `FillEvent` → ナラティブ outcome 自動更新・`linked_order_id` の紐付け | [narrative.md §7](narrative.md#7-fillevent--outcome-自動更新) |
 
-**最終更新**: 2026-04-17
+**最終更新**: 2026-04-22
 **対象ブランチ**: `sasa/develop`
 
 ---
@@ -1262,6 +1263,24 @@ if is_replay_now && is_step_forward {
 詳細スキーマは [replay.md §11](replay.md#11-http-制御-api) を参照。
 
 > **HTTP API の `side` は `"buy"` / `"sell"`（小文字）**。内部の `PositionSide` enum は `Long` / `Short` だが、HTTP リクエストに `"Long"` を送ると `400 Bad Request` になる。レスポンスでは `"Long"` / `"Short"` で返る（Rust enum シリアライズ）。
+
+#### 7.6.1 ticker 正規化（Phase 4a 追加）
+
+`POST /api/replay/order` の `ticker` フィールドは、`SerTicker` 形式（`Exchange:Symbol`、例 `"BinanceLinear:BTCUSDT"` / `"Tachibana:7203"`）と bare symbol 形式（例 `"BTCUSDT"`）の **両方を受理し、サーバー側で symbol 単体に正規化する**。これは `GET /api/replay/state` が返す `klines[].stream` が SerTicker 形式のため、エージェントが自然にコピー＆貼り付けした値でも注文が成立するようにするため。
+
+- `"BinanceLinear:BTCUSDT"` → 内部 `ticker = "BTCUSDT"`
+- `"BTCUSDT"` → そのまま
+- `"BinanceLinear:"`（symbol 空） → `400 Bad Request`
+
+> **背景**: 実装当初は prefix 付きを silent 受理していたが、`VirtualOrderBook::on_tick` の ticker 比較で全不一致となり、全注文が永遠 Pending のまま残る silent failure を踏んでいた。Phase 4a の実アプリ検証で発見・修正済み（[narrative.md §11.2 不変条件 #9](narrative.md#112-設計上の不変条件)）。
+
+#### 7.6.2 ナラティブ outcome との連携
+
+`FillEvent` が発生すると、`linked_order_id` が一致するナラティブの `outcome`（`fill_price` / `fill_time_ms`）が自動更新される。詳細は [narrative.md §7](narrative.md#7-fillevent--outcome-自動更新)。
+
+- **結線箇所（3 カ所）**: `app/handlers.rs::handle_tick`、`app/dashboard.rs` の `Message::Replay` 分岐、`headless.rs::HeadlessEngine::{tick, step_forward}`
+- **失敗時挙動**: `log::warn!` のみで UI 通知なし（注文自体の処理はブロックしない）
+- **fire-and-forget**: GUI は `Task::perform(fut, |()| Message::Noop)`、headless は `tokio::spawn`
 
 ---
 
