@@ -85,6 +85,12 @@ pub enum AgentSessionCommand {
         session_id: String,
         request: Box<crate::api::order_request::AgentOrderRequest>,
     },
+    /// `POST /api/agent/session/:id/advance`: 任意区間を instant 実行。
+    /// Headless ランタイムのみ受理（GUI では 400 で拒否）。
+    Advance {
+        session_id: String,
+        request: Box<crate::api::advance_request::AgentAdvanceRequest>,
+    },
 }
 
 /// ナラティブ API コマンド（Phase 4a）。
@@ -393,6 +399,11 @@ async fn run_server(mut sender: mpsc::Sender<ApiMessage>) {
                 .await;
                 continue;
             }
+            Err(RouteError::BadRequestWithMessage(msg)) => {
+                let body = serde_json::json!({ "error": msg }).to_string();
+                let _ = write_response(&mut stream, 400, &body).await;
+                continue;
+            }
             Err(RouteError::PayloadTooLarge) => {
                 let _ = write_response(&mut stream, 413, r#"{"error":"Payload Too Large"}"#).await;
                 continue;
@@ -450,6 +461,10 @@ fn parse_request(raw: &str) -> Option<(String, String, String)> {
 enum RouteError {
     NotFound,
     BadRequest,
+    /// BadRequest と同じ 400 ステータスを返すが、レスポンス本文に具体的な
+    /// エラーメッセージを含める（Phase 4b-1 サブフェーズ F）。agent API の
+    /// silent failure 回避のため、原因を明示して返す。
+    BadRequestWithMessage(String),
     PayloadTooLarge,
     /// 501 Not Implemented — Phase 4b-1 時点で `session_id != "default"` を
     /// 明示拒否する。詳細は ADR-0001 §Risks。
@@ -508,13 +523,26 @@ fn parse_agent_session_step(path: &str) -> Result<ApiCommand, RouteError> {
     }))
 }
 
+fn parse_agent_session_advance(path: &str, body: &str) -> Result<ApiCommand, RouteError> {
+    let session_id = extract_agent_session_id(path, "advance")?;
+    if session_id != "default" {
+        return Err(RouteError::NotImplemented);
+    }
+    let request = crate::api::advance_request::parse_agent_advance_request(body)
+        .map_err(RouteError::BadRequestWithMessage)?;
+    Ok(ApiCommand::AgentSession(AgentSessionCommand::Advance {
+        session_id: session_id.to_string(),
+        request: Box::new(request),
+    }))
+}
+
 fn parse_agent_session_order(path: &str, body: &str) -> Result<ApiCommand, RouteError> {
     let session_id = extract_agent_session_id(path, "order")?;
     if session_id != "default" {
         return Err(RouteError::NotImplemented);
     }
     let request = crate::api::order_request::parse_agent_order_request(body)
-        .map_err(|_| RouteError::BadRequest)?;
+        .map_err(RouteError::BadRequestWithMessage)?;
     Ok(ApiCommand::AgentSession(AgentSessionCommand::PlaceOrder {
         session_id: session_id.to_string(),
         request: Box::new(request),
@@ -620,6 +648,9 @@ fn route(method: &str, path: &str, body: &str) -> Result<ApiCommand, RouteError>
         }
         ("POST", p) if p.starts_with("/api/agent/session/") && p.ends_with("/order") => {
             parse_agent_session_order(p, body)
+        }
+        ("POST", p) if p.starts_with("/api/agent/session/") && p.ends_with("/advance") => {
+            parse_agent_session_advance(p, body)
         }
 
         // ── 立花証券余力情報 ──────────────────────────────────────────────
@@ -1338,8 +1369,23 @@ mod tests {
         assert!(matches!(result, Err(RouteError::NotImplemented)));
     }
 
+    fn assert_bad_request_with_keyword(
+        result: Result<ApiCommand, RouteError>,
+        keyword: &str,
+    ) {
+        match result {
+            Err(RouteError::BadRequestWithMessage(msg)) => {
+                assert!(
+                    msg.to_ascii_lowercase().contains(&keyword.to_ascii_lowercase()),
+                    "error message missing keyword {keyword:?}: {msg}"
+                );
+            }
+            other => panic!("expected BadRequestWithMessage containing {keyword:?}, got {other:?}"),
+        }
+    }
+
     #[test]
-    fn route_agent_session_order_rejects_string_ticker() {
+    fn route_agent_session_order_rejects_string_ticker_with_specific_message() {
         let body = r#"{
             "client_order_id": "cli_1",
             "ticker": "HyperliquidLinear:BTC",
@@ -1347,36 +1393,42 @@ mod tests {
             "qty": 0.1,
             "order_type": {"market": {}}
         }"#;
-        let result = route("POST", "/api/agent/session/default/order", body);
-        assert!(matches!(result, Err(RouteError::BadRequest)), "got {result:?}");
+        assert_bad_request_with_keyword(
+            route("POST", "/api/agent/session/default/order", body),
+            "ticker",
+        );
     }
 
     #[test]
-    fn route_agent_session_order_rejects_missing_order_type() {
+    fn route_agent_session_order_rejects_missing_order_type_with_specific_message() {
         let body = r#"{
             "client_order_id": "cli_1",
             "ticker": {"exchange": "X", "symbol": "Y"},
             "side": "buy",
             "qty": 0.1
         }"#;
-        let result = route("POST", "/api/agent/session/default/order", body);
-        assert!(matches!(result, Err(RouteError::BadRequest)));
+        assert_bad_request_with_keyword(
+            route("POST", "/api/agent/session/default/order", body),
+            "order_type",
+        );
     }
 
     #[test]
-    fn route_agent_session_order_rejects_missing_client_order_id() {
+    fn route_agent_session_order_rejects_missing_client_order_id_with_specific_message() {
         let body = r#"{
             "ticker": {"exchange": "X", "symbol": "Y"},
             "side": "buy",
             "qty": 0.1,
             "order_type": {"market": {}}
         }"#;
-        let result = route("POST", "/api/agent/session/default/order", body);
-        assert!(matches!(result, Err(RouteError::BadRequest)));
+        assert_bad_request_with_keyword(
+            route("POST", "/api/agent/session/default/order", body),
+            "client_order_id",
+        );
     }
 
     #[test]
-    fn route_agent_session_order_rejects_invalid_client_order_id_charset() {
+    fn route_agent_session_order_rejects_invalid_client_order_id_charset_with_specific_message() {
         let body = r#"{
             "client_order_id": "cli 42",
             "ticker": {"exchange": "X", "symbol": "Y"},
@@ -1384,14 +1436,60 @@ mod tests {
             "qty": 0.1,
             "order_type": {"market": {}}
         }"#;
-        let result = route("POST", "/api/agent/session/default/order", body);
-        assert!(matches!(result, Err(RouteError::BadRequest)));
+        assert_bad_request_with_keyword(
+            route("POST", "/api/agent/session/default/order", body),
+            "client_order_id",
+        );
     }
 
     #[test]
     fn route_agent_session_order_rejects_get_method() {
         let result = route("GET", "/api/agent/session/default/order", VALID_ORDER_BODY);
         assert!(matches!(result, Err(RouteError::NotFound)));
+    }
+
+    // ── route tests: agent session advance (Phase 4b-1 サブフェーズ G) ──
+
+    #[test]
+    fn route_agent_session_advance_accepts_default_with_valid_body() {
+        let body = r#"{"until_ms": 1704067200000}"#;
+        let cmd = route("POST", "/api/agent/session/default/advance", body).unwrap();
+        match cmd {
+            ApiCommand::AgentSession(AgentSessionCommand::Advance { session_id, request }) => {
+                assert_eq!(session_id, "default");
+                assert_eq!(request.until_ms.as_u64(), 1_704_067_200_000);
+            }
+            other => panic!("expected Advance, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn route_agent_session_advance_rejects_non_default_session() {
+        let body = r#"{"until_ms": 100}"#;
+        let result = route("POST", "/api/agent/session/other/advance", body);
+        assert!(matches!(result, Err(RouteError::NotImplemented)));
+    }
+
+    #[test]
+    fn route_agent_session_advance_rejects_missing_until_ms() {
+        let result = route("POST", "/api/agent/session/default/advance", "{}");
+        assert_bad_request_with_keyword(result, "until_ms");
+    }
+
+    #[test]
+    fn route_agent_session_advance_rejects_end_in_stop_on() {
+        // plan §4.3: "end" は不正値（範囲終端は常に停止するため明示不要）
+        let body = r#"{"until_ms": 100, "stop_on": ["end"]}"#;
+        let result = route("POST", "/api/agent/session/default/advance", body);
+        // serde の unknown variant エラーには "end" 値が含まれる。
+        assert_bad_request_with_keyword(result, "end");
+    }
+
+    #[test]
+    fn route_agent_session_advance_rejects_unknown_field() {
+        let body = r#"{"until_ms": 100, "unknown": "x"}"#;
+        let result = route("POST", "/api/agent/session/default/advance", body);
+        assert_bad_request_with_keyword(result, "unknown");
     }
 
     #[test]

@@ -95,14 +95,22 @@ impl Flowsurface {
                 return self.handle_narrative_api(cmd, reply_tx);
             }
             ApiCommand::AgentSession(cmd) => {
-                // GUI 側は Phase 4b-1 全サブフェーズで 501 スタブを維持
-                // （agent API の主要ユースケースは Python SDK + Headless）。
+                // GUI ランタイムでは agent API は未対応。
+                // - Step / PlaceOrder: 501（将来対応候補）
+                // - Advance: 400（ADR-0001 不変条件: instant mode は headless のみ）
                 use replay_api::AgentSessionCommand;
                 match cmd {
                     AgentSessionCommand::Step { .. } | AgentSessionCommand::PlaceOrder { .. } => {
                         reply_tx.send_status(
                             501,
                             r#"{"error":"agent session commands not yet supported in GUI mode; use headless"}"#
+                                .to_string(),
+                        );
+                    }
+                    AgentSessionCommand::Advance { .. } => {
+                        reply_tx.send_status(
+                            400,
+                            r#"{"error":"instant mode requires headless runtime (pass --headless)"}"#
                                 .to_string(),
                         );
                     }
