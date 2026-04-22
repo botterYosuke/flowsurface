@@ -154,6 +154,26 @@ impl NarrativeStore {
         .map_err(|e| NarrativeStoreError::Io(std::io::Error::other(e)))?
     }
 
+    /// `update_outcome_by_order_id` の返り値拡張版。更新された narrative の
+    /// UUID 一覧を返す。Phase 4b-1 サブフェーズ D の step レスポンス
+    /// `updated_narrative_ids` 同梱に使う。
+    ///
+    /// SELECT id + UPDATE を同一 lock 下で実行し、逆引きと更新を atomic にする。
+    pub async fn update_outcome_by_order_id_returning_ids(
+        &self,
+        order_id: &str,
+        outcome: NarrativeOutcome,
+    ) -> Result<Vec<Uuid>, NarrativeStoreError> {
+        let conn = self.conn.clone();
+        let order_id = order_id.to_string();
+        tokio::task::spawn_blocking(move || {
+            let guard = conn.blocking_lock();
+            update_outcome_returning_ids_sync(&guard, &order_id, &outcome)
+        })
+        .await
+        .map_err(|e| NarrativeStoreError::Io(std::io::Error::other(e)))?
+    }
+
     /// `public` フラグを更新する（取消対応）。
     pub async fn set_public(
         &self,
@@ -407,6 +427,33 @@ fn update_outcome_sync(
         params![outcome_json, order_id],
     )?;
     Ok(n)
+}
+
+/// SELECT id + UPDATE を同一 connection（同一 mutex lock）下で実行する。
+/// 戻り値は UPDATE が対象とした narrative の UUID 一覧。
+fn update_outcome_returning_ids_sync(
+    conn: &Connection,
+    order_id: &str,
+    outcome: &NarrativeOutcome,
+) -> Result<Vec<Uuid>, NarrativeStoreError> {
+    let mut stmt = conn.prepare("SELECT id FROM narratives WHERE linked_order_id = ?1")?;
+    let ids: Vec<Uuid> = stmt
+        .query_map(params![order_id], |row| {
+            let s: String = row.get(0)?;
+            Ok(s)
+        })?
+        .collect::<Result<Vec<String>, _>>()?
+        .into_iter()
+        .filter_map(|s| Uuid::parse_str(&s).ok())
+        .collect();
+    drop(stmt);
+
+    let outcome_json = serde_json::to_string(outcome)?;
+    conn.execute(
+        "UPDATE narratives SET outcome_json = ?1 WHERE linked_order_id = ?2",
+        params![outcome_json, order_id],
+    )?;
+    Ok(ids)
 }
 
 fn set_public_sync(
@@ -741,6 +788,85 @@ mod tests {
 
             let fetched = store.get(id).await.unwrap().expect("found");
             assert_eq!(fetched.outcome, Some(outcome));
+        });
+    }
+
+    // ── returning_ids variant（Phase 4b-1 サブフェーズ D）────────────────────
+
+    #[test]
+    fn update_outcome_by_order_id_returning_ids_returns_affected_uuid() {
+        let rt = rt();
+        rt.block_on(async {
+            let store = NarrativeStore::open_in_memory().unwrap();
+            let narrative = sample_narrative("alpha", "BTCUSDT", 1000);
+            let id = narrative.id;
+            store.insert(narrative).await.unwrap();
+
+            let outcome = NarrativeOutcome {
+                fill_price: 100.5,
+                fill_time_ms: 1500,
+                closed_at_ms: None,
+                realized_pnl: None,
+            };
+            let ids = store
+                .update_outcome_by_order_id_returning_ids("ord_1", outcome.clone())
+                .await
+                .unwrap();
+            assert_eq!(ids, vec![id]);
+
+            // update も反映されていることを確認（二度手間だが atomicity の回帰検知）。
+            let fetched = store.get(id).await.unwrap().expect("found");
+            assert_eq!(fetched.outcome, Some(outcome));
+        });
+    }
+
+    #[test]
+    fn update_outcome_by_order_id_returning_ids_returns_empty_when_no_match() {
+        let rt = rt();
+        rt.block_on(async {
+            let store = NarrativeStore::open_in_memory().unwrap();
+            let narrative = sample_narrative("alpha", "BTCUSDT", 1000);
+            store.insert(narrative).await.unwrap();
+
+            let outcome = NarrativeOutcome {
+                fill_price: 100.5,
+                fill_time_ms: 1500,
+                closed_at_ms: None,
+                realized_pnl: None,
+            };
+            let ids = store
+                .update_outcome_by_order_id_returning_ids("ord_nonexistent", outcome)
+                .await
+                .unwrap();
+            assert!(ids.is_empty());
+        });
+    }
+
+    #[test]
+    fn update_outcome_by_order_id_returning_ids_returns_all_matching() {
+        // 同一 linked_order_id を持つ複数 narrative が存在する場合、すべての UUID を返す。
+        let rt = rt();
+        rt.block_on(async {
+            let store = NarrativeStore::open_in_memory().unwrap();
+            let n1 = sample_narrative("alpha", "BTCUSDT", 1000);
+            let n2 = sample_narrative("beta", "BTCUSDT", 2000);
+            let mut expected = [n1.id, n2.id];
+            expected.sort();
+            store.insert(n1).await.unwrap();
+            store.insert(n2).await.unwrap();
+
+            let outcome = NarrativeOutcome {
+                fill_price: 100.5,
+                fill_time_ms: 1500,
+                closed_at_ms: None,
+                realized_pnl: None,
+            };
+            let mut ids = store
+                .update_outcome_by_order_id_returning_ids("ord_1", outcome)
+                .await
+                .unwrap();
+            ids.sort();
+            assert_eq!(ids, expected);
         });
     }
 

@@ -74,6 +74,13 @@ impl StepResponse {
         }
     }
 
+    /// `updated_narrative_ids` を設定する builder-style セッター
+    /// （サブフェーズ D で同期 await した narrative outcome 更新の UUID 一覧）。
+    pub fn with_updated_narrative_ids(mut self, ids: Vec<String>) -> Self {
+        self.updated_narrative_ids = ids;
+        self
+    }
+
     /// JSON 文字列化。serialize 失敗時はエラー本文を返す（呼び出し側で 500 を返せる）。
     pub fn to_json_string(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string(self)

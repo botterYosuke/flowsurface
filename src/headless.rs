@@ -632,14 +632,16 @@ impl HeadlessEngine {
         }
     }
 
-    /// `POST /api/agent/session/default/step` を処理する（Phase 4b-1 サブフェーズ C）。
+    /// `POST /api/agent/session/default/step` を処理する（Phase 4b-1 サブフェーズ C / D）。
     ///
     /// ADR-0001 / phase4b_agent_replay_api.md §4.2 に基づき、1 バー進行した tick の
-    /// `clock_ms` / `reached_end` / `observation` / `fills` を同梱したレスポンスを返す。
-    /// narrative outcome 更新はサブフェーズ D で同期 await に変更予定（本サブフェーズでは
-    /// fire-and-forget を維持）。
-    fn agent_session_step(&mut self) -> (u16, String) {
+    /// `clock_ms` / `reached_end` / `observation` / `fills` / `updated_narrative_ids`
+    /// を同梱したレスポンスを返す。サブフェーズ D 以降、narrative outcome 更新は
+    /// 同期 `await` で確定させる（agent 側 polling を不要にするため）。
+    async fn agent_session_step(&mut self) -> (u16, String) {
         use crate::api::step_response::{StepFill, StepResponse};
+
+        let overall_start = std::time::Instant::now();
 
         // セッション状態チェック。Idle は 404、Loading は 503。
         match &self.state.session {
@@ -716,27 +718,41 @@ impl HeadlessEngine {
             Vec::new()
         };
 
-        // narrative outcome 更新は fire-and-forget（サブフェーズ D で同期化予定）。
+        // narrative outcome 更新を同期 await で確定させる（サブフェーズ D）。
+        // plan §5.2 / §8 R1: fill_count 件 → 100ms/p95 を超えたら非同期化に戻す判断基準。
+        // 失敗は log::warn! のみで step 全体を落とさない（plan §7.2 方針）。
+        let narrative_start = std::time::Instant::now();
+        let mut updated_narrative_ids: Vec<String> = Vec::new();
         for fill in &fills {
-            let store = self.narrative_store.clone();
-            let order_id = fill.order_id.clone();
-            let fill_price = fill.fill_price;
-            let fill_time_ms = fill.fill_time_ms as i64;
-            tokio::spawn(async move {
-                if let Err(e) = crate::narrative::service::update_outcome_from_fill(
-                    &store,
-                    &order_id,
-                    fill_price,
-                    fill_time_ms,
-                    None,
-                )
-                .await
-                {
+            match crate::narrative::service::update_outcome_from_fill_returning_ids(
+                &self.narrative_store,
+                &fill.order_id,
+                fill.fill_price,
+                fill.fill_time_ms as i64,
+                None,
+            )
+            .await
+            {
+                Ok(ids) => {
+                    for id in ids {
+                        updated_narrative_ids.push(id.to_string());
+                    }
+                }
+                Err(e) => {
                     log::warn!(
-                        "agent_session_step: failed to update narrative outcome for order {order_id}: {e}"
+                        "agent_session_step: narrative outcome update failed for order {order_id}: {e}",
+                        order_id = fill.order_id
                     );
                 }
-            });
+            }
+        }
+        let narrative_elapsed_ms = narrative_start.elapsed().as_millis();
+        if narrative_elapsed_ms > 100 {
+            log::warn!(
+                "agent_session_step: narrative outcome update took {narrative_elapsed_ms}ms for \
+                 {fill_count} fill(s) — exceeds R1 p95 budget (100ms). Consider non-blocking fallback.",
+                fill_count = fills.len()
+            );
         }
 
         // observation 構築（session は Active のはず）
@@ -756,7 +772,15 @@ impl HeadlessEngine {
             .map(|f| StepFill::from_event(f, None))
             .collect();
 
-        let resp = StepResponse::new(new_time, reached_end, observation, step_fills);
+        let resp = StepResponse::new(new_time, reached_end, observation, step_fills)
+            .with_updated_narrative_ids(updated_narrative_ids);
+
+        // R1 計測用: 全体の step ハンドラ処理時間。
+        log::debug!(
+            "agent_session_step: total {total_ms}ms (narrative sync {narrative_elapsed_ms}ms)",
+            total_ms = overall_start.elapsed().as_millis()
+        );
+
         match resp.to_json_string() {
             Ok(json) => (200, json),
             Err(e) => (
@@ -1175,7 +1199,7 @@ impl HeadlessEngine {
                 session_id: _,
             }) => {
                 // session_id は route 層で "default" に限定済み（非 default は 501 で既に拒否）。
-                let (status, body) = self.agent_session_step();
+                let (status, body) = self.agent_session_step().await;
                 reply.send_status(status, body);
             }
             // headless で未対応のコマンドは 501 を返す
@@ -1706,7 +1730,7 @@ mod tests {
         let ticker = parse_ticker_str("HyperliquidLinear:BTC").unwrap();
         let (tx, _rx) = tokio::sync::mpsc::channel(4);
         let mut engine = HeadlessEngine::new(ticker, Timeframe::M1, tx);
-        let (status, body) = engine.agent_session_step();
+        let (status, body) = engine.agent_session_step().await;
         assert_eq!(status, 404, "got body: {body}");
         assert!(
             body.contains("session not started"),
@@ -1721,7 +1745,7 @@ mod tests {
         let step_ms = 60_000u64;
         let mut engine =
             make_active_engine_with_klines(start_ms, start_ms + step_ms * 5, step_ms, start_ms);
-        let (status, body) = engine.agent_session_step();
+        let (status, body) = engine.agent_session_step().await;
         assert_eq!(status, 200, "got body: {body}");
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         for key in [
@@ -1741,7 +1765,7 @@ mod tests {
         let step_ms = 60_000u64;
         let mut engine =
             make_active_engine_with_klines(start_ms, start_ms + step_ms * 5, step_ms, start_ms);
-        let (_status, body) = engine.agent_session_step();
+        let (_status, body) = engine.agent_session_step().await;
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(
             v["clock_ms"].as_u64().unwrap(),
@@ -1758,7 +1782,7 @@ mod tests {
         let end_ms = start_ms + step_ms * 2;
         // 初期位置を end_ms にセット — これ以上進めない。
         let mut engine = make_active_engine_with_klines(start_ms, end_ms, step_ms, end_ms);
-        let (status, body) = engine.agent_session_step();
+        let (status, body) = engine.agent_session_step().await;
         assert_eq!(status, 200);
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(v["reached_end"], true, "body: {body}");
@@ -1789,7 +1813,7 @@ mod tests {
             status: VirtualOrderStatus::Pending,
         });
 
-        let (status, body) = engine.agent_session_step();
+        let (status, body) = engine.agent_session_step().await;
         assert_eq!(status, 200, "got body: {body}");
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         let fills = v["fills"].as_array().expect("fills must be array");
@@ -1808,7 +1832,7 @@ mod tests {
         let step_ms = 60_000u64;
         let mut engine =
             make_active_engine_with_klines(start_ms, start_ms + step_ms * 5, step_ms, start_ms);
-        let (_status, body) = engine.agent_session_step();
+        let (_status, body) = engine.agent_session_step().await;
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(
             v["observation"]["portfolio"]["cash"].as_f64().unwrap(),
@@ -1818,13 +1842,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_session_step_updated_narrative_ids_is_empty_array_in_subphase_c() {
-        // サブフェーズ D で同期 await 経由で埋める。C では常に []。
+    async fn agent_session_step_updated_narrative_ids_empty_when_no_linked_narrative() {
+        // narrative が linked されていない場合は空配列（サブフェーズ D）。
         let start_ms = 1_000_000u64;
         let step_ms = 60_000u64;
         let mut engine =
             make_active_engine_with_klines(start_ms, start_ms + step_ms * 5, step_ms, start_ms);
-        let (_status, body) = engine.agent_session_step();
+        let (_status, body) = engine.agent_session_step().await;
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert!(
             v["updated_narrative_ids"]
@@ -1832,5 +1856,86 @@ mod tests {
                 .map(|a| a.is_empty())
                 .unwrap_or(false)
         );
+    }
+
+    #[tokio::test]
+    async fn step_updates_narrative_synchronously() {
+        // ADR-0001 / plan §5.2 の核不変条件:
+        // step レスポンスの `updated_narrative_ids` は同期 await 後に確定し、
+        // agent が polling 不要で UUID を取得できる。
+        use crate::narrative::model::{
+            Narrative, NarrativeAction, NarrativeSide, SnapshotRef,
+        };
+        use crate::replay::virtual_exchange::{PositionSide, VirtualOrder, VirtualOrderStatus};
+
+        let start_ms = 1_000_000u64;
+        let step_ms = 60_000u64;
+        let mut engine =
+            make_active_engine_with_klines(start_ms, start_ms + step_ms * 5, step_ms, start_ms);
+
+        // narrative を linked_order_id="ord_1" 付きで事前登録。
+        let narrative_id = uuid::Uuid::new_v4();
+        let narrative = Narrative {
+            id: narrative_id,
+            agent_id: "test_agent".to_string(),
+            uagent_address: None,
+            timestamp_ms: start_ms as i64,
+            ticker: "BTCUSDT".to_string(),
+            timeframe: "M1".to_string(),
+            snapshot_ref: SnapshotRef {
+                path: std::path::PathBuf::from("narratives/snapshots/test.json.gz"),
+                size_bytes: 42,
+                sha256: "a".repeat(64),
+            },
+            reasoning: "test".to_string(),
+            action: NarrativeAction {
+                side: NarrativeSide::Buy,
+                qty: 0.1,
+                price: 100.5,
+            },
+            confidence: 0.5,
+            outcome: None,
+            // 共有 SQLite（デフォルト store）のテスト並行実行で "ord_1" が
+            // 他テストと衝突するため、本テスト専用のユニーク order_id を使う。
+            linked_order_id: Some("ord_d_sync_unique".to_string()),
+            public: false,
+            created_at_ms: start_ms as i64,
+            idempotency_key: None,
+        };
+        engine.narrative_store.insert(narrative).await.unwrap();
+
+        // 成行注文を置いて step — 次 tick で即約定する。
+        engine.virtual_engine.place_order(VirtualOrder {
+            order_id: "ord_d_sync_unique".to_string(),
+            ticker: "BTC".to_string(),
+            side: PositionSide::Long,
+            qty: 0.1,
+            order_type: VirtualOrderType::Market,
+            placed_time_ms: start_ms,
+            status: VirtualOrderStatus::Pending,
+        });
+
+        let (status, body) = engine.agent_session_step().await;
+        assert_eq!(status, 200, "body: {body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+        // 1. updated_narrative_ids にこの narrative の UUID が含まれる。
+        let ids = v["updated_narrative_ids"]
+            .as_array()
+            .expect("must be array");
+        assert_eq!(ids.len(), 1, "expected one updated id, got {body}");
+        assert_eq!(ids[0].as_str().unwrap(), narrative_id.to_string());
+
+        // 2. step レスポンス返却時点で outcome が DB に書き込み完了している
+        //    （polling 不要 = 同期 await の保証）。
+        let stored = engine
+            .narrative_store
+            .get(narrative_id)
+            .await
+            .unwrap()
+            .expect("narrative exists");
+        let outcome = stored.outcome.expect("outcome must be populated");
+        assert!(outcome.fill_price > 0.0);
+        assert_eq!(outcome.fill_time_ms, (start_ms + step_ms) as i64);
     }
 }
