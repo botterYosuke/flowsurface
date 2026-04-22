@@ -536,6 +536,236 @@ impl HeadlessEngine {
             .unwrap_or_else(|e| format!(r#"{{"error":"serialize failed: {e}"}}"#))
     }
 
+    /// `get_state_json` のロジックを構造化データとして返す（agent API 用）。
+    /// JSON 文字列化せず、`StepObservation` 構造体を返す。
+    fn build_step_observation(
+        &self,
+        limit: usize,
+    ) -> Option<crate::api::step_response::StepObservation> {
+        use crate::api::step_response::StepObservation;
+        match &self.state.session {
+            ReplaySession::Active {
+                clock,
+                store,
+                active_streams,
+            } => {
+                let now_ms = clock.now_ms();
+                let mut ohlcv = Vec::new();
+                let mut recent_trades = Vec::new();
+
+                let mut sorted: Vec<_> = active_streams.iter().collect();
+                sorted.sort_by_cached_key(|s| format!("{s:?}"));
+
+                for stream in sorted {
+                    if let StreamKind::Kline {
+                        ticker_info,
+                        timeframe,
+                    } = stream
+                    {
+                        let now_end = now_ms.saturating_add(1);
+                        let all_klines = store.klines_in(stream, 0..now_end);
+                        let slice = if all_klines.len() > limit {
+                            &all_klines[all_klines.len() - limit..]
+                        } else {
+                            all_klines
+                        };
+                        if !slice.is_empty() {
+                            let exchange_str =
+                                format!("{:?}", ticker_info.ticker.exchange).replace(' ', "");
+                            let label =
+                                format!("{exchange_str}:{}:{timeframe}", ticker_info.ticker);
+                            for k in slice {
+                                ohlcv.push(serde_json::json!({
+                                    "stream": label,
+                                    "time": k.time,
+                                    "open": k.open.to_f64(),
+                                    "high": k.high.to_f64(),
+                                    "low": k.low.to_f64(),
+                                    "close": k.close.to_f64(),
+                                    "volume": k.volume.total().to_f64(),
+                                }));
+                            }
+                        }
+
+                        let trade_stream = StreamKind::Trades {
+                            ticker_info: *ticker_info,
+                        };
+                        let trade_start = now_ms
+                            .saturating_sub(crate::replay::controller::api::TRADE_WINDOW_MS);
+                        let all_trades = store.trades_in(&trade_stream, trade_start..now_ms + 1);
+                        let trade_slice = if all_trades.len() > limit {
+                            &all_trades[all_trades.len() - limit..]
+                        } else {
+                            all_trades
+                        };
+                        if !trade_slice.is_empty() {
+                            let exchange_str =
+                                format!("{:?}", ticker_info.ticker.exchange).replace(' ', "");
+                            let label =
+                                format!("{exchange_str}:{}:Trades", ticker_info.ticker);
+                            let items: Vec<serde_json::Value> = trade_slice
+                                .iter()
+                                .map(|t| {
+                                    serde_json::json!({
+                                        "time": t.time,
+                                        "price": t.price.to_f64(),
+                                        "qty": t.qty.to_f64(),
+                                        "is_sell": t.is_sell,
+                                    })
+                                })
+                                .collect();
+                            recent_trades
+                                .push(serde_json::json!({"stream": label, "trades": items}));
+                        }
+                    }
+                }
+
+                let current_price = self.last_close_price().unwrap_or(0.0);
+                let portfolio = self.virtual_engine.portfolio_snapshot(current_price);
+                Some(StepObservation {
+                    ohlcv,
+                    recent_trades,
+                    portfolio,
+                })
+            }
+            _ => None,
+        }
+    }
+
+    /// `POST /api/agent/session/default/step` を処理する（Phase 4b-1 サブフェーズ C）。
+    ///
+    /// ADR-0001 / phase4b_agent_replay_api.md §4.2 に基づき、1 バー進行した tick の
+    /// `clock_ms` / `reached_end` / `observation` / `fills` を同梱したレスポンスを返す。
+    /// narrative outcome 更新はサブフェーズ D で同期 await に変更予定（本サブフェーズでは
+    /// fire-and-forget を維持）。
+    fn agent_session_step(&mut self) -> (u16, String) {
+        use crate::api::step_response::{StepFill, StepResponse};
+
+        // セッション状態チェック。Idle は 404、Loading は 503。
+        match &self.state.session {
+            ReplaySession::Idle => {
+                return (
+                    404,
+                    r#"{"error":"session not started","hint":"start a replay session first (see agent_replay_api.md Getting Started)"}"#
+                        .to_string(),
+                );
+            }
+            ReplaySession::Loading { .. } => {
+                return (503, r#"{"error":"session loading"}"#.to_string());
+            }
+            ReplaySession::Active { .. } => {}
+        }
+
+        // Playing 中なら自動 pause（step-forward 仕様と対称）。
+        if self.is_playing() {
+            let _ = self.pause();
+        }
+
+        // 1 バー進める。範囲終端なら reached_end = true で現在時刻を据え置き。
+        let pane_step = self.min_step_ms();
+        let (new_time, reached_end) = match &self.state.session {
+            ReplaySession::Active { clock, .. } => {
+                let current = clock.now_ms();
+                let end = clock.full_range().end;
+                if current + pane_step > end {
+                    (current, true)
+                } else {
+                    (current + pane_step, false)
+                }
+            }
+            _ => unreachable!("session active verified above"),
+        };
+
+        // 進行処理（reached_end でない場合のみ）
+        let fills: Vec<_> = if !reached_end {
+            if let ReplaySession::Active {
+                clock,
+                store,
+                active_streams,
+            } = &mut self.state.session
+            {
+                clock.seek(new_time);
+                let ticker_str = self.ticker_str.clone();
+                let synthetic: Vec<exchange::Trade> = active_streams
+                    .iter()
+                    .filter(|s| matches!(s, StreamKind::Kline { .. }))
+                    .filter_map(|stream| {
+                        let klines = store.klines_in(stream, 0..new_time.saturating_add(1));
+                        klines
+                            .iter()
+                            .rev()
+                            .find(|k| k.time <= new_time)
+                            .map(|k| exchange::Trade {
+                                time: new_time,
+                                is_sell: false,
+                                price: k.close,
+                                qty: exchange::unit::qty::Qty::from_f32(1.0),
+                            })
+                    })
+                    .collect();
+                if synthetic.is_empty() {
+                    Vec::new()
+                } else {
+                    self.virtual_engine
+                        .on_tick(&ticker_str, &synthetic, new_time)
+                }
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        };
+
+        // narrative outcome 更新は fire-and-forget（サブフェーズ D で同期化予定）。
+        for fill in &fills {
+            let store = self.narrative_store.clone();
+            let order_id = fill.order_id.clone();
+            let fill_price = fill.fill_price;
+            let fill_time_ms = fill.fill_time_ms as i64;
+            tokio::spawn(async move {
+                if let Err(e) = crate::narrative::service::update_outcome_from_fill(
+                    &store,
+                    &order_id,
+                    fill_price,
+                    fill_time_ms,
+                    None,
+                )
+                .await
+                {
+                    log::warn!(
+                        "agent_session_step: failed to update narrative outcome for order {order_id}: {e}"
+                    );
+                }
+            });
+        }
+
+        // observation 構築（session は Active のはず）
+        let observation = match self.build_step_observation(200) {
+            Some(obs) => obs,
+            None => {
+                return (
+                    500,
+                    r#"{"error":"observation build failed: session not active"}"#.to_string(),
+                );
+            }
+        };
+
+        // client_order_id はサブフェーズ E で埋める。本サブフェーズでは None 固定。
+        let step_fills: Vec<StepFill> = fills
+            .iter()
+            .map(|f| StepFill::from_event(f, None))
+            .collect();
+
+        let resp = StepResponse::new(new_time, reached_end, observation, step_fills);
+        match resp.to_json_string() {
+            Ok(json) => (200, json),
+            Err(e) => (
+                500,
+                serde_json::json!({"error": format!("serialize failed: {e}")}).to_string(),
+            ),
+        }
+    }
+
     fn get_state_json(&self, limit: usize) -> String {
         match &self.state.session {
             ReplaySession::Active {
@@ -941,14 +1171,12 @@ impl HeadlessEngine {
             ApiCommand::Narrative(cmd) => {
                 self.handle_narrative_command(cmd, reply).await;
             }
-            ApiCommand::AgentSession(_) => {
-                // Phase 4b-1 サブフェーズ B: ルーティングのみ実装済み。
-                // サブフェーズ C 以降で step の副作用同梱レスポンスを実装する。
-                reply.send_status(
-                    501,
-                    r#"{"error":"agent session step not yet implemented (Phase 4b-1 subphase C pending)"}"#
-                        .to_string(),
-                );
+            ApiCommand::AgentSession(crate::replay_api::AgentSessionCommand::Step {
+                session_id: _,
+            }) => {
+                // session_id は route 層で "default" に限定済み（非 default は 501 で既に拒否）。
+                let (status, body) = self.agent_session_step();
+                reply.send_status(status, body);
             }
             // headless で未対応のコマンドは 501 を返す
             ApiCommand::Pane(_)
@@ -1469,5 +1697,140 @@ mod tests {
 
         engine.handle_load_result(LoadResult::Err("network error".to_string()));
         assert!(matches!(engine.state.session, ReplaySession::Idle));
+    }
+
+    // ── agent_session_step (Phase 4b-1 サブフェーズ C) ────────────────────────
+
+    #[tokio::test]
+    async fn agent_session_step_returns_404_when_session_idle() {
+        let ticker = parse_ticker_str("HyperliquidLinear:BTC").unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let mut engine = HeadlessEngine::new(ticker, Timeframe::M1, tx);
+        let (status, body) = engine.agent_session_step();
+        assert_eq!(status, 404, "got body: {body}");
+        assert!(
+            body.contains("session not started"),
+            "body missing expected error: {body}"
+        );
+        assert!(body.contains("\"hint\""), "body missing hint field: {body}");
+    }
+
+    #[tokio::test]
+    async fn agent_session_step_returns_200_with_required_keys() {
+        let start_ms = 1_000_000u64;
+        let step_ms = 60_000u64;
+        let mut engine =
+            make_active_engine_with_klines(start_ms, start_ms + step_ms * 5, step_ms, start_ms);
+        let (status, body) = engine.agent_session_step();
+        assert_eq!(status, 200, "got body: {body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        for key in [
+            "clock_ms",
+            "reached_end",
+            "observation",
+            "fills",
+            "updated_narrative_ids",
+        ] {
+            assert!(v.get(key).is_some(), "missing top-level key {key} in {body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_session_step_advances_clock_by_one_bar() {
+        let start_ms = 1_000_000u64;
+        let step_ms = 60_000u64;
+        let mut engine =
+            make_active_engine_with_klines(start_ms, start_ms + step_ms * 5, step_ms, start_ms);
+        let (_status, body) = engine.agent_session_step();
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            v["clock_ms"].as_u64().unwrap(),
+            start_ms + step_ms,
+            "expected advance by one bar"
+        );
+        assert_eq!(v["reached_end"], false);
+    }
+
+    #[tokio::test]
+    async fn agent_session_step_sets_reached_end_at_range_boundary() {
+        let start_ms = 1_000_000u64;
+        let step_ms = 60_000u64;
+        let end_ms = start_ms + step_ms * 2;
+        // 初期位置を end_ms にセット — これ以上進めない。
+        let mut engine = make_active_engine_with_klines(start_ms, end_ms, step_ms, end_ms);
+        let (status, body) = engine.agent_session_step();
+        assert_eq!(status, 200);
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["reached_end"], true, "body: {body}");
+        assert_eq!(
+            v["clock_ms"].as_u64().unwrap(),
+            end_ms,
+            "clock must not advance past end"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_session_step_returns_fills_inline_when_market_order_exists() {
+        use crate::replay::virtual_exchange::{PositionSide, VirtualOrder, VirtualOrderStatus};
+
+        let start_ms = 1_000_000u64;
+        let step_ms = 60_000u64;
+        let mut engine =
+            make_active_engine_with_klines(start_ms, start_ms + step_ms * 5, step_ms, start_ms);
+
+        // 成行注文を 1 件置いてから step — 次 tick の close 価格で即約定する。
+        engine.virtual_engine.place_order(VirtualOrder {
+            order_id: "ord_1".to_string(),
+            ticker: "BTC".to_string(),
+            side: PositionSide::Long,
+            qty: 0.1,
+            order_type: VirtualOrderType::Market,
+            placed_time_ms: start_ms,
+            status: VirtualOrderStatus::Pending,
+        });
+
+        let (status, body) = engine.agent_session_step();
+        assert_eq!(status, 200, "got body: {body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let fills = v["fills"].as_array().expect("fills must be array");
+        assert_eq!(fills.len(), 1, "expected one fill, got: {body}");
+        assert_eq!(fills[0]["order_id"], "ord_1");
+        assert_eq!(fills[0]["side"], "buy");
+        assert!(
+            fills[0]["client_order_id"].is_null(),
+            "subphase C: client_order_id must be null"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_session_step_observation_includes_portfolio() {
+        let start_ms = 1_000_000u64;
+        let step_ms = 60_000u64;
+        let mut engine =
+            make_active_engine_with_klines(start_ms, start_ms + step_ms * 5, step_ms, start_ms);
+        let (_status, body) = engine.agent_session_step();
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            v["observation"]["portfolio"]["cash"].as_f64().unwrap(),
+            1_000_000.0,
+            "default initial cash"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_session_step_updated_narrative_ids_is_empty_array_in_subphase_c() {
+        // サブフェーズ D で同期 await 経由で埋める。C では常に []。
+        let start_ms = 1_000_000u64;
+        let step_ms = 60_000u64;
+        let mut engine =
+            make_active_engine_with_klines(start_ms, start_ms + step_ms * 5, step_ms, start_ms);
+        let (_status, body) = engine.agent_session_step();
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(
+            v["updated_narrative_ids"]
+                .as_array()
+                .map(|a| a.is_empty())
+                .unwrap_or(false)
+        );
     }
 }
