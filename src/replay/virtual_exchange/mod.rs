@@ -12,16 +12,40 @@ pub use portfolio::{PortfolioSnapshot, PositionSide};
 
 use exchange::Trade;
 
+/// セッションのライフサイクルイベント。agent API の state
+/// （`client_order_id` UNIQUE map 等）がこれを購読してリセットする。
+/// ADR-0001 の不変条件: UI リモコン API ハンドラから agent API の state を
+/// 直接触らず、本イベント経由でのみ伝播させる。
+///
+/// Phase 4b-1 では値自体は使わず、`session_generation()` の増分を
+/// 「イベント発火」とみなして購読側がリセットを判断する
+/// （シングルプロセス・シングルスレッド想定の最小実装）。
+/// 将来 Phase 4c の multi-session では broadcast channel に置き換える想定。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionLifecycleEvent {
+    /// 新セッション開始（UI `/play` / 将来の agent `start` 両方からトリガ）。
+    Started,
+    /// seek / step-backward / reset で内部状態が巻き戻った。
+    Reset,
+    /// toggle → live、アプリ終了。
+    Terminated,
+}
+
 /// main.rs が保持する仮想約定エンジン全体。
 /// `Arc<Mutex<VirtualExchangeEngine>>` で HTTP API スレッドと共有する。
 pub struct VirtualExchangeEngine {
     order_book: VirtualOrderBook,
+    /// セッション状態遷移の世代カウンタ。`Started` / `Reset` / `Terminated`
+    /// のたびに +1 され、agent API 側は「前回観測値と異なる」ことを
+    /// 購読イベントのトリガとする。
+    session_generation: u64,
 }
 
 impl VirtualExchangeEngine {
     pub fn new(initial_cash: f64) -> Self {
         Self {
             order_book: VirtualOrderBook::new(initial_cash),
+            session_generation: 0,
         }
     }
 
@@ -43,7 +67,9 @@ impl VirtualExchangeEngine {
         self.order_book.on_tick(ticker, trades, now_ms)
     }
 
-    /// seek / replay 再開時にリセット
+    /// 内部状態（pending 注文・ポートフォリオ）をクリアする。
+    /// **SessionLifecycleEvent は発火しない**。呼び出し側が `mark_session_*`
+    /// のいずれかを明示的に呼ぶこと（意図を曖昧にしないため）。
     pub fn reset(&mut self) {
         self.order_book.reset();
     }
@@ -55,6 +81,36 @@ impl VirtualExchangeEngine {
     /// 現在 pending な注文の一覧を返す（HTTP API / UI 表示用）。
     pub fn get_orders(&self) -> &[VirtualOrder] {
         self.order_book.pending_orders()
+    }
+
+    /// セッション世代カウンタ。agent API 側がこの値の変化を検知して
+    /// SessionLifecycleEvent を購読する。
+    pub fn session_generation(&self) -> u64 {
+        self.session_generation
+    }
+
+    /// 明示的にセッション開始を通知する（`/play` から呼ばれる）。
+    /// `reset()` は内部状態もクリアするが、こちらは世代のみ進める。
+    pub fn mark_session_started(&mut self) {
+        self.bump_session_generation(SessionLifecycleEvent::Started);
+    }
+
+    /// 明示的に「seek / rewind による巻き戻し」を通知する。
+    pub fn mark_session_reset(&mut self) {
+        self.bump_session_generation(SessionLifecycleEvent::Reset);
+    }
+
+    /// 明示的にセッション終了を通知する（`/toggle` → Live 等）。
+    pub fn mark_session_terminated(&mut self) {
+        self.bump_session_generation(SessionLifecycleEvent::Terminated);
+    }
+
+    fn bump_session_generation(&mut self, event: SessionLifecycleEvent) {
+        self.session_generation = self.session_generation.wrapping_add(1);
+        log::debug!(
+            "VirtualExchange: SessionLifecycleEvent::{event:?} (generation={gen})",
+            gen = self.session_generation,
+        );
     }
 }
 
@@ -101,5 +157,65 @@ mod tests {
         engine.place_order(make_order("BTCUSDT"));
         engine.reset();
         assert_eq!(engine.get_orders().len(), 0);
+    }
+
+    // ── SessionLifecycleEvent / generation counter (Phase 4b-1 サブフェーズ E) ──
+
+    #[test]
+    fn session_generation_starts_at_zero() {
+        let engine = VirtualExchangeEngine::new(1_000_000.0);
+        assert_eq!(engine.session_generation(), 0);
+    }
+
+    #[test]
+    fn mark_session_started_increments_generation() {
+        let mut engine = VirtualExchangeEngine::new(1_000_000.0);
+        let before = engine.session_generation();
+        engine.mark_session_started();
+        assert_eq!(engine.session_generation(), before + 1);
+    }
+
+    #[test]
+    fn reset_does_not_change_generation_by_itself() {
+        // reset() は内部状態クリアのみ。Lifecycle 発火は呼び出し側が明示する。
+        let mut engine = VirtualExchangeEngine::new(1_000_000.0);
+        let before = engine.session_generation();
+        engine.reset();
+        assert_eq!(engine.session_generation(), before);
+    }
+
+    #[test]
+    fn mark_session_reset_increments_generation() {
+        let mut engine = VirtualExchangeEngine::new(1_000_000.0);
+        let before = engine.session_generation();
+        engine.mark_session_reset();
+        assert_eq!(engine.session_generation(), before + 1);
+    }
+
+    #[test]
+    fn mark_session_terminated_increments_generation() {
+        let mut engine = VirtualExchangeEngine::new(1_000_000.0);
+        let before = engine.session_generation();
+        engine.mark_session_terminated();
+        assert_eq!(engine.session_generation(), before + 1);
+    }
+
+    #[test]
+    fn multiple_lifecycle_events_each_increment() {
+        let mut engine = VirtualExchangeEngine::new(1_000_000.0);
+        engine.mark_session_started();
+        engine.mark_session_reset();
+        engine.mark_session_reset();
+        engine.mark_session_terminated();
+        assert_eq!(engine.session_generation(), 4);
+    }
+
+    #[test]
+    fn place_order_does_not_change_generation() {
+        // 通常 tick 進行・注文発注では agent map のクリアは走らない。
+        let mut engine = VirtualExchangeEngine::new(1_000_000.0);
+        let before = engine.session_generation();
+        engine.place_order(make_order("BTCUSDT"));
+        assert_eq!(engine.session_generation(), before);
     }
 }

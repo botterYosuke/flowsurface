@@ -18,6 +18,8 @@ pub enum ApiCommand {
     VirtualExchange(VirtualExchangeCommand),
     /// ナラティブ API コマンド（Phase 4a）。
     Narrative(NarrativeCommand),
+    /// Agent 専用 Replay API コマンド（Phase 4b-1）。
+    AgentSession(AgentSessionCommand),
     /// 立花証券余力情報を取得する（GET /api/buying-power）。
     FetchBuyingPower,
     /// 立花証券新規注文を発注する（POST /api/tachibana/order）。
@@ -68,6 +70,27 @@ pub enum VirtualExchangeCommand {
     GetState,
     /// pending 注文の一覧を取得する（GET /api/replay/orders）
     GetOrders,
+}
+
+/// Agent 専用 Replay API コマンド（Phase 4b-1）。
+///
+/// ADR-0001 / phase4b_agent_replay_api.md §4 に基づく。UI リモコン API
+/// （`/api/replay/*`）とは別経路で、型契約と決定論性を担保する。
+#[derive(Debug, Clone)]
+pub enum AgentSessionCommand {
+    /// `POST /api/agent/session/:id/step`: 1 バー進行 + 副作用同梱。
+    Step { session_id: String },
+    /// `POST /api/agent/session/:id/order`: 仮想注文（冪等性あり）。
+    PlaceOrder {
+        session_id: String,
+        request: Box<crate::api::order_request::AgentOrderRequest>,
+    },
+    /// `POST /api/agent/session/:id/advance`: 任意区間を instant 実行。
+    /// Headless ランタイムのみ受理（GUI では 400 で拒否）。
+    Advance {
+        session_id: String,
+        request: Box<crate::api::advance_request::AgentAdvanceRequest>,
+    },
 }
 
 /// ナラティブ API コマンド（Phase 4a）。
@@ -376,8 +399,18 @@ async fn run_server(mut sender: mpsc::Sender<ApiMessage>) {
                 .await;
                 continue;
             }
+            Err(RouteError::BadRequestWithMessage(msg)) => {
+                let body = serde_json::json!({ "error": msg }).to_string();
+                let _ = write_response(&mut stream, 400, &body).await;
+                continue;
+            }
             Err(RouteError::PayloadTooLarge) => {
                 let _ = write_response(&mut stream, 413, r#"{"error":"Payload Too Large"}"#).await;
+                continue;
+            }
+            Err(RouteError::NotImplemented) => {
+                let _ =
+                    write_response(&mut stream, 501, NOT_IMPLEMENTED_MULTI_SESSION_BODY).await;
                 continue;
             }
         };
@@ -428,8 +461,20 @@ fn parse_request(raw: &str) -> Option<(String, String, String)> {
 enum RouteError {
     NotFound,
     BadRequest,
+    /// BadRequest と同じ 400 ステータスを返すが、レスポンス本文に具体的な
+    /// エラーメッセージを含める（Phase 4b-1 サブフェーズ F）。agent API の
+    /// silent failure 回避のため、原因を明示して返す。
+    BadRequestWithMessage(String),
     PayloadTooLarge,
+    /// 501 Not Implemented — Phase 4b-1 時点で `session_id != "default"` を
+    /// 明示拒否する。詳細は ADR-0001 §Risks。
+    NotImplemented,
 }
+
+/// `RouteError::NotImplemented` に対応する 501 レスポンス本文。
+/// ADR-0001 / phase4b_agent_replay_api.md §4.5 で固定文言として定義。
+pub(crate) const NOT_IMPLEMENTED_MULTI_SESSION_BODY: &str =
+    r#"{"error":"multi-session not yet implemented; use 'default' until Phase 4c"}"#;
 
 /// body から文字列フィールドを取り出す
 fn body_str_field(body: &str, key: &str) -> Result<String, RouteError> {
@@ -446,6 +491,62 @@ fn body_str_field(body: &str, key: &str) -> Result<String, RouteError> {
 fn body_uuid_field(body: &str, key: &str) -> Result<uuid::Uuid, RouteError> {
     let s = body_str_field(body, key)?;
     uuid::Uuid::parse_str(&s).map_err(|_| RouteError::BadRequest)
+}
+
+/// `/api/agent/session/:id/<suffix>` 形式のパスから `:id` を抽出する。
+/// `:id` が空・`/` を含むなどの場合は `BadRequest`。
+/// ADR-0001 に基づき `:id != "default"` は `NotImplemented`（501）。
+fn extract_agent_session_id<'a>(
+    path: &'a str,
+    suffix: &str,
+) -> Result<&'a str, RouteError> {
+    let after_prefix = path
+        .strip_prefix("/api/agent/session/")
+        .ok_or(RouteError::NotFound)?;
+    let end_marker = format!("/{suffix}");
+    let session_id = after_prefix
+        .strip_suffix(&end_marker)
+        .ok_or(RouteError::NotFound)?;
+    if session_id.is_empty() || session_id.contains('/') {
+        return Err(RouteError::BadRequest);
+    }
+    Ok(session_id)
+}
+
+fn parse_agent_session_step(path: &str) -> Result<ApiCommand, RouteError> {
+    let session_id = extract_agent_session_id(path, "step")?;
+    if session_id != "default" {
+        return Err(RouteError::NotImplemented);
+    }
+    Ok(ApiCommand::AgentSession(AgentSessionCommand::Step {
+        session_id: session_id.to_string(),
+    }))
+}
+
+fn parse_agent_session_advance(path: &str, body: &str) -> Result<ApiCommand, RouteError> {
+    let session_id = extract_agent_session_id(path, "advance")?;
+    if session_id != "default" {
+        return Err(RouteError::NotImplemented);
+    }
+    let request = crate::api::advance_request::parse_agent_advance_request(body)
+        .map_err(RouteError::BadRequestWithMessage)?;
+    Ok(ApiCommand::AgentSession(AgentSessionCommand::Advance {
+        session_id: session_id.to_string(),
+        request: Box::new(request),
+    }))
+}
+
+fn parse_agent_session_order(path: &str, body: &str) -> Result<ApiCommand, RouteError> {
+    let session_id = extract_agent_session_id(path, "order")?;
+    if session_id != "default" {
+        return Err(RouteError::NotImplemented);
+    }
+    let request = crate::api::order_request::parse_agent_order_request(body)
+        .map_err(RouteError::BadRequestWithMessage)?;
+    Ok(ApiCommand::AgentSession(AgentSessionCommand::PlaceOrder {
+        session_id: session_id.to_string(),
+        request: Box::new(request),
+    }))
 }
 
 /// "YYYY-MM-DD HH:MM" 形式の日時文字列を検証する。不正なら RouteError::BadRequest を返す。
@@ -543,6 +644,17 @@ fn route(method: &str, path: &str, body: &str) -> Result<ApiCommand, RouteError>
         }
         ("GET", p) if p.starts_with("/api/agent/narrative/") => parse_narrative_get(p),
         ("PATCH", p) if p.starts_with("/api/agent/narrative/") => parse_narrative_patch(p, body),
+
+        // ── Agent 専用 Replay API（Phase 4b-1）────────────────────────────
+        ("POST", p) if p.starts_with("/api/agent/session/") && p.ends_with("/step") => {
+            parse_agent_session_step(p)
+        }
+        ("POST", p) if p.starts_with("/api/agent/session/") && p.ends_with("/order") => {
+            parse_agent_session_order(p, body)
+        }
+        ("POST", p) if p.starts_with("/api/agent/session/") && p.ends_with("/advance") => {
+            parse_agent_session_advance(p, body)
+        }
 
         // ── 立花証券余力情報 ──────────────────────────────────────────────
         ("GET", "/api/buying-power") => Ok(ApiCommand::FetchBuyingPower),
@@ -1177,6 +1289,228 @@ mod tests {
             ApiCommand::Pane(c) => c,
             _ => panic!("Expected ApiCommand::Pane, got {cmd:?}"),
         }
+    }
+
+    // ── route tests: agent session (Phase 4b-1 サブフェーズ B) ──
+
+    #[test]
+    fn route_agent_session_step_accepts_default() {
+        let cmd = route("POST", "/api/agent/session/default/step", "").unwrap();
+        match cmd {
+            ApiCommand::AgentSession(AgentSessionCommand::Step { session_id }) => {
+                assert_eq!(session_id, "default");
+            }
+            other => panic!("Expected AgentSession::Step, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn route_agent_session_step_rejects_non_default_session_with_501() {
+        // ADR-0001: session_id != "default" は NotImplemented（501）で拒否。
+        let result = route("POST", "/api/agent/session/other/step", "");
+        assert!(
+            matches!(result, Err(RouteError::NotImplemented)),
+            "got {result:?}"
+        );
+    }
+
+    #[test]
+    fn route_agent_session_step_rejects_empty_session_id() {
+        // `/api/agent/session//step` — 空セッション ID は BadRequest。
+        let result = route("POST", "/api/agent/session//step", "");
+        assert!(matches!(result, Err(RouteError::BadRequest)), "got {result:?}");
+    }
+
+    #[test]
+    fn route_agent_session_step_rejects_get_method() {
+        // step は POST のみ。GET では NotFound にフォールバック。
+        let result = route("GET", "/api/agent/session/default/step", "");
+        assert!(matches!(result, Err(RouteError::NotFound)), "got {result:?}");
+    }
+
+    #[test]
+    fn route_agent_session_rejects_unknown_suffix() {
+        // `/step` / `/advance` / `/order` 以外の suffix は NotFound。
+        // サブフェーズ B 時点では `/step` のみルーティング済み。
+        let result = route("POST", "/api/agent/session/default/unknown", "");
+        assert!(matches!(result, Err(RouteError::NotFound)), "got {result:?}");
+    }
+
+    #[test]
+    fn route_agent_session_step_rejects_non_default_uuid_like() {
+        // UUID 風の session_id も拒否（Phase 4c まで "default" 固定）。
+        let result = route(
+            "POST",
+            "/api/agent/session/550e8400-e29b-41d4-a716-446655440000/step",
+            "",
+        );
+        assert!(matches!(result, Err(RouteError::NotImplemented)));
+    }
+
+    // ── route tests: agent session order (Phase 4b-1 サブフェーズ E) ──
+
+    const VALID_ORDER_BODY: &str = r#"{
+        "client_order_id": "cli_42",
+        "ticker": {"exchange": "HyperliquidLinear", "symbol": "BTC"},
+        "side": "buy",
+        "qty": 0.1,
+        "order_type": {"market": {}}
+    }"#;
+
+    #[test]
+    fn route_agent_session_order_accepts_default_with_valid_body() {
+        let cmd = route(
+            "POST",
+            "/api/agent/session/default/order",
+            VALID_ORDER_BODY,
+        )
+        .unwrap();
+        match cmd {
+            ApiCommand::AgentSession(AgentSessionCommand::PlaceOrder { session_id, request }) => {
+                assert_eq!(session_id, "default");
+                assert_eq!(request.client_order_id.as_str(), "cli_42");
+                assert_eq!(request.ticker.symbol, "BTC");
+            }
+            other => panic!("expected PlaceOrder, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn route_agent_session_order_rejects_non_default_session() {
+        let result = route("POST", "/api/agent/session/other/order", VALID_ORDER_BODY);
+        assert!(matches!(result, Err(RouteError::NotImplemented)));
+    }
+
+    fn assert_bad_request_with_keyword(
+        result: Result<ApiCommand, RouteError>,
+        keyword: &str,
+    ) {
+        match result {
+            Err(RouteError::BadRequestWithMessage(msg)) => {
+                assert!(
+                    msg.to_ascii_lowercase().contains(&keyword.to_ascii_lowercase()),
+                    "error message missing keyword {keyword:?}: {msg}"
+                );
+            }
+            other => panic!("expected BadRequestWithMessage containing {keyword:?}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn route_agent_session_order_rejects_string_ticker_with_specific_message() {
+        let body = r#"{
+            "client_order_id": "cli_1",
+            "ticker": "HyperliquidLinear:BTC",
+            "side": "buy",
+            "qty": 0.1,
+            "order_type": {"market": {}}
+        }"#;
+        assert_bad_request_with_keyword(
+            route("POST", "/api/agent/session/default/order", body),
+            "ticker",
+        );
+    }
+
+    #[test]
+    fn route_agent_session_order_rejects_missing_order_type_with_specific_message() {
+        let body = r#"{
+            "client_order_id": "cli_1",
+            "ticker": {"exchange": "X", "symbol": "Y"},
+            "side": "buy",
+            "qty": 0.1
+        }"#;
+        assert_bad_request_with_keyword(
+            route("POST", "/api/agent/session/default/order", body),
+            "order_type",
+        );
+    }
+
+    #[test]
+    fn route_agent_session_order_rejects_missing_client_order_id_with_specific_message() {
+        let body = r#"{
+            "ticker": {"exchange": "X", "symbol": "Y"},
+            "side": "buy",
+            "qty": 0.1,
+            "order_type": {"market": {}}
+        }"#;
+        assert_bad_request_with_keyword(
+            route("POST", "/api/agent/session/default/order", body),
+            "client_order_id",
+        );
+    }
+
+    #[test]
+    fn route_agent_session_order_rejects_invalid_client_order_id_charset_with_specific_message() {
+        let body = r#"{
+            "client_order_id": "cli 42",
+            "ticker": {"exchange": "X", "symbol": "Y"},
+            "side": "buy",
+            "qty": 0.1,
+            "order_type": {"market": {}}
+        }"#;
+        assert_bad_request_with_keyword(
+            route("POST", "/api/agent/session/default/order", body),
+            "client_order_id",
+        );
+    }
+
+    #[test]
+    fn route_agent_session_order_rejects_get_method() {
+        let result = route("GET", "/api/agent/session/default/order", VALID_ORDER_BODY);
+        assert!(matches!(result, Err(RouteError::NotFound)));
+    }
+
+    // ── route tests: agent session advance (Phase 4b-1 サブフェーズ G) ──
+
+    #[test]
+    fn route_agent_session_advance_accepts_default_with_valid_body() {
+        let body = r#"{"until_ms": 1704067200000}"#;
+        let cmd = route("POST", "/api/agent/session/default/advance", body).unwrap();
+        match cmd {
+            ApiCommand::AgentSession(AgentSessionCommand::Advance { session_id, request }) => {
+                assert_eq!(session_id, "default");
+                assert_eq!(request.until_ms.as_u64(), 1_704_067_200_000);
+            }
+            other => panic!("expected Advance, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn route_agent_session_advance_rejects_non_default_session() {
+        let body = r#"{"until_ms": 100}"#;
+        let result = route("POST", "/api/agent/session/other/advance", body);
+        assert!(matches!(result, Err(RouteError::NotImplemented)));
+    }
+
+    #[test]
+    fn route_agent_session_advance_rejects_missing_until_ms() {
+        let result = route("POST", "/api/agent/session/default/advance", "{}");
+        assert_bad_request_with_keyword(result, "until_ms");
+    }
+
+    #[test]
+    fn route_agent_session_advance_rejects_end_in_stop_on() {
+        // plan §4.3: "end" は不正値（範囲終端は常に停止するため明示不要）
+        let body = r#"{"until_ms": 100, "stop_on": ["end"]}"#;
+        let result = route("POST", "/api/agent/session/default/advance", body);
+        // serde の unknown variant エラーには "end" 値が含まれる。
+        assert_bad_request_with_keyword(result, "end");
+    }
+
+    #[test]
+    fn route_agent_session_advance_rejects_unknown_field() {
+        let body = r#"{"until_ms": 100, "unknown": "x"}"#;
+        let result = route("POST", "/api/agent/session/default/advance", body);
+        assert_bad_request_with_keyword(result, "unknown");
+    }
+
+    #[test]
+    fn not_implemented_body_matches_adr_spec() {
+        // ADR-0001 / phase4b_agent_replay_api.md §4.5 固定文言。
+        assert_eq!(
+            NOT_IMPLEMENTED_MULTI_SESSION_BODY,
+            r#"{"error":"multi-session not yet implemented; use 'default' until Phase 4c"}"#
+        );
     }
 
     #[test]

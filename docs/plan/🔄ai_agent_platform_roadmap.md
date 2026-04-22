@@ -30,7 +30,8 @@ Phase 1  観測 API              ← エージェントが市場を「見る」 
 Phase 2  仮想売買エンジン        ← エージェントが「行動」し「報酬」を受け取る ✅ 完了（2026-04-17）
 Phase 3  Python SDK             ← 強化学習サイクルを高速に回す          ✅ 完了（2026-04-21）
 Phase 4a Agent ナラティブ基盤   ← 「なぜ判断したか」をローカルで記録・可視化 ✅ 完了（2026-04-21）
-Phase 4b ASI Alliance 統合      ← uAgents でナラティブをネットワーク越しに共有 ← 次のフェーズ
+Phase 4b-1 Agent 専用 Replay API ← /api/agent/session/:id/* に型契約ありの API を分離 ✅ 完了（2026-04-22）
+Phase 4b-2 ASI Alliance 統合     ← uAgents でナラティブをネットワーク越しに共有 ← 次のフェーズ
 Phase 4c データマーケットプレイス ← Ocean Protocol で戦略データを資産化（任意）
 ```
 

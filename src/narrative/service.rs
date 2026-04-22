@@ -454,3 +454,23 @@ pub async fn update_outcome_from_fill(
     };
     store.update_outcome_by_order_id(order_id, outcome).await
 }
+
+/// `update_outcome_from_fill` の拡張版。更新された narrative の UUID 一覧を返す。
+/// Phase 4b-1 サブフェーズ D の step レスポンス `updated_narrative_ids` 同梱用。
+pub async fn update_outcome_from_fill_returning_ids(
+    store: &Arc<NarrativeStore>,
+    order_id: &str,
+    fill_price: f64,
+    fill_time_ms: i64,
+    _side_hint: Option<NarrativeSide>,
+) -> Result<Vec<Uuid>, NarrativeStoreError> {
+    let outcome = NarrativeOutcome {
+        fill_price,
+        fill_time_ms,
+        closed_at_ms: None,
+        realized_pnl: None,
+    };
+    store
+        .update_outcome_by_order_id_returning_ids(order_id, outcome)
+        .await
+}

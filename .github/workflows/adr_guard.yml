@@ -1,0 +1,42 @@
+name: ADR Guard
+on: [pull_request]
+
+# ADR-0001 §Risks の mitigation:
+# 「/api/replay/* への新規ルート追加は禁止」を CI で検知する。
+# 既存ルートの内部実装変更は許可し、routing table tuple リテラル
+# ('POST', '/api/replay/...') の新規追加のみを fail させる。
+jobs:
+    ui-remote-api-freeze:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0 # main との diff に必要
+
+            - name: Fetch main
+              run: git fetch origin main --depth=1
+
+            - name: Check for new /api/replay/* routes in src/replay_api.rs
+              run: |
+                  # routing table は以下のような tuple リテラルで定義されている:
+                  #     ("POST", "/api/replay/play") => parse_play_command(body),
+                  # この形の行が diff で新規追加されていれば fail。
+                  # テストコード内の裸文字列 ("POST /api/replay/..." 等) は
+                  # この tuple 形を取らないため false positive にならない。
+                  set -e
+                  ADDED=$(git diff origin/main -- src/replay_api.rs | \
+                          grep -E '^\+[[:space:]]*\("(POST|GET|PATCH|PUT|DELETE)",[[:space:]]*"/api/replay/' || true)
+                  if [ -n "$ADDED" ]; then
+                      echo "::error::ADR-0001 violation: new route(s) added to /api/replay/*"
+                      echo ""
+                      echo "Added lines:"
+                      echo "$ADDED"
+                      echo ""
+                      echo "ADR-0001 requires new agent API endpoints to be added under"
+                      echo "/api/agent/session/:id/* instead. UI リモコン API (/api/replay/*)"
+                      echo "は段階的に facade 化する方針のため、新規ルート追加は禁止。"
+                      echo ""
+                      echo "See: docs/adr/0001-agent-replay-api-separation.md"
+                      exit 1
+                  fi
+                  echo "✓ No new /api/replay/* routes detected"

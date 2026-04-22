@@ -144,6 +144,10 @@ struct HeadlessEngine {
     narrative_store: std::sync::Arc<crate::narrative::store::NarrativeStore>,
     snapshot_store: crate::narrative::snapshot_store::SnapshotStore,
     data_root: std::path::PathBuf,
+    /// Agent 専用 Replay API の "default" セッション state（Phase 4b-1 サブフェーズ E）。
+    /// `client_order_id` 冪等性マップを持ち、`VirtualExchange::session_generation()`
+    /// の変化で自動クリアされる。
+    agent_session_state: crate::api::agent_session_state::AgentSessionState,
 }
 
 impl HeadlessEngine {
@@ -177,6 +181,7 @@ impl HeadlessEngine {
             ),
             snapshot_store: crate::narrative::snapshot_store::SnapshotStore::new(data_root.clone()),
             data_root,
+            agent_session_state: crate::api::agent_session_state::AgentSessionState::new(),
         }
     }
 
@@ -213,6 +218,8 @@ impl HeadlessEngine {
         self.state.range_input.start = start.to_string();
         self.state.range_input.end = end.to_string();
         self.virtual_engine.reset();
+        // ADR-0001 SessionLifecycleEvent::Started — agent state map をクリアさせる。
+        self.virtual_engine.mark_session_started();
 
         // kline ロードを別タスクで実行
         let tx = self.load_tx.clone();
@@ -467,6 +474,7 @@ impl HeadlessEngine {
                 clock.seek(start);
             }
             self.virtual_engine.reset();
+            self.virtual_engine.mark_session_reset();
             return serde_json::json!({"ok": true}).to_string();
         }
 
@@ -507,8 +515,9 @@ impl HeadlessEngine {
             clock.seek(new_time);
         }
 
-        // 時刻が後退したため仮想エンジンをリセット
+        // 時刻が後退したため仮想エンジンをリセット + lifecycle Reset 発火
         self.virtual_engine.reset();
+        self.virtual_engine.mark_session_reset();
 
         serde_json::json!({"ok": true, "current_time": new_time}).to_string()
     }
@@ -534,6 +543,582 @@ impl HeadlessEngine {
     fn get_status_json(&self) -> String {
         serde_json::to_string(&self.state.to_status())
             .unwrap_or_else(|e| format!(r#"{{"error":"serialize failed: {e}"}}"#))
+    }
+
+    /// `get_state_json` のロジックを構造化データとして返す（agent API 用）。
+    /// JSON 文字列化せず、`StepObservation` 構造体を返す。
+    fn build_step_observation(
+        &self,
+        limit: usize,
+    ) -> Option<crate::api::step_response::StepObservation> {
+        use crate::api::step_response::StepObservation;
+        match &self.state.session {
+            ReplaySession::Active {
+                clock,
+                store,
+                active_streams,
+            } => {
+                let now_ms = clock.now_ms();
+                let mut ohlcv = Vec::new();
+                let mut recent_trades = Vec::new();
+
+                let mut sorted: Vec<_> = active_streams.iter().collect();
+                sorted.sort_by_cached_key(|s| format!("{s:?}"));
+
+                for stream in sorted {
+                    if let StreamKind::Kline {
+                        ticker_info,
+                        timeframe,
+                    } = stream
+                    {
+                        let now_end = now_ms.saturating_add(1);
+                        let all_klines = store.klines_in(stream, 0..now_end);
+                        let slice = if all_klines.len() > limit {
+                            &all_klines[all_klines.len() - limit..]
+                        } else {
+                            all_klines
+                        };
+                        if !slice.is_empty() {
+                            let exchange_str =
+                                format!("{:?}", ticker_info.ticker.exchange).replace(' ', "");
+                            let label =
+                                format!("{exchange_str}:{}:{timeframe}", ticker_info.ticker);
+                            for k in slice {
+                                ohlcv.push(serde_json::json!({
+                                    "stream": label,
+                                    "time": k.time,
+                                    "open": k.open.to_f64(),
+                                    "high": k.high.to_f64(),
+                                    "low": k.low.to_f64(),
+                                    "close": k.close.to_f64(),
+                                    "volume": k.volume.total().to_f64(),
+                                }));
+                            }
+                        }
+
+                        let trade_stream = StreamKind::Trades {
+                            ticker_info: *ticker_info,
+                        };
+                        let trade_start = now_ms
+                            .saturating_sub(crate::replay::controller::api::TRADE_WINDOW_MS);
+                        let all_trades = store.trades_in(&trade_stream, trade_start..now_ms + 1);
+                        let trade_slice = if all_trades.len() > limit {
+                            &all_trades[all_trades.len() - limit..]
+                        } else {
+                            all_trades
+                        };
+                        if !trade_slice.is_empty() {
+                            let exchange_str =
+                                format!("{:?}", ticker_info.ticker.exchange).replace(' ', "");
+                            let label =
+                                format!("{exchange_str}:{}:Trades", ticker_info.ticker);
+                            let items: Vec<serde_json::Value> = trade_slice
+                                .iter()
+                                .map(|t| {
+                                    serde_json::json!({
+                                        "time": t.time,
+                                        "price": t.price.to_f64(),
+                                        "qty": t.qty.to_f64(),
+                                        "is_sell": t.is_sell,
+                                    })
+                                })
+                                .collect();
+                            recent_trades
+                                .push(serde_json::json!({"stream": label, "trades": items}));
+                        }
+                    }
+                }
+
+                let current_price = self.last_close_price().unwrap_or(0.0);
+                let portfolio = self.virtual_engine.portfolio_snapshot(current_price);
+                Some(StepObservation {
+                    ohlcv,
+                    recent_trades,
+                    portfolio,
+                })
+            }
+            _ => None,
+        }
+    }
+
+    /// `POST /api/agent/session/default/advance` を処理する（Phase 4b-1 サブフェーズ G）。
+    ///
+    /// ADR-0001 / phase4b_agent_replay_api.md §4.3 に基づく。任意区間を wall-time
+    /// 非依存で instant 実行する。stop_on に応じて fill / narrative 更新発生時点で
+    /// 停止する。Headless ランタイム専用（GUI 側は app/api/mod.rs で 400 拒否済み）。
+    async fn agent_session_advance(
+        &mut self,
+        request: crate::api::advance_request::AgentAdvanceRequest,
+    ) -> (u16, String) {
+        use crate::api::advance_request::{
+            AdvanceResponse, AdvanceStopCondition, AdvanceStoppedReason,
+        };
+        use crate::api::step_response::StepFill;
+
+        match &self.state.session {
+            ReplaySession::Idle => {
+                return (
+                    404,
+                    r#"{"error":"session not started","hint":"start a replay session first (see agent_replay_api.md Getting Started)"}"#
+                        .to_string(),
+                );
+            }
+            ReplaySession::Loading { .. } => {
+                return (503, r#"{"error":"session loading"}"#.to_string());
+            }
+            ReplaySession::Active { .. } => {}
+        }
+        if self.is_playing() {
+            let _ = self.pause();
+        }
+
+        let stop_on_fill = request.stop_on.contains(&AdvanceStopCondition::Fill);
+        let stop_on_narrative = request.stop_on.contains(&AdvanceStopCondition::Narrative);
+
+        let start_time = self.state.current_time();
+        let until_ms = request.until_ms.as_u64();
+        if until_ms <= start_time {
+            let final_portfolio = self
+                .virtual_engine
+                .portfolio_snapshot(self.last_close_price().unwrap_or(0.0));
+            let resp = AdvanceResponse {
+                clock_ms: crate::api::contract::EpochMs::from(start_time),
+                stopped_reason: AdvanceStoppedReason::UntilReached,
+                ticks_advanced: 0,
+                aggregate_fills: 0,
+                aggregate_updated_narratives: 0,
+                fills: if request.include_fills {
+                    Some(Vec::new())
+                } else {
+                    None
+                },
+                final_portfolio,
+            };
+            return match serde_json::to_string(&resp) {
+                Ok(json) => (200, json),
+                Err(e) => (
+                    500,
+                    serde_json::json!({"error": format!("serialize failed: {e}")}).to_string(),
+                ),
+            };
+        }
+
+        let overall_start = std::time::Instant::now();
+        let mut ticks_advanced: u64 = 0;
+        let mut aggregate_fills: usize = 0;
+        let mut aggregate_updated_narratives: usize = 0;
+        let mut collected_fills: Vec<StepFill> = Vec::new();
+        let mut stopped_reason = AdvanceStoppedReason::UntilReached;
+
+        self.agent_session_state
+            .observe_generation(self.virtual_engine.session_generation());
+
+        loop {
+            let pane_step = self.min_step_ms();
+            let (new_time, reached_end) = match &self.state.session {
+                ReplaySession::Active { clock, .. } => {
+                    let current = clock.now_ms();
+                    let end = clock.full_range().end;
+                    if current + pane_step > end {
+                        (current, true)
+                    } else {
+                        (current + pane_step, false)
+                    }
+                }
+                _ => break,
+            };
+
+            if reached_end {
+                stopped_reason = AdvanceStoppedReason::End;
+                break;
+            }
+
+            let fills: Vec<_> = if let ReplaySession::Active {
+                clock,
+                store,
+                active_streams,
+            } = &mut self.state.session
+            {
+                clock.seek(new_time);
+                let ticker_str = self.ticker_str.clone();
+                let synthetic: Vec<exchange::Trade> = active_streams
+                    .iter()
+                    .filter(|s| matches!(s, StreamKind::Kline { .. }))
+                    .filter_map(|stream| {
+                        let klines = store.klines_in(stream, 0..new_time.saturating_add(1));
+                        klines
+                            .iter()
+                            .rev()
+                            .find(|k| k.time <= new_time)
+                            .map(|k| exchange::Trade {
+                                time: new_time,
+                                is_sell: false,
+                                price: k.close,
+                                qty: exchange::unit::qty::Qty::from_f32(1.0),
+                            })
+                    })
+                    .collect();
+                if synthetic.is_empty() {
+                    Vec::new()
+                } else {
+                    self.virtual_engine
+                        .on_tick(&ticker_str, &synthetic, new_time)
+                }
+            } else {
+                Vec::new()
+            };
+
+            let mut tick_updated_narratives = 0usize;
+            for fill in &fills {
+                match crate::narrative::service::update_outcome_from_fill_returning_ids(
+                    &self.narrative_store,
+                    &fill.order_id,
+                    fill.fill_price,
+                    fill.fill_time_ms as i64,
+                    None,
+                )
+                .await
+                {
+                    Ok(ids) => tick_updated_narratives += ids.len(),
+                    Err(e) => log::warn!(
+                        "agent_session_advance: narrative outcome update failed for {oid}: {e}",
+                        oid = fill.order_id
+                    ),
+                }
+            }
+
+            ticks_advanced += 1;
+            aggregate_fills += fills.len();
+            aggregate_updated_narratives += tick_updated_narratives;
+
+            if request.include_fills {
+                for fill in &fills {
+                    let client_order_id = self
+                        .agent_session_state
+                        .client_order_id_for(&fill.order_id)
+                        .map(|c| c.as_str().to_string());
+                    collected_fills.push(StepFill::from_event(fill, client_order_id));
+                }
+            }
+
+            if stop_on_fill && !fills.is_empty() {
+                stopped_reason = AdvanceStoppedReason::Fill;
+                break;
+            }
+            if stop_on_narrative && tick_updated_narratives > 0 {
+                stopped_reason = AdvanceStoppedReason::Narrative;
+                break;
+            }
+            if new_time >= until_ms {
+                stopped_reason = AdvanceStoppedReason::UntilReached;
+                break;
+            }
+        }
+
+        let clock_ms = self.state.current_time();
+        let final_portfolio = self
+            .virtual_engine
+            .portfolio_snapshot(self.last_close_price().unwrap_or(0.0));
+
+        log::debug!(
+            "agent_session_advance: {ticks} ticks in {ms}ms, fills={fills}, narratives={nar}, stopped={stopped:?}",
+            ticks = ticks_advanced,
+            ms = overall_start.elapsed().as_millis(),
+            fills = aggregate_fills,
+            nar = aggregate_updated_narratives,
+            stopped = stopped_reason
+        );
+
+        let resp = AdvanceResponse {
+            clock_ms: crate::api::contract::EpochMs::from(clock_ms),
+            stopped_reason,
+            ticks_advanced,
+            aggregate_fills,
+            aggregate_updated_narratives,
+            fills: if request.include_fills {
+                Some(collected_fills)
+            } else {
+                None
+            },
+            final_portfolio,
+        };
+
+        match serde_json::to_string(&resp) {
+            Ok(json) => (200, json),
+            Err(e) => (
+                500,
+                serde_json::json!({"error": format!("serialize failed: {e}")}).to_string(),
+            ),
+        }
+    }
+
+    /// `POST /api/agent/session/default/order` を処理する（Phase 4b-1 サブフェーズ E）。
+    ///
+    /// ADR-0001 / phase4b_agent_replay_api.md §3.3, §4.4, §4.5 に基づく。
+    /// - session 未起動は 404 + hint
+    /// - `client_order_id` 重複 & body 一致 → 200 + `idempotent_replay: true`
+    /// - `client_order_id` 重複 & body 相違 → 409 Conflict
+    /// - 新規 → 201 Created
+    fn agent_session_place_order(
+        &mut self,
+        request: crate::api::order_request::AgentOrderRequest,
+    ) -> (u16, String) {
+        use crate::api::agent_session_state::PlaceOrderOutcome;
+        use crate::api::order_request::{AgentOrderSide, AgentOrderType};
+        use crate::replay::virtual_exchange::{
+            PositionSide, VirtualOrder, VirtualOrderStatus, VirtualOrderType,
+        };
+
+        // session 状態チェック（step と同じ 404 / 503 ルール）。
+        match &self.state.session {
+            ReplaySession::Idle => {
+                return (
+                    404,
+                    r#"{"error":"session not started","hint":"start a replay session first (see agent_replay_api.md Getting Started)"}"#
+                        .to_string(),
+                );
+            }
+            ReplaySession::Loading { .. } => {
+                return (503, r#"{"error":"session loading"}"#.to_string());
+            }
+            ReplaySession::Active { .. } => {}
+        }
+
+        // 発注前に lifecycle イベントを観測して map を必要に応じクリア。
+        self.agent_session_state
+            .observe_generation(self.virtual_engine.session_generation());
+
+        let key = request.to_key();
+        // 仮 UUID を採番（idempotent replay や conflict では使われない = 捨てられる）。
+        let prospective_order_id = uuid::Uuid::new_v4().to_string();
+        let outcome = self.agent_session_state.place_or_replay(
+            request.client_order_id.clone(),
+            key,
+            prospective_order_id,
+        );
+
+        match outcome {
+            PlaceOrderOutcome::Created { order_id } => {
+                // VirtualExchange に実発注。
+                let side = match request.side {
+                    AgentOrderSide::Buy => PositionSide::Long,
+                    AgentOrderSide::Sell => PositionSide::Short,
+                };
+                let order_type = match request.order_type {
+                    AgentOrderType::Market {} => VirtualOrderType::Market,
+                    AgentOrderType::Limit { price } => VirtualOrderType::Limit { price },
+                };
+                let virtual_order = VirtualOrder {
+                    order_id: order_id.clone(),
+                    // VirtualOrder.ticker は現状 symbol 単体。
+                    ticker: request.ticker.symbol.clone(),
+                    side,
+                    qty: request.qty,
+                    order_type,
+                    placed_time_ms: self.state.current_time(),
+                    status: VirtualOrderStatus::Pending,
+                };
+                self.virtual_engine.place_order(virtual_order);
+                let body = serde_json::json!({
+                    "order_id": order_id,
+                    "client_order_id": request.client_order_id.as_str(),
+                    "idempotent_replay": false,
+                });
+                // 新規/冪等リプレイともに 200 で統一する。レスポンスボディの形は同一なので、
+                // Python SDK は `idempotent_replay` フラグだけで分岐できる
+                // （ステータスコードで分岐しない方が実装が単純になる）。
+                (200, body.to_string())
+            }
+            PlaceOrderOutcome::IdempotentReplay { order_id } => {
+                let body = serde_json::json!({
+                    "order_id": order_id,
+                    "client_order_id": request.client_order_id.as_str(),
+                    "idempotent_replay": true,
+                });
+                (200, body.to_string())
+            }
+            PlaceOrderOutcome::Conflict { existing_order_id } => {
+                let body = serde_json::json!({
+                    "error": "client_order_id conflict with different request body",
+                    "existing_order_id": existing_order_id,
+                });
+                (409, body.to_string())
+            }
+        }
+    }
+
+    /// `POST /api/agent/session/default/step` を処理する（Phase 4b-1 サブフェーズ C / D）。
+    ///
+    /// ADR-0001 / phase4b_agent_replay_api.md §4.2 に基づき、1 バー進行した tick の
+    /// `clock_ms` / `reached_end` / `observation` / `fills` / `updated_narrative_ids`
+    /// を同梱したレスポンスを返す。サブフェーズ D 以降、narrative outcome 更新は
+    /// 同期 `await` で確定させる（agent 側 polling を不要にするため）。
+    async fn agent_session_step(&mut self) -> (u16, String) {
+        use crate::api::step_response::{StepFill, StepResponse};
+
+        let overall_start = std::time::Instant::now();
+
+        // セッション状態チェック。Idle は 404、Loading は 503。
+        match &self.state.session {
+            ReplaySession::Idle => {
+                return (
+                    404,
+                    r#"{"error":"session not started","hint":"start a replay session first (see agent_replay_api.md Getting Started)"}"#
+                        .to_string(),
+                );
+            }
+            ReplaySession::Loading { .. } => {
+                return (503, r#"{"error":"session loading"}"#.to_string());
+            }
+            ReplaySession::Active { .. } => {}
+        }
+
+        // Agent state を lifecycle イベントに同期（ハンドラ入口で 1 回のみ）。
+        // 前回の step/order 以降に UI リモコン経由で /play や seek が走った場合、
+        // ここで stale な client_order_id マップが破棄される。
+        self.agent_session_state
+            .observe_generation(self.virtual_engine.session_generation());
+
+        // Playing 中なら自動 pause（step-forward 仕様と対称）。
+        if self.is_playing() {
+            let _ = self.pause();
+        }
+
+        // 1 バー進める。範囲終端なら reached_end = true で現在時刻を据え置き。
+        let pane_step = self.min_step_ms();
+        let (new_time, reached_end) = match &self.state.session {
+            ReplaySession::Active { clock, .. } => {
+                let current = clock.now_ms();
+                let end = clock.full_range().end;
+                if current + pane_step > end {
+                    (current, true)
+                } else {
+                    (current + pane_step, false)
+                }
+            }
+            _ => unreachable!("session active verified above"),
+        };
+
+        // 進行処理（reached_end でない場合のみ）
+        let fills: Vec<_> = if !reached_end {
+            if let ReplaySession::Active {
+                clock,
+                store,
+                active_streams,
+            } = &mut self.state.session
+            {
+                clock.seek(new_time);
+                let ticker_str = self.ticker_str.clone();
+                let synthetic: Vec<exchange::Trade> = active_streams
+                    .iter()
+                    .filter(|s| matches!(s, StreamKind::Kline { .. }))
+                    .filter_map(|stream| {
+                        let klines = store.klines_in(stream, 0..new_time.saturating_add(1));
+                        klines
+                            .iter()
+                            .rev()
+                            .find(|k| k.time <= new_time)
+                            .map(|k| exchange::Trade {
+                                time: new_time,
+                                is_sell: false,
+                                price: k.close,
+                                qty: exchange::unit::qty::Qty::from_f32(1.0),
+                            })
+                    })
+                    .collect();
+                if synthetic.is_empty() {
+                    Vec::new()
+                } else {
+                    self.virtual_engine
+                        .on_tick(&ticker_str, &synthetic, new_time)
+                }
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        };
+
+        // narrative outcome 更新を同期 await で確定させる（サブフェーズ D）。
+        // plan §5.2 / §8 R1: fill_count 件 → 100ms/p95 を超えたら非同期化に戻す判断基準。
+        // 失敗は log::warn! のみで step 全体を落とさない（plan §7.2 方針）。
+        let narrative_start = std::time::Instant::now();
+        let mut updated_narrative_ids: Vec<String> = Vec::new();
+        for fill in &fills {
+            match crate::narrative::service::update_outcome_from_fill_returning_ids(
+                &self.narrative_store,
+                &fill.order_id,
+                fill.fill_price,
+                fill.fill_time_ms as i64,
+                None,
+            )
+            .await
+            {
+                Ok(ids) => {
+                    for id in ids {
+                        updated_narrative_ids.push(id.to_string());
+                    }
+                }
+                Err(e) => {
+                    log::warn!(
+                        "agent_session_step: narrative outcome update failed for order {order_id}: {e}",
+                        order_id = fill.order_id
+                    );
+                }
+            }
+        }
+        let narrative_elapsed_ms = narrative_start.elapsed().as_millis();
+        if narrative_elapsed_ms > 100 {
+            log::warn!(
+                "agent_session_step: narrative outcome update took {narrative_elapsed_ms}ms for \
+                 {fill_count} fill(s) — exceeds R1 p95 budget (100ms). Consider non-blocking fallback.",
+                fill_count = fills.len()
+            );
+        }
+
+        // observation 構築（session は Active のはず）
+        let observation = match self.build_step_observation(200) {
+            Some(obs) => obs,
+            None => {
+                return (
+                    500,
+                    r#"{"error":"observation build failed: session not active"}"#.to_string(),
+                );
+            }
+        };
+
+        // サブフェーズ E: fill.order_id から agent_session_state を逆引きして
+        // client_order_id を埋める。他経路（UI リモコン `/api/replay/order`）発注の fill
+        // は agent の map に無いため None のまま（設計通り）。
+        // 世代同期はハンドラ開始時に済んでいるため、ここでは再取得しない
+        // （step 内で generation を変える処理は存在しない）。
+        let step_fills: Vec<StepFill> = fills
+            .iter()
+            .map(|f| {
+                let client_order_id = self
+                    .agent_session_state
+                    .client_order_id_for(&f.order_id)
+                    .map(|c| c.as_str().to_string());
+                StepFill::from_event(f, client_order_id)
+            })
+            .collect();
+
+        let resp = StepResponse::new(new_time, reached_end, observation, step_fills)
+            .with_updated_narrative_ids(updated_narrative_ids);
+
+        // R1 計測用: 全体の step ハンドラ処理時間。
+        log::debug!(
+            "agent_session_step: total {total_ms}ms (narrative sync {narrative_elapsed_ms}ms)",
+            total_ms = overall_start.elapsed().as_millis()
+        );
+
+        match resp.to_json_string() {
+            Ok(json) => (200, json),
+            Err(e) => (
+                500,
+                serde_json::json!({"error": format!("serialize failed: {e}")}).to_string(),
+            ),
+        }
     }
 
     fn get_state_json(&self, limit: usize) -> String {
@@ -778,6 +1363,7 @@ impl HeadlessEngine {
                 clock.seek(start);
             }
             self.virtual_engine.reset();
+            self.virtual_engine.mark_session_reset();
         }
         serde_json::json!({ "ok": true }).to_string()
     }
@@ -940,6 +1526,27 @@ impl HeadlessEngine {
             }
             ApiCommand::Narrative(cmd) => {
                 self.handle_narrative_command(cmd, reply).await;
+            }
+            ApiCommand::AgentSession(crate::replay_api::AgentSessionCommand::Step {
+                session_id: _,
+            }) => {
+                // session_id は route 層で "default" に限定済み（非 default は 501 で既に拒否）。
+                let (status, body) = self.agent_session_step().await;
+                reply.send_status(status, body);
+            }
+            ApiCommand::AgentSession(crate::replay_api::AgentSessionCommand::PlaceOrder {
+                session_id: _,
+                request,
+            }) => {
+                let (status, body) = self.agent_session_place_order(*request);
+                reply.send_status(status, body);
+            }
+            ApiCommand::AgentSession(crate::replay_api::AgentSessionCommand::Advance {
+                session_id: _,
+                request,
+            }) => {
+                let (status, body) = self.agent_session_advance(*request).await;
+                reply.send_status(status, body);
             }
             // headless で未対応のコマンドは 501 を返す
             ApiCommand::Pane(_)
@@ -1460,5 +2067,584 @@ mod tests {
 
         engine.handle_load_result(LoadResult::Err("network error".to_string()));
         assert!(matches!(engine.state.session, ReplaySession::Idle));
+    }
+
+    // ── agent_session_step (Phase 4b-1 サブフェーズ C) ────────────────────────
+
+    #[tokio::test]
+    async fn agent_session_step_returns_404_when_session_idle() {
+        let ticker = parse_ticker_str("HyperliquidLinear:BTC").unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let mut engine = HeadlessEngine::new(ticker, Timeframe::M1, tx);
+        let (status, body) = engine.agent_session_step().await;
+        assert_eq!(status, 404, "got body: {body}");
+        assert!(
+            body.contains("session not started"),
+            "body missing expected error: {body}"
+        );
+        assert!(body.contains("\"hint\""), "body missing hint field: {body}");
+    }
+
+    #[tokio::test]
+    async fn agent_session_step_returns_200_with_required_keys() {
+        let start_ms = 1_000_000u64;
+        let step_ms = 60_000u64;
+        let mut engine =
+            make_active_engine_with_klines(start_ms, start_ms + step_ms * 5, step_ms, start_ms);
+        let (status, body) = engine.agent_session_step().await;
+        assert_eq!(status, 200, "got body: {body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        for key in [
+            "clock_ms",
+            "reached_end",
+            "observation",
+            "fills",
+            "updated_narrative_ids",
+        ] {
+            assert!(v.get(key).is_some(), "missing top-level key {key} in {body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_session_step_advances_clock_by_one_bar() {
+        let start_ms = 1_000_000u64;
+        let step_ms = 60_000u64;
+        let mut engine =
+            make_active_engine_with_klines(start_ms, start_ms + step_ms * 5, step_ms, start_ms);
+        let (_status, body) = engine.agent_session_step().await;
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            v["clock_ms"].as_u64().unwrap(),
+            start_ms + step_ms,
+            "expected advance by one bar"
+        );
+        assert_eq!(v["reached_end"], false);
+    }
+
+    #[tokio::test]
+    async fn agent_session_step_sets_reached_end_at_range_boundary() {
+        let start_ms = 1_000_000u64;
+        let step_ms = 60_000u64;
+        let end_ms = start_ms + step_ms * 2;
+        // 初期位置を end_ms にセット — これ以上進めない。
+        let mut engine = make_active_engine_with_klines(start_ms, end_ms, step_ms, end_ms);
+        let (status, body) = engine.agent_session_step().await;
+        assert_eq!(status, 200);
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["reached_end"], true, "body: {body}");
+        assert_eq!(
+            v["clock_ms"].as_u64().unwrap(),
+            end_ms,
+            "clock must not advance past end"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_session_step_returns_fills_inline_when_market_order_exists() {
+        use crate::replay::virtual_exchange::{PositionSide, VirtualOrder, VirtualOrderStatus};
+
+        let start_ms = 1_000_000u64;
+        let step_ms = 60_000u64;
+        let mut engine =
+            make_active_engine_with_klines(start_ms, start_ms + step_ms * 5, step_ms, start_ms);
+
+        // 成行注文を 1 件置いてから step — 次 tick の close 価格で即約定する。
+        engine.virtual_engine.place_order(VirtualOrder {
+            order_id: "ord_1".to_string(),
+            ticker: "BTC".to_string(),
+            side: PositionSide::Long,
+            qty: 0.1,
+            order_type: VirtualOrderType::Market,
+            placed_time_ms: start_ms,
+            status: VirtualOrderStatus::Pending,
+        });
+
+        let (status, body) = engine.agent_session_step().await;
+        assert_eq!(status, 200, "got body: {body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let fills = v["fills"].as_array().expect("fills must be array");
+        assert_eq!(fills.len(), 1, "expected one fill, got: {body}");
+        assert_eq!(fills[0]["order_id"], "ord_1");
+        assert_eq!(fills[0]["side"], "buy");
+        assert!(
+            fills[0]["client_order_id"].is_null(),
+            "subphase C: client_order_id must be null"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_session_step_observation_includes_portfolio() {
+        let start_ms = 1_000_000u64;
+        let step_ms = 60_000u64;
+        let mut engine =
+            make_active_engine_with_klines(start_ms, start_ms + step_ms * 5, step_ms, start_ms);
+        let (_status, body) = engine.agent_session_step().await;
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            v["observation"]["portfolio"]["cash"].as_f64().unwrap(),
+            1_000_000.0,
+            "default initial cash"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_session_step_updated_narrative_ids_empty_when_no_linked_narrative() {
+        // narrative が linked されていない場合は空配列（サブフェーズ D）。
+        let start_ms = 1_000_000u64;
+        let step_ms = 60_000u64;
+        let mut engine =
+            make_active_engine_with_klines(start_ms, start_ms + step_ms * 5, step_ms, start_ms);
+        let (_status, body) = engine.agent_session_step().await;
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(
+            v["updated_narrative_ids"]
+                .as_array()
+                .map(|a| a.is_empty())
+                .unwrap_or(false)
+        );
+    }
+
+    #[tokio::test]
+    async fn step_updates_narrative_synchronously() {
+        // ADR-0001 / plan §5.2 の核不変条件:
+        // step レスポンスの `updated_narrative_ids` は同期 await 後に確定し、
+        // agent が polling 不要で UUID を取得できる。
+        use crate::narrative::model::{
+            Narrative, NarrativeAction, NarrativeSide, SnapshotRef,
+        };
+        use crate::replay::virtual_exchange::{PositionSide, VirtualOrder, VirtualOrderStatus};
+
+        let start_ms = 1_000_000u64;
+        let step_ms = 60_000u64;
+        let mut engine =
+            make_active_engine_with_klines(start_ms, start_ms + step_ms * 5, step_ms, start_ms);
+
+        // 永続 SQLite の蓄積を避けるため、このテスト実行固有の UUID を order_id に採用。
+        let unique_order_id = format!("ord_d_sync_{}", uuid::Uuid::new_v4());
+        let narrative_id = uuid::Uuid::new_v4();
+        let narrative = Narrative {
+            id: narrative_id,
+            agent_id: "test_agent".to_string(),
+            uagent_address: None,
+            timestamp_ms: start_ms as i64,
+            ticker: "BTCUSDT".to_string(),
+            timeframe: "M1".to_string(),
+            snapshot_ref: SnapshotRef {
+                path: std::path::PathBuf::from("narratives/snapshots/test.json.gz"),
+                size_bytes: 42,
+                sha256: "a".repeat(64),
+            },
+            reasoning: "test".to_string(),
+            action: NarrativeAction {
+                side: NarrativeSide::Buy,
+                qty: 0.1,
+                price: 100.5,
+            },
+            confidence: 0.5,
+            outcome: None,
+            // 共有 SQLite（デフォルト store）はテスト間で永続化されるため、
+            // 毎回ユニークな order_id を生成して蓄積による衝突を防ぐ。
+            linked_order_id: Some(unique_order_id.clone()),
+            public: false,
+            created_at_ms: start_ms as i64,
+            idempotency_key: None,
+        };
+        engine.narrative_store.insert(narrative).await.unwrap();
+
+        // 成行注文を置いて step — 次 tick で即約定する。
+        engine.virtual_engine.place_order(VirtualOrder {
+            order_id: unique_order_id.clone(),
+            ticker: "BTC".to_string(),
+            side: PositionSide::Long,
+            qty: 0.1,
+            order_type: VirtualOrderType::Market,
+            placed_time_ms: start_ms,
+            status: VirtualOrderStatus::Pending,
+        });
+
+        let (status, body) = engine.agent_session_step().await;
+        assert_eq!(status, 200, "body: {body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+        // 1. updated_narrative_ids にこの narrative の UUID が含まれる。
+        let ids = v["updated_narrative_ids"]
+            .as_array()
+            .expect("must be array");
+        assert_eq!(ids.len(), 1, "expected one updated id, got {body}");
+        assert_eq!(ids[0].as_str().unwrap(), narrative_id.to_string());
+
+        // 2. step レスポンス返却時点で outcome が DB に書き込み完了している
+        //    （polling 不要 = 同期 await の保証）。
+        let stored = engine
+            .narrative_store
+            .get(narrative_id)
+            .await
+            .unwrap()
+            .expect("narrative exists");
+        let outcome = stored.outcome.expect("outcome must be populated");
+        assert!(outcome.fill_price > 0.0);
+        assert_eq!(outcome.fill_time_ms, (start_ms + step_ms) as i64);
+    }
+
+    // ── agent_session_place_order (Phase 4b-1 サブフェーズ E) ────────────────
+
+    fn sample_order_request(cli_id: &str, qty: f64) -> crate::api::order_request::AgentOrderRequest {
+        use crate::api::contract::{ClientOrderId, TickerContract};
+        use crate::api::order_request::{AgentOrderRequest, AgentOrderSide, AgentOrderType};
+        AgentOrderRequest {
+            client_order_id: ClientOrderId::new(cli_id).unwrap(),
+            ticker: TickerContract::new("HyperliquidLinear", "BTC"),
+            side: AgentOrderSide::Buy,
+            qty,
+            order_type: AgentOrderType::Market {},
+        }
+    }
+
+    #[tokio::test]
+    async fn place_order_returns_404_when_session_idle() {
+        let ticker = parse_ticker_str("HyperliquidLinear:BTC").unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let mut engine = HeadlessEngine::new(ticker, Timeframe::M1, tx);
+        let (status, body) = engine.agent_session_place_order(sample_order_request("cli_1", 0.1));
+        assert_eq!(status, 404, "body: {body}");
+    }
+
+    #[tokio::test]
+    async fn place_order_returns_503_when_session_loading() {
+        // StepClock / EventStore は super::* 経由で既に import 済み。
+        let ticker = parse_ticker_str("HyperliquidLinear:BTC").unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let mut engine = HeadlessEngine::new(ticker, Timeframe::M1, tx);
+        // Loading セッションを手動構築
+        let clock = StepClock::new(0, 3_600_000, 60_000);
+        engine.state.session = ReplaySession::Loading {
+            clock,
+            pending_count: 1,
+            store: EventStore::new(),
+            active_streams: HashSet::new(),
+        };
+        let (status, body) = engine.agent_session_place_order(sample_order_request("cli_1", 0.1));
+        assert_eq!(status, 503, "body: {body}");
+        assert!(body.contains("loading"));
+    }
+
+    #[tokio::test]
+    async fn place_order_creates_new_order_and_returns_200() {
+        let start_ms = 1_000_000u64;
+        let step_ms = 60_000u64;
+        let mut engine =
+            make_active_engine_with_klines(start_ms, start_ms + step_ms * 5, step_ms, start_ms);
+        let (status, body) = engine.agent_session_place_order(sample_order_request("cli_1", 0.1));
+        // 新規・冪等リプレイともに 200 で統一。分岐は idempotent_replay フラグで行う。
+        assert_eq!(status, 200, "body: {body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["client_order_id"], "cli_1");
+        assert_eq!(v["idempotent_replay"], false);
+        assert!(v["order_id"].is_string());
+        assert_eq!(engine.virtual_engine.get_orders().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn place_order_returns_200_idempotent_replay_on_exact_rerun() {
+        let start_ms = 1_000_000u64;
+        let step_ms = 60_000u64;
+        let mut engine =
+            make_active_engine_with_klines(start_ms, start_ms + step_ms * 5, step_ms, start_ms);
+
+        let (s1, b1) = engine.agent_session_place_order(sample_order_request("cli_1", 0.1));
+        assert_eq!(s1, 200);
+        let v1: serde_json::Value = serde_json::from_str(&b1).unwrap();
+        let first_order_id = v1["order_id"].as_str().unwrap().to_string();
+
+        // 同じ client_order_id + 同じ body → 200 + idempotent_replay: true
+        let (s2, b2) = engine.agent_session_place_order(sample_order_request("cli_1", 0.1));
+        assert_eq!(s2, 200, "body: {b2}");
+        let v2: serde_json::Value = serde_json::from_str(&b2).unwrap();
+        assert_eq!(v2["idempotent_replay"], true);
+        assert_eq!(v2["order_id"], first_order_id);
+
+        // VirtualExchange には 1 件のみ。
+        assert_eq!(engine.virtual_engine.get_orders().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn place_order_returns_409_conflict_on_different_body_same_client_order_id() {
+        let start_ms = 1_000_000u64;
+        let step_ms = 60_000u64;
+        let mut engine =
+            make_active_engine_with_klines(start_ms, start_ms + step_ms * 5, step_ms, start_ms);
+
+        let (s1, _) = engine.agent_session_place_order(sample_order_request("cli_1", 0.1));
+        assert_eq!(s1, 200);
+
+        // 同じ cli_1 で qty 違い → 409
+        let (s2, b2) = engine.agent_session_place_order(sample_order_request("cli_1", 0.2));
+        assert_eq!(s2, 409, "body: {b2}");
+        let v: serde_json::Value = serde_json::from_str(&b2).unwrap();
+        assert!(v["error"].as_str().unwrap().contains("conflict"));
+        assert!(v["existing_order_id"].is_string());
+
+        // VirtualExchange には 1 件のみ（衝突時は新規発注しない）。
+        assert_eq!(engine.virtual_engine.get_orders().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn place_order_different_client_order_ids_both_accepted() {
+        let start_ms = 1_000_000u64;
+        let step_ms = 60_000u64;
+        let mut engine =
+            make_active_engine_with_klines(start_ms, start_ms + step_ms * 5, step_ms, start_ms);
+
+        let (s1, _) = engine.agent_session_place_order(sample_order_request("cli_1", 0.1));
+        let (s2, _) = engine.agent_session_place_order(sample_order_request("cli_2", 0.2));
+        assert_eq!(s1, 200);
+        assert_eq!(s2, 200);
+        assert_eq!(engine.virtual_engine.get_orders().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn place_order_map_cleared_after_session_lifecycle_event() {
+        // ADR-0001 不変条件: UI リモコン /play 等が走ると agent map がクリアされる。
+        let start_ms = 1_000_000u64;
+        let step_ms = 60_000u64;
+        let mut engine =
+            make_active_engine_with_klines(start_ms, start_ms + step_ms * 5, step_ms, start_ms);
+
+        let (s1, _) = engine.agent_session_place_order(sample_order_request("cli_1", 0.1));
+        assert_eq!(s1, 200);
+
+        // lifecycle event 発火（実運用では /play / step-backward が呼ぶ）。
+        engine.virtual_engine.mark_session_reset();
+
+        // 同じ cli_1 で qty 違い → 新規受付（クリア後なので 201）。
+        let (s2, b2) = engine.agent_session_place_order(sample_order_request("cli_1", 0.2));
+        assert_eq!(
+            s2, 200,
+            "after lifecycle event, same client_order_id can be reused: {b2}"
+        );
+    }
+
+    #[tokio::test]
+    async fn step_fill_carries_client_order_id_when_placed_via_agent_api() {
+        // サブフェーズ E の重要不変条件: agent API で発注した注文の fill は
+        // step レスポンスの fills 配列で client_order_id を返す。
+        let start_ms = 1_000_000u64;
+        let step_ms = 60_000u64;
+        let mut engine =
+            make_active_engine_with_klines(start_ms, start_ms + step_ms * 5, step_ms, start_ms);
+
+        let (s1, _) = engine.agent_session_place_order(sample_order_request("cli_trace", 0.1));
+        assert_eq!(s1, 200);
+
+        let (_status, body) = engine.agent_session_step().await;
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let fills = v["fills"].as_array().expect("fills array");
+        assert_eq!(fills.len(), 1);
+        assert_eq!(fills[0]["client_order_id"], "cli_trace");
+    }
+
+    // ── agent_session_advance (Phase 4b-1 サブフェーズ G) ────────────────────
+
+    fn make_advance_request(
+        until_ms: u64,
+        stop_on: Vec<crate::api::advance_request::AdvanceStopCondition>,
+        include_fills: bool,
+    ) -> crate::api::advance_request::AgentAdvanceRequest {
+        crate::api::advance_request::AgentAdvanceRequest {
+            until_ms: crate::api::contract::EpochMs::from(until_ms),
+            stop_on,
+            include_fills,
+        }
+    }
+
+    #[tokio::test]
+    async fn advance_returns_404_when_session_idle() {
+        let ticker = parse_ticker_str("HyperliquidLinear:BTC").unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let mut engine = HeadlessEngine::new(ticker, Timeframe::M1, tx);
+        let (status, body) = engine
+            .agent_session_advance(make_advance_request(100, vec![], false))
+            .await;
+        assert_eq!(status, 404, "body: {body}");
+    }
+
+    #[tokio::test]
+    async fn advance_until_ms_reaches_and_returns_until_reached_reason() {
+        let start_ms = 1_000_000u64;
+        let step_ms = 60_000u64;
+        let end_ms = start_ms + step_ms * 10;
+        let mut engine = make_active_engine_with_klines(start_ms, end_ms, step_ms, start_ms);
+
+        let until_ms = start_ms + step_ms * 3;
+        let (status, body) = engine
+            .agent_session_advance(make_advance_request(until_ms, vec![], false))
+            .await;
+        assert_eq!(status, 200, "body: {body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["stopped_reason"], "until_reached");
+        assert_eq!(v["clock_ms"].as_u64().unwrap(), until_ms);
+        assert_eq!(v["ticks_advanced"].as_u64().unwrap(), 3);
+    }
+
+    #[tokio::test]
+    async fn advance_reaches_end_returns_end_reason() {
+        // until_ms が range 終端より先なら End で停止。
+        let start_ms = 1_000_000u64;
+        let step_ms = 60_000u64;
+        let end_ms = start_ms + step_ms * 3;
+        let mut engine = make_active_engine_with_klines(start_ms, end_ms, step_ms, start_ms);
+
+        let (_, body) = engine
+            .agent_session_advance(make_advance_request(end_ms + step_ms * 100, vec![], false))
+            .await;
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["stopped_reason"], "end", "body: {body}");
+    }
+
+    #[tokio::test]
+    async fn advance_stops_on_fill() {
+        use crate::api::advance_request::AdvanceStopCondition;
+        use crate::replay::virtual_exchange::{PositionSide, VirtualOrder, VirtualOrderStatus};
+
+        let start_ms = 1_000_000u64;
+        let step_ms = 60_000u64;
+        let mut engine =
+            make_active_engine_with_klines(start_ms, start_ms + step_ms * 10, step_ms, start_ms);
+
+        // 成行注文 → 次 tick で約定する → advance が 1 tick で stop_on: fill により停止する。
+        engine.virtual_engine.place_order(VirtualOrder {
+            order_id: "ord_stop".to_string(),
+            ticker: "BTC".to_string(),
+            side: PositionSide::Long,
+            qty: 0.1,
+            order_type: VirtualOrderType::Market,
+            placed_time_ms: start_ms,
+            status: VirtualOrderStatus::Pending,
+        });
+
+        let (_, body) = engine
+            .agent_session_advance(make_advance_request(
+                start_ms + step_ms * 5,
+                vec![AdvanceStopCondition::Fill],
+                false,
+            ))
+            .await;
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["stopped_reason"], "fill", "body: {body}");
+        assert_eq!(v["ticks_advanced"].as_u64().unwrap(), 1);
+        assert_eq!(v["aggregate_fills"].as_u64().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn advance_default_excludes_fills_array_from_response() {
+        use crate::replay::virtual_exchange::{PositionSide, VirtualOrder, VirtualOrderStatus};
+
+        let start_ms = 1_000_000u64;
+        let step_ms = 60_000u64;
+        let mut engine =
+            make_active_engine_with_klines(start_ms, start_ms + step_ms * 5, step_ms, start_ms);
+
+        engine.virtual_engine.place_order(VirtualOrder {
+            order_id: "ord_nofills".to_string(),
+            ticker: "BTC".to_string(),
+            side: PositionSide::Long,
+            qty: 0.1,
+            order_type: VirtualOrderType::Market,
+            placed_time_ms: start_ms,
+            status: VirtualOrderStatus::Pending,
+        });
+
+        let (_, body) = engine
+            .agent_session_advance(make_advance_request(
+                start_ms + step_ms * 2,
+                vec![],
+                false, // include_fills = false
+            ))
+            .await;
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(
+            v.get("fills").is_none(),
+            "fills must be omitted when include_fills=false: {body}"
+        );
+        assert_eq!(v["aggregate_fills"].as_u64().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn advance_include_fills_true_populates_fills_array() {
+        use crate::replay::virtual_exchange::{PositionSide, VirtualOrder, VirtualOrderStatus};
+
+        let start_ms = 1_000_000u64;
+        let step_ms = 60_000u64;
+        let mut engine =
+            make_active_engine_with_klines(start_ms, start_ms + step_ms * 5, step_ms, start_ms);
+
+        engine.virtual_engine.place_order(VirtualOrder {
+            order_id: "ord_fills".to_string(),
+            ticker: "BTC".to_string(),
+            side: PositionSide::Long,
+            qty: 0.1,
+            order_type: VirtualOrderType::Market,
+            placed_time_ms: start_ms,
+            status: VirtualOrderStatus::Pending,
+        });
+
+        let (_, body) = engine
+            .agent_session_advance(make_advance_request(
+                start_ms + step_ms * 2,
+                vec![],
+                true,
+            ))
+            .await;
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let fills = v["fills"].as_array().expect("fills array must be present");
+        assert_eq!(fills.len(), 1);
+        assert_eq!(fills[0]["order_id"], "ord_fills");
+    }
+
+    #[tokio::test]
+    async fn advance_past_until_ms_returns_zero_ticks() {
+        // until_ms <= 現在時刻 の場合は 0 tick で UntilReached。後退は agent scope 外。
+        let start_ms = 1_000_000u64;
+        let step_ms = 60_000u64;
+        let mut engine =
+            make_active_engine_with_klines(start_ms, start_ms + step_ms * 5, step_ms, start_ms);
+        let (_, body) = engine
+            .agent_session_advance(make_advance_request(start_ms - 1000, vec![], false))
+            .await;
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["ticks_advanced"].as_u64().unwrap(), 0);
+        assert_eq!(v["stopped_reason"], "until_reached");
+    }
+
+    #[tokio::test]
+    async fn advance_final_portfolio_reflects_post_advance_state() {
+        use crate::replay::virtual_exchange::{PositionSide, VirtualOrder, VirtualOrderStatus};
+
+        let start_ms = 1_000_000u64;
+        let step_ms = 60_000u64;
+        let mut engine =
+            make_active_engine_with_klines(start_ms, start_ms + step_ms * 10, step_ms, start_ms);
+
+        engine.virtual_engine.place_order(VirtualOrder {
+            order_id: "ord_pf".to_string(),
+            ticker: "BTC".to_string(),
+            side: PositionSide::Long,
+            qty: 0.1,
+            order_type: VirtualOrderType::Market,
+            placed_time_ms: start_ms,
+            status: VirtualOrderStatus::Pending,
+        });
+
+        let (_, body) = engine
+            .agent_session_advance(make_advance_request(start_ms + step_ms * 3, vec![], false))
+            .await;
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let cash = v["final_portfolio"]["cash"].as_f64().unwrap();
+        assert!(
+            cash < 1_000_000.0,
+            "cash should decrease after buy fill: {cash}"
+        );
+        let positions = v["final_portfolio"]["open_positions"].as_array().unwrap();
+        assert_eq!(positions.len(), 1);
     }
 }
