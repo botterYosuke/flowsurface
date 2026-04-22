@@ -305,20 +305,8 @@ impl Flowsurface {
             let disk_cache_task = Self::make_disk_cache_task();
             return Task::batch([dashboard_task, disk_cache_task, master_task]);
         }
-        let main_window_id = self.main_window.id;
-        if self.replay.is_auto_play_pending()
-            && self
-                .active_dashboard()
-                .is_some_and(|d| d.has_tachibana_stream_pane(main_window_id))
-        {
-            self.replay.on_session_unavailable();
-            log::info!(
-                "[auto-play] session unavailable — auto-play deferred (Tachibana login required)"
-            );
-            self.notifications.push(Toast::info(
-                "Replay auto-play was deferred: please log in to resume",
-            ));
-        }
+        // ADR-0001 §8: 起動時 fixture 自動 Play は廃止済みなので、ここでの
+        // auto-play deferred ハンドリング (Tachibana ログイン要求時の Toast 通知) も削除。
         let (login_window_id, open_login_window) = window::open(window::Settings {
             size: iced::Size::new(900.0, 560.0),
             position: window::Position::Centered,

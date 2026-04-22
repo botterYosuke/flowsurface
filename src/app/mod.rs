@@ -48,12 +48,11 @@ impl Flowsurface {
             notifications: Notifications::new(),
             network: NetworkManager::new(saved_state.proxy_cfg),
             replay: {
+                // ADR-0001 §8: 起動時 fixture 自動 Play は廃止。Replay モードで起動しても
+                // session 初期化は行わず、ユーザー / E2E からの明示的な操作を待つ。
                 let range_start = saved_state.replay_config.range_start;
                 let range_end = saved_state.replay_config.range_end;
-                let has_valid_range =
-                    crate::replay::parse_replay_range(&range_start, &range_end).is_ok();
-                let pending_auto_play = is_replay_mode && has_valid_range;
-                ReplayController::from_saved(replay_mode, range_start, range_end, pending_auto_play)
+                ReplayController::from_saved(replay_mode, range_start, range_end)
             },
             virtual_engine: if is_replay_mode {
                 Some(crate::replay::virtual_exchange::VirtualExchangeEngine::new(

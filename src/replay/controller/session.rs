@@ -47,7 +47,6 @@ impl ReplayController {
             }
 
             ReplayUserMessage::Play => {
-                self.state.on_manual_play_requested();
                 self.state.resume_pending = false;
 
                 let (start_ms, end_ms) = match parse_replay_range(

@@ -1,4 +1,4 @@
-use crate::replay::{self, ReplayMessage, ReplaySystemEvent, ReplayUserMessage};
+use crate::replay::{self, ReplayMessage, ReplaySystemEvent};
 use crate::screen::dashboard;
 use crate::widget::toast::Toast;
 use crate::{Flowsurface, Message};
@@ -118,37 +118,20 @@ impl Flowsurface {
                                 return Task::none();
                             }
 
-                            // (1) pane を Ready に昇格させる（別スコープで借用解放）
-                            let resolve_task = {
-                                let Some(dashboard) = self.active_dashboard_mut() else {
-                                    return Task::none();
-                                };
-                                dashboard
-                                    .resolve_streams(main_window.id, pane_id, resolved)
-                                    .map(move |msg| Message::Dashboard {
-                                        layout_id: None,
-                                        event: msg,
-                                    })
+                            // ADR-0001 §8: 起動時 fixture 自動 Play は廃止済み。以前はここで
+                            // 全ペイン Ready タイミングを検知して `ReplayMessage::Play` を
+                            // 自動発火していたが、pane を Ready に昇格させるだけに留める。
+                            // Replay モードで起動した場合 session は初期化せず Idle のまま静止し、
+                            // ユーザー / E2E が明示的に step / advance / rewind-to-start を叩いて進行させる。
+                            let Some(dashboard) = self.active_dashboard_mut() else {
+                                return Task::none();
                             };
-
-                            // (2) 全ペイン Ready かつ pending_auto_play が立っているか判定
-                            if self.replay.is_auto_play_pending()
-                                && self.replay.is_replay()
-                                && self
-                                    .active_dashboard()
-                                    .is_some_and(|d| d.all_panes_have_ready_streams(main_window.id))
-                            {
-                                log::info!(
-                                    "[auto-play] All panes ready — firing ReplayMessage::Play"
-                                );
-                                self.replay.clear_pending_auto_play();
-                                let play_task = Task::done(Message::Replay(ReplayMessage::User(
-                                    ReplayUserMessage::Play,
-                                )));
-                                return Task::batch([resolve_task, play_task]);
-                            }
-
-                            resolve_task
+                            dashboard
+                                .resolve_streams(main_window.id, pane_id, resolved)
+                                .map(move |msg| Message::Dashboard {
+                                    layout_id: None,
+                                    event: msg,
+                                })
                         }
                         Err(err) => {
                             log::info!("[e2e-live] Stream resolution failed: {err}");
@@ -297,11 +280,7 @@ impl Flowsurface {
             if let Some(d) = self.active_dashboard_mut() {
                 d.refresh_waiting_panes(main_window_id);
             }
-            if self.replay.is_auto_play_pending() {
-                log::info!(
-                    "[auto-play] metadata updated — refreshed waiting panes for stream resolution"
-                );
-            }
+            // ADR-0001 §8: pending_auto_play 廃止に伴い auto-play ログ分岐も削除。
         }
 
         task.map(Message::Sidebar)
@@ -379,7 +358,8 @@ impl Flowsurface {
                         let narrative_store = self.narrative_store.clone();
                         let order_id = fill.order_id.clone();
                         let fill_price = fill.fill_price;
-                        let fill_time_ms = fill.fill_time_ms as i64;
+                        let fill_time_ms = crate::api::contract::EpochMs::new(fill.fill_time_ms)
+                            .saturating_to_i64();
                         let side_hint = match fill.side {
                             crate::replay::virtual_exchange::PositionSide::Long => {
                                 Some(crate::narrative::model::NarrativeSide::Buy)

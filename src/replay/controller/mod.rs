@@ -30,12 +30,10 @@ impl From<ReplayState> for ReplayController {
 
 impl ReplayController {
     /// 永続化された設定からコントローラを復元する（アプリ起動時）。
-    pub fn from_saved(
-        mode: ReplayMode,
-        range_start: String,
-        range_end: String,
-        pending_auto_play: bool,
-    ) -> Self {
+    ///
+    /// ADR-0001 §8: 起動時 fixture 自動 Play は廃止済み。Replay モードで復元しても
+    /// session は Idle のまま保持する。
+    pub fn from_saved(mode: ReplayMode, range_start: String, range_end: String) -> Self {
         Self {
             state: ReplayState {
                 mode,
@@ -44,7 +42,6 @@ impl ReplayController {
                     end: range_end,
                 },
                 session: ReplaySession::Idle,
-                pending_auto_play,
                 resume_pending: false,
             },
         }
@@ -104,16 +101,6 @@ impl ReplayController {
         &self.state.range_input.end
     }
 
-    /// auto-play フラグが立っているかどうか
-    pub fn is_auto_play_pending(&self) -> bool {
-        self.state.pending_auto_play
-    }
-
-    /// auto-play フラグをクリアする
-    pub fn clear_pending_auto_play(&mut self) {
-        self.state.pending_auto_play = false;
-    }
-
     #[cfg(test)]
     pub fn set_range_start(&mut self, s: String) {
         self.state.range_input.start = s;
@@ -144,11 +131,6 @@ impl ReplayController {
             dashboard,
             main_window_id,
         )
-    }
-
-    /// セッションが利用不可のとき呼ぶ
-    pub fn on_session_unavailable(&mut self) {
-        self.state.on_session_unavailable();
     }
 
     /// 現在の状態を API レスポンス用に変換

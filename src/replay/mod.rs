@@ -130,10 +130,6 @@ pub struct ReplayState {
     pub(crate) range_input: ReplayRangeInput,
     /// リプレイセッション状態（クロック・データストア・アクティブストリームを集約）
     pub(crate) session: ReplaySession,
-    /// 起動時 fixture 復元の結果として次の「全ペイン Ready」で Play を発火する。
-    /// 一度発火したら false に戻す。永続化しない。
-    /// NOTE: `session` の一部にしない — Play は UI イベント経由で処理するため。
-    pub(crate) pending_auto_play: bool,
     /// Loading 中に Resume が呼ばれたとき true にセットし、Active 遷移時に自動再開する。
     /// ticker/timeframe 変更後にユーザーが Resume を呼んだが、まだデータロード中の場合に使う。
     pub(crate) resume_pending: bool,
@@ -195,7 +191,6 @@ impl Default for ReplayState {
             mode: ReplayMode::Live,
             range_input: ReplayRangeInput::default(),
             session: ReplaySession::Idle,
-            pending_auto_play: false,
             resume_pending: false,
         }
     }
@@ -212,7 +207,6 @@ impl ReplayState {
             ReplayMode::Replay => {
                 self.mode = ReplayMode::Live;
                 self.session = ReplaySession::Idle;
-                self.pending_auto_play = false;
                 self.resume_pending = false;
             }
         }
@@ -252,17 +246,6 @@ impl ReplayState {
             }
             ReplaySession::Idle => 0,
         }
-    }
-
-    /// 手動再生が要求されたとき、pending_auto_play フラグをクリアする。
-    pub fn on_manual_play_requested(&mut self) {
-        self.pending_auto_play = false;
-    }
-
-    /// セッションが利用不可のとき、pending_auto_play / resume_pending フラグをクリアする。
-    pub fn on_session_unavailable(&mut self) {
-        self.pending_auto_play = false;
-        self.resume_pending = false;
     }
 
     /// 速度を次の段階にサイクルする (1x → 2x → 5x → 10x → 1x)。
@@ -717,47 +700,6 @@ mod tests {
         assert!(json.contains(r#""status":"Playing""#));
         assert!(json.contains(r#""current_time":1500"#));
         assert!(json.contains(r#""speed":"1x""#));
-    }
-
-    // ── pending_auto_play ─────────────────────────────────────────────────
-
-    #[test]
-    fn default_state_has_no_pending_auto_play() {
-        let state = ReplayState::default();
-        assert!(!state.pending_auto_play);
-    }
-
-    #[test]
-    fn toggle_replay_to_live_clears_pending_auto_play() {
-        let mut state = ReplayState {
-            mode: ReplayMode::Replay,
-            pending_auto_play: true,
-            ..Default::default()
-        };
-
-        state.toggle_mode(); // Replay → Live
-
-        assert!(!state.pending_auto_play);
-    }
-
-    #[test]
-    fn replay_play_message_clears_pending_auto_play() {
-        let mut state = ReplayState {
-            pending_auto_play: true,
-            ..Default::default()
-        };
-        state.on_manual_play_requested();
-        assert!(!state.pending_auto_play);
-    }
-
-    #[test]
-    fn session_restore_failure_clears_pending_auto_play() {
-        let mut state = ReplayState {
-            pending_auto_play: true,
-            ..Default::default()
-        };
-        state.on_session_unavailable();
-        assert!(!state.pending_auto_play);
     }
 
     // ── parse_replay_range ────────────────────────────────────────────────

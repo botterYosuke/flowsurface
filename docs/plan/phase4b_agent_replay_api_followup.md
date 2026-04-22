@@ -96,10 +96,13 @@
 
 ### サブフェーズ N: 自動 tick 購読経路の解体 + 起動時 auto-play 廃止
 
-- [ ] iced subscription（recurring tick）と `src/app/handlers.rs::Tick` ハンドラを削除
-- [ ] tokio timer の自動 tick 発火を除去
-- [ ] `pending_auto_play` 経路（起動時 fixture 復元 → 自動 Play）を削除。Replay モードで起動した場合は `toggle(Live→Replay)` の初期化パスのみ通って Active 状態で静止
-- [ ] 既存ユニットテストが全 PASS
+- [x] iced subscription から Replay 専用 tick 経路（`iced::time::every(100ms)` headless fallback + `iced::window::frames()` の replay 分岐）を削除
+- [x] `src/app/handlers.rs::handle_tick` から Replay 進行ブロックを削除（**描画 tick 配送は維持**。ハンドラ自体は `iced::window::frames()` 由来の dashboard 描画更新に必要なため残す）
+- [x] `src/app/api/replay.rs` の `GetStatus` CI auto-tick hack 削除
+- [x] `src/replay/controller/tick.rs` の `ReplayController::tick` / `TickOutcome` を削除
+- [x] tokio timer の自動 tick 発火（headless の `tick_interval`）を除去
+- [x] `pending_auto_play` 経路（起動時 fixture 復元 → 全ペイン Ready で自動 Play）を廃止。関連フィールド / getter・setter / 呼び出し元 / `on_manual_play_requested` / `on_session_unavailable` / ユニットテスト 4 件を削除。Replay モードで起動しても session は Idle のまま静止
+- [x] 既存ユニットテストが全 PASS（560 件）
 
 ### サブフェーズ O: StepClock 縮退（P と 1 PR で束ねる）
 
@@ -209,7 +212,7 @@ Windows 実機実行が必要。grep ベースで 98 ファイル規模の依存
 |---|---|---|---|---|
 | L: 削除対象ルートの RED + §6 マトリクス | 🔄 | 2026-04-22 | 08198dd | **部分完了**。削除ルート 404 期待テスト 6 件のみ追加（[src/replay_api.rs#L2474-L2542](../../src/replay_api.rs#L2474-L2542)）、全件 expected fail → M 後に GREEN 化を確認。**§6 マトリクス網羅テスト（`{Idle,Loading,Active}` × `{toggle,step,advance,rewind(body あり/なし),status}` の 400/409/501/200 期待）は未達**。これらは step/advance/rewind ハンドラ本体や session 状態ロジックが後続サブフェーズ（Q / rewind-to-start 新設）で整備されたタイミングで追加する。各ハンドラ実装サブフェーズの DoD 側で §6 行を吸収する運用に変更する |
 | M: ReplayCommand enum 整理 | ✅ | 2026-04-22 | 08198dd | enum variant 6 個削除 + route 行 + `parse_play_command` 削除。`validate_datetime_str` も削除（将来の要件のために保留しない CLAUDE.md 原則に従う）。headless orphan は S 予定のため `#[allow(dead_code)]` 暫定。`Toggle` ハンドラは旧 play/pause 意味論を維持（Live↔Replay 切替 + SessionLifecycleEvent::Terminated は Q 以降）。`cargo test --lib` 564 PASS。新規 clippy 警告 0（既存 11 件は refactor 無関係） |
-| N: 自動 tick 解体 + auto-play 廃止 | ✅ | 2026-04-22 | (未コミット) | main.rs subscription から replay 専用 tick 経路削除（iced::time::every 廃止）、[src/app/handlers.rs](../../src/app/handlers.rs) `handle_tick` から replay 進行ブロック削除（dashboard 描画 tick のみ残す）、[src/app/api/replay.rs](../../src/app/api/replay.rs) GetStatus の CI auto-tick hack 削除、[src/replay/controller/tick.rs](../../src/replay/controller/tick.rs) から `ReplayController::tick` と `TickOutcome` 削除、[src/headless.rs](../../src/headless.rs) の tokio `tick_interval` 削除。`play_with_range` は後続サブフェーズの toggle body init / rewind-to-start で再利用するため `#[allow(dead_code)]` で保持。`cargo test --lib` 564 PASS、lib 新規警告 0（既存 11 維持）、bin 側 orphan (HeadlessEngine::tick, DispatchOutcome.kline_events 等) は S 予定 |
+| N: 自動 tick 解体 + auto-play 廃止 | ✅ | 2026-04-22 | 836e82b (+ follow-up 未コミット) | **前半 (836e82b)**: main.rs subscription から replay 専用 tick 経路削除（iced::time::every 廃止）、[src/app/handlers.rs](../../src/app/handlers.rs) `handle_tick` から replay 進行ブロック削除（dashboard 描画 tick のみ残す）、[src/app/api/replay.rs](../../src/app/api/replay.rs) GetStatus の CI auto-tick hack 削除、[src/replay/controller/tick.rs](../../src/replay/controller/tick.rs) から `ReplayController::tick` と `TickOutcome` 削除、[src/headless.rs](../../src/headless.rs) の tokio `tick_interval` 削除。`play_with_range` は後続サブフェーズの toggle body init / rewind-to-start で再利用するため `#[allow(dead_code)]` で保持。**後半 (未コミット、レビュー指摘対応)**: `pending_auto_play` 経路完全廃止 — `ReplayState.pending_auto_play` フィールド削除、`ReplayController::{is_auto_play_pending, clear_pending_auto_play}` 削除、`ReplayController::from_saved` から引数削除、`on_manual_play_requested` / `on_session_unavailable` （いずれも `pending_auto_play` 周辺のみ用途）削除、[src/app/dashboard.rs](../../src/app/dashboard.rs) auto-play 発火ブロック削除、[src/app/mod.rs](../../src/app/mod.rs) / [src/app/handlers.rs](../../src/app/handlers.rs) 呼び出し元修正、関連ユニットテスト 4 件削除。`cargo test --lib` 560 PASS（-4 は削除した pending_auto_play テスト）、lib 新規警告 0（既存 11 維持） |
 | O: StepClock 縮退（P と束ねる） | ⬜ | | | |
 | P: UI ボタン配線繋ぎ替え | ⬜ | | | |
 | Q: advance GUI ガード削除 + Lifecycle 配線 | ⬜ | | | |
