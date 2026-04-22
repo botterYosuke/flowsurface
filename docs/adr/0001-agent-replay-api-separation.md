@@ -25,6 +25,7 @@ Agent 向け操作は `/api/agent/session/:id/*` に分離した **新 API** を
 - **冪等性**: `POST .../order` は `client_order_id` 必須、`(session_id, client_order_id)` で重複発注を抑止。
 - **セッション**: Phase 4b では `session_id` を path に刻むがサーバー側は `"default"` 固定のみ受理。非 `"default"` は `501 Not Implemented` で明示拒否（`400` や黙殺にしない）。複数 agent 同時実行は Phase 4c。
 - **基盤の統合（排他ではなく共有）**: Phase 4b の `session_id = "default"` 期間中、agent API と UI リモコン API は **同一 `VirtualExchange` インスタンス（"default" session）を共有** する。片方をロックする排他ではなく、両方が同じ session への窓口として並存する。排他制御が必要になるのは Phase 4c（複数 session 並行）から。
+- **セッション状態遷移はイベント経由**: `VirtualExchange` がセッション状態遷移を `SessionLifecycleEvent`（`Started` / `Reset` / `Terminated`）として発火し、agent API 側の state（`client_order_id` UNIQUE map 等）はこれを購読してリセットする。UI リモコン API ハンドラが agent API の state を直接触る構造は禁止する（canonical 性を維持し、Phase 4c の facade 化時に購読経路をそのまま温存できるようにするため）。
 - **実行環境制約**: `advance`（instant モード）は Headless ビルドのみ許可。GUI ビルドでは 400 で拒否し、iced 再描画との競合を設計で排除。
 - **スコープ境界（step-backward）**: agent API は **forward-only**（`step-backward` を含めない）。理由は RL の `env.step()` 慣習に合わせるため。`step-backward` の巻き戻し意味論（PnL / outcome / narrative の遡及）は本 ADR のスコープ外とし、UI リモコン API 側の既存挙動は現状維持する。
 
@@ -53,6 +54,7 @@ Agent 向け操作は `/api/agent/session/:id/*` に分離した **新 API** を
 - `advance` 分離により 6 ヶ月分の instant 実行が wall-time 非依存で現実的な時間で完了する（Phase 3 Headless モードの実益が出る）。
 - `session_id` を path に刻む契約が先行確定するため、Phase 4c の複数 agent 同時実行が後方互換で拡張できる。
 - UI リモコン API と agent API が同一 `VirtualExchange` を共有するため、既存 E2E テスト（`tests/s*.sh`）は Phase 4b 期間中も無改修で動作する。
+- `SessionLifecycleEvent` の購読経路は Phase 4c の facade 化時にそのまま再利用できる（facade 化で UI リモコン側のハンドラを agent API に置換しても、イベント購読者である agent state は影響を受けない）。移行が段階的に刻める。
 
 ### Negative
 - API 表面積が一時的に 2 倍になる。ドキュメント（`replay.md` / 新設 `agent_replay_api.md`）の二重管理が発生。
@@ -62,7 +64,7 @@ Agent 向け操作は `/api/agent/session/:id/*` に分離した **新 API** を
 
 ### Risks
 - **2 系統 API の同一 `VirtualExchange` への同時アクセスによる状態競合**: agent が `step` 実行中に UI リモコン経由で `play` が入る等の競合。
-  - **Mitigation**: Phase 4b では `VirtualExchange` 側の既存ロック（`Arc<Mutex<..>>`）に委ねる。新たな排他層は追加しない。E2E で両入口を同時に叩くテスト（S60 系）を追加して回帰検知。
+  - **Mitigation**: Phase 4b では `VirtualExchange` 側の既存ロック（`Arc<Mutex<..>>`）に委ねる。新たな排他層は追加しない。セッション状態遷移は `SessionLifecycleEvent` で agent state に伝播するため、UI 経由の `play` / `toggle` / seek も agent 側から観測可能。E2E で両入口を同時に叩くテスト（Phase 4b-1 計画 S59）を追加して回帰検知。
 - **facade 化の先送りリスク**: Phase 4c で facade 化されずに 2 系統が定着する。
   - **Mitigation**: `.github/pull_request_template.md` に「`/api/replay/*` への新規機能追加は本 ADR で禁止。新規は `/api/agent/session/*` のみ」を明記。CI に `src/replay_api.rs` の特定範囲（UI リモコンルーティング table）に新規ルートが追加されたら警告する lint チェック（grep ベース）を追加する（Phase 4b 末に設置）。
 - **`session_id = "default"` 固定の誤用**: 複数 session 対応時に path はあるがサーバーが受理しない期間に agent が誤解する。
