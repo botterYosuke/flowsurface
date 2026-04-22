@@ -65,19 +65,14 @@ pub fn compute_step_backward_target(
 // ── 公開 API ────────────────────────────────────────────────────────────────
 
 /// API から iced app へ送るコマンド
+///
+/// ADR-0001 §2: 自動再生機構の全廃に伴い、`Play` / `Pause` / `Resume` / `StepForward` /
+/// `StepBackward` / `CycleSpeed` variant は削除された。セッション内の時刻操作は
+/// agent session API (`/api/agent/session/:id/*`) に一本化されている。
 #[derive(Debug, Clone)]
 pub enum ReplayCommand {
     GetStatus,
     Toggle,
-    Play {
-        start: String,
-        end: String,
-    },
-    Pause,
-    Resume,
-    StepForward,
-    StepBackward,
-    CycleSpeed,
     /// 状態をディスクに保存（E2E テスト用）
     SaveState,
     /// Live / Replay モードを指定して切り替える（POST /api/app/set-mode）

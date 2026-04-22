@@ -342,8 +342,12 @@ async fn run_server(mut sender: mpsc::Sender<ApiMessage>) {
             l
         }
         Err(e) => {
+            // bind 失敗を silent にすると、E2E テスト並走でのポート衝突時に
+            // メインループは API 受信だけ止まったまま生き続け、デバッグが
+            // 非常に困難になる。即時プロセス終了して失敗を明確にする。
             log::error!("Failed to bind replay API server on {addr}: {e}");
-            return;
+            eprintln!("fatal: failed to bind replay API server on {addr}: {e}");
+            std::process::exit(1);
         }
     };
 
@@ -409,8 +413,7 @@ async fn run_server(mut sender: mpsc::Sender<ApiMessage>) {
                 continue;
             }
             Err(RouteError::NotImplemented) => {
-                let _ =
-                    write_response(&mut stream, 501, NOT_IMPLEMENTED_MULTI_SESSION_BODY).await;
+                let _ = write_response(&mut stream, 501, NOT_IMPLEMENTED_MULTI_SESSION_BODY).await;
                 continue;
             }
         };
@@ -426,13 +429,28 @@ async fn run_server(mut sender: mpsc::Sender<ApiMessage>) {
             continue;
         }
 
-        match reply_rx.await {
-            Ok((status, json)) => {
+        // 30s タイムアウト。将来 handle_command が reply を返し忘れた場合や、
+        // panic による early drop で oneshot が閉じられずに永久待機しないよう
+        // 防御層を張る。通常の narrative 処理でも p95 で数百 ms 以内のため
+        // 30s は十分マージンがある。
+        match tokio::time::timeout(std::time::Duration::from_secs(30), reply_rx).await {
+            Ok(Ok((status, json))) => {
                 let _ = write_response(&mut stream, status, &json).await;
             }
-            Err(_) => {
+            Ok(Err(_)) => {
                 let _ =
                     write_response(&mut stream, 500, r#"{"error":"No response from app"}"#).await;
+            }
+            Err(_) => {
+                log::error!(
+                    "Replay API: handler did not respond within 30s (method={method} path={path})"
+                );
+                let _ = write_response(
+                    &mut stream,
+                    504,
+                    r#"{"error":"Gateway Timeout: handler did not respond within 30s"}"#,
+                )
+                .await;
             }
         }
     }
@@ -496,10 +514,7 @@ fn body_uuid_field(body: &str, key: &str) -> Result<uuid::Uuid, RouteError> {
 /// `/api/agent/session/:id/<suffix>` 形式のパスから `:id` を抽出する。
 /// `:id` が空・`/` を含むなどの場合は `BadRequest`。
 /// ADR-0001 に基づき `:id != "default"` は `NotImplemented`（501）。
-fn extract_agent_session_id<'a>(
-    path: &'a str,
-    suffix: &str,
-) -> Result<&'a str, RouteError> {
+fn extract_agent_session_id<'a>(path: &'a str, suffix: &str) -> Result<&'a str, RouteError> {
     let after_prefix = path
         .strip_prefix("/api/agent/session/")
         .ok_or(RouteError::NotFound)?;
@@ -549,16 +564,6 @@ fn parse_agent_session_order(path: &str, body: &str) -> Result<ApiCommand, Route
     }))
 }
 
-/// "YYYY-MM-DD HH:MM" 形式の日時文字列を検証する。不正なら RouteError::BadRequest を返す。
-fn validate_datetime_str(s: &str) -> Result<(), RouteError> {
-    const FORMATS: &[&str] = &["%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"];
-    FORMATS
-        .iter()
-        .find_map(|fmt| chrono::NaiveDateTime::parse_from_str(s, fmt).ok())
-        .map(|_| ())
-        .ok_or(RouteError::BadRequest)
-}
-
 /// パスとメソッドから ApiCommand にルーティング
 ///
 /// C-3: 以前は `return` を使った 2 つの match ブロックに分かれていた。
@@ -566,16 +571,10 @@ fn validate_datetime_str(s: &str) -> Result<(), RouteError> {
 fn route(method: &str, path: &str, body: &str) -> Result<ApiCommand, RouteError> {
     match (method, path) {
         // ── Replay 制御 ────────────────────────────────────────────────────
+        // ADR-0001 §3: play / pause / resume / speed / step-forward / step-backward は
+        // 削除済み。セッション内の時刻操作は /api/agent/session/:id/{step,advance,rewind-to-start} を使う。
         ("GET", "/api/replay/status") => Ok(ApiCommand::Replay(ReplayCommand::GetStatus)),
         ("POST", "/api/replay/toggle") => Ok(ApiCommand::Replay(ReplayCommand::Toggle)),
-        ("POST", "/api/replay/play") => parse_play_command(body),
-        ("POST", "/api/replay/pause") => Ok(ApiCommand::Replay(ReplayCommand::Pause)),
-        ("POST", "/api/replay/resume") => Ok(ApiCommand::Replay(ReplayCommand::Resume)),
-        ("POST", "/api/replay/step-forward") => Ok(ApiCommand::Replay(ReplayCommand::StepForward)),
-        ("POST", "/api/replay/step-backward") => {
-            Ok(ApiCommand::Replay(ReplayCommand::StepBackward))
-        }
-        ("POST", "/api/replay/speed") => Ok(ApiCommand::Replay(ReplayCommand::CycleSpeed)),
 
         // ── App 制御 ───────────────────────────────────────────────────────
         ("POST", "/api/app/save") => Ok(ApiCommand::Replay(ReplayCommand::SaveState)),
@@ -791,15 +790,6 @@ fn parse_set_mode_command(body: &str) -> Result<ApiCommand, RouteError> {
         })),
         _ => Err(RouteError::BadRequest),
     }
-}
-
-/// `POST /api/replay/play` のボディをパースして ApiCommand を返す。
-fn parse_play_command(body: &str) -> Result<ApiCommand, RouteError> {
-    let start = body_str_field(body, "start")?;
-    let end = body_str_field(body, "end")?;
-    validate_datetime_str(&start)?;
-    validate_datetime_str(&end)?;
-    Ok(ApiCommand::Replay(ReplayCommand::Play { start, end }))
 }
 
 /// `POST /api/pane/split` のボディをパースして ApiCommand を返す。
@@ -1318,14 +1308,20 @@ mod tests {
     fn route_agent_session_step_rejects_empty_session_id() {
         // `/api/agent/session//step` — 空セッション ID は BadRequest。
         let result = route("POST", "/api/agent/session//step", "");
-        assert!(matches!(result, Err(RouteError::BadRequest)), "got {result:?}");
+        assert!(
+            matches!(result, Err(RouteError::BadRequest)),
+            "got {result:?}"
+        );
     }
 
     #[test]
     fn route_agent_session_step_rejects_get_method() {
         // step は POST のみ。GET では NotFound にフォールバック。
         let result = route("GET", "/api/agent/session/default/step", "");
-        assert!(matches!(result, Err(RouteError::NotFound)), "got {result:?}");
+        assert!(
+            matches!(result, Err(RouteError::NotFound)),
+            "got {result:?}"
+        );
     }
 
     #[test]
@@ -1333,7 +1329,10 @@ mod tests {
         // `/step` / `/advance` / `/order` 以外の suffix は NotFound。
         // サブフェーズ B 時点では `/step` のみルーティング済み。
         let result = route("POST", "/api/agent/session/default/unknown", "");
-        assert!(matches!(result, Err(RouteError::NotFound)), "got {result:?}");
+        assert!(
+            matches!(result, Err(RouteError::NotFound)),
+            "got {result:?}"
+        );
     }
 
     #[test]
@@ -1359,14 +1358,12 @@ mod tests {
 
     #[test]
     fn route_agent_session_order_accepts_default_with_valid_body() {
-        let cmd = route(
-            "POST",
-            "/api/agent/session/default/order",
-            VALID_ORDER_BODY,
-        )
-        .unwrap();
+        let cmd = route("POST", "/api/agent/session/default/order", VALID_ORDER_BODY).unwrap();
         match cmd {
-            ApiCommand::AgentSession(AgentSessionCommand::PlaceOrder { session_id, request }) => {
+            ApiCommand::AgentSession(AgentSessionCommand::PlaceOrder {
+                session_id,
+                request,
+            }) => {
                 assert_eq!(session_id, "default");
                 assert_eq!(request.client_order_id.as_str(), "cli_42");
                 assert_eq!(request.ticker.symbol, "BTC");
@@ -1381,14 +1378,12 @@ mod tests {
         assert!(matches!(result, Err(RouteError::NotImplemented)));
     }
 
-    fn assert_bad_request_with_keyword(
-        result: Result<ApiCommand, RouteError>,
-        keyword: &str,
-    ) {
+    fn assert_bad_request_with_keyword(result: Result<ApiCommand, RouteError>, keyword: &str) {
         match result {
             Err(RouteError::BadRequestWithMessage(msg)) => {
                 assert!(
-                    msg.to_ascii_lowercase().contains(&keyword.to_ascii_lowercase()),
+                    msg.to_ascii_lowercase()
+                        .contains(&keyword.to_ascii_lowercase()),
                     "error message missing keyword {keyword:?}: {msg}"
                 );
             }
@@ -1467,7 +1462,10 @@ mod tests {
         let body = r#"{"until_ms": 1704067200000}"#;
         let cmd = route("POST", "/api/agent/session/default/advance", body).unwrap();
         match cmd {
-            ApiCommand::AgentSession(AgentSessionCommand::Advance { session_id, request }) => {
+            ApiCommand::AgentSession(AgentSessionCommand::Advance {
+                session_id,
+                request,
+            }) => {
                 assert_eq!(session_id, "default");
                 assert_eq!(request.until_ms.as_u64(), 1_704_067_200_000);
             }
@@ -1526,89 +1524,6 @@ mod tests {
     }
 
     #[test]
-    fn route_post_pause() {
-        let cmd = route("POST", "/api/replay/pause", "").unwrap();
-        assert!(matches!(unwrap_replay(cmd), ReplayCommand::Pause));
-    }
-
-    #[test]
-    fn route_post_resume() {
-        let cmd = route("POST", "/api/replay/resume", "").unwrap();
-        assert!(matches!(unwrap_replay(cmd), ReplayCommand::Resume));
-    }
-
-    #[test]
-    fn route_post_step_forward() {
-        let cmd = route("POST", "/api/replay/step-forward", "").unwrap();
-        assert!(matches!(unwrap_replay(cmd), ReplayCommand::StepForward));
-    }
-
-    #[test]
-    fn route_post_step_backward() {
-        let cmd = route("POST", "/api/replay/step-backward", "").unwrap();
-        assert!(matches!(unwrap_replay(cmd), ReplayCommand::StepBackward));
-    }
-
-    #[test]
-    fn route_post_speed() {
-        let cmd = route("POST", "/api/replay/speed", "").unwrap();
-        assert!(matches!(unwrap_replay(cmd), ReplayCommand::CycleSpeed));
-    }
-
-    #[test]
-    fn route_post_play_valid_json() {
-        let body = r#"{"start":"2026-04-01 09:00","end":"2026-04-01 15:00"}"#;
-        let cmd = route("POST", "/api/replay/play", body).unwrap();
-        match unwrap_replay(cmd) {
-            ReplayCommand::Play { start, end } => {
-                assert_eq!(start, "2026-04-01 09:00");
-                assert_eq!(end, "2026-04-01 15:00");
-            }
-            _ => panic!("Expected Play command"),
-        }
-    }
-
-    #[test]
-    fn route_post_play_invalid_json() {
-        let result = route("POST", "/api/replay/play", "not json");
-        assert!(matches!(result, Err(RouteError::BadRequest)));
-    }
-
-    #[test]
-    fn route_post_play_missing_start() {
-        let body = r#"{"end":"2026-04-01 15:00"}"#;
-        let result = route("POST", "/api/replay/play", body);
-        assert!(matches!(result, Err(RouteError::BadRequest)));
-    }
-
-    #[test]
-    fn route_post_play_missing_end() {
-        let body = r#"{"start":"2026-04-01 09:00"}"#;
-        let result = route("POST", "/api/replay/play", body);
-        assert!(matches!(result, Err(RouteError::BadRequest)));
-    }
-
-    #[test]
-    fn route_post_play_empty_body() {
-        let result = route("POST", "/api/replay/play", "");
-        assert!(matches!(result, Err(RouteError::BadRequest)));
-    }
-
-    #[test]
-    fn route_post_play_invalid_datetime_start_returns_bad_request() {
-        let body = r#"{"start":"not-a-date","end":"2026-04-10 15:00"}"#;
-        let result = route("POST", "/api/replay/play", body);
-        assert!(matches!(result, Err(RouteError::BadRequest)));
-    }
-
-    #[test]
-    fn route_post_play_invalid_datetime_end_returns_bad_request() {
-        let body = r#"{"start":"2026-04-10 09:00","end":"bad-end"}"#;
-        let result = route("POST", "/api/replay/play", body);
-        assert!(matches!(result, Err(RouteError::BadRequest)));
-    }
-
-    #[test]
     fn route_unknown_path_not_found() {
         let result = route("GET", "/api/replay/unknown", "");
         assert!(matches!(result, Err(RouteError::NotFound)));
@@ -1631,26 +1546,6 @@ mod tests {
     fn route_root_path_not_found() {
         let result = route("GET", "/", "");
         assert!(matches!(result, Err(RouteError::NotFound)));
-    }
-
-    #[test]
-    fn route_post_play_accepts_datetime_with_seconds() {
-        let body = r#"{"start":"2024-01-01 09:00:00","end":"2024-01-01 15:30:00"}"#;
-        let cmd = route("POST", "/api/replay/play", body).unwrap();
-        match unwrap_replay(cmd) {
-            ReplayCommand::Play { start, end } => {
-                assert_eq!(start, "2024-01-01 09:00:00");
-                assert_eq!(end, "2024-01-01 15:30:00");
-            }
-            _ => panic!("expected Play"),
-        }
-    }
-
-    #[test]
-    fn route_post_play_non_string_values() {
-        let body = r#"{"start":123,"end":456}"#;
-        let result = route("POST", "/api/replay/play", body);
-        assert!(matches!(result, Err(RouteError::BadRequest)));
     }
 
     #[test]
@@ -2447,5 +2342,66 @@ mod tests {
     fn route_get_tachibana_holdings_missing_issue_code_bad_request() {
         let result = route("GET", "/api/tachibana/holdings", "");
         assert!(matches!(result, Err(RouteError::BadRequest)));
+    }
+
+    // ── Sub-phase L (ADR-0001 §3): Deleted routes must return NotFound ──
+    //
+    // 自動再生機構の全廃と agent session API への一本化に伴い、以下のルートは削除される。
+    // これらのテストは RED 段階では Ok(...) を返すため失敗する。サブフェーズ M で
+    // ReplayCommand variant 削除 + route 行削除によって GREEN 化する。
+
+    #[test]
+    fn route_post_replay_play_is_deleted() {
+        let body = r#"{"start":"2026-04-01 09:00","end":"2026-04-01 15:00"}"#;
+        let result = route("POST", "/api/replay/play", body);
+        assert!(
+            matches!(result, Err(RouteError::NotFound)),
+            "POST /api/replay/play must be deleted per ADR-0001 §3, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn route_post_replay_pause_is_deleted() {
+        let result = route("POST", "/api/replay/pause", "");
+        assert!(
+            matches!(result, Err(RouteError::NotFound)),
+            "POST /api/replay/pause must be deleted per ADR-0001 §3, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn route_post_replay_resume_is_deleted() {
+        let result = route("POST", "/api/replay/resume", "");
+        assert!(
+            matches!(result, Err(RouteError::NotFound)),
+            "POST /api/replay/resume must be deleted per ADR-0001 §3, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn route_post_replay_speed_is_deleted() {
+        let result = route("POST", "/api/replay/speed", "");
+        assert!(
+            matches!(result, Err(RouteError::NotFound)),
+            "POST /api/replay/speed must be deleted per ADR-0001 §3, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn route_post_replay_step_forward_is_deleted() {
+        let result = route("POST", "/api/replay/step-forward", "");
+        assert!(
+            matches!(result, Err(RouteError::NotFound)),
+            "POST /api/replay/step-forward must be deleted per ADR-0001 §3, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn route_post_replay_step_backward_is_deleted() {
+        let result = route("POST", "/api/replay/step-backward", "");
+        assert!(
+            matches!(result, Err(RouteError::NotFound)),
+            "POST /api/replay/step-backward must be deleted per ADR-0001 §3, got {result:?}"
+        );
     }
 }

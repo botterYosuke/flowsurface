@@ -1,4 +1,6 @@
 use crate::replay::{self, ReplayMessage, ReplayUserMessage};
+// NOTE: ADR-0001 §2 で Play/Pause/Resume/StepForward/StepBackward/CycleSpeed variant は
+// 削除済み。UI 側の `▶` / `⏭` / `⏮` は agent session API を直接叩く方式に移行中。
 use crate::replay_api;
 use crate::screen::dashboard;
 use crate::widget::toast::Toast;
@@ -67,61 +69,16 @@ impl Flowsurface {
                 }
             }
             replay::ReplayCommand::Toggle => {
+                // NOTE: 本サブフェーズ M の責務は `ReplayCommand` variant 整理のみ。
+                // ADR-0001 §3 の最終形（Live→Replay 切替 + body {start,end} で session
+                // 初期化）は後続サブフェーズで実装する。ここでは旧 play/pause 意味論を
+                // 維持し、`ReplayUserMessage::Pause/Resume` はサブフェーズ P で撤去する。
                 let msg = if self.replay.is_playing() {
                     ReplayMessage::User(ReplayUserMessage::Pause)
                 } else {
                     ReplayMessage::User(ReplayUserMessage::Resume)
                 };
                 let task = self.handle_replay(msg);
-                reply_tx.send(reply_replay_status(self));
-                return task;
-            }
-            replay::ReplayCommand::Play { start, end } => {
-                let main_window_id = self.main_window.id;
-                let Some(active_id) = self.layout_manager.active_layout_id().map(|l| l.unique)
-                else {
-                    reply_tx.send_status(500, r#"{"error":"no active layout"}"#.to_string());
-                    return Task::none();
-                };
-                let Some(dashboard) = self
-                    .layout_manager
-                    .get_mut(active_id)
-                    .map(|l| &mut l.dashboard)
-                else {
-                    reply_tx.send_status(500, r#"{"error":"no active dashboard"}"#.to_string());
-                    return Task::none();
-                };
-                let (task, toast) =
-                    self.replay
-                        .play_with_range(start, end, dashboard, main_window_id);
-                if let Some(t) = toast {
-                    self.notifications.push(t);
-                }
-                reply_tx.send(reply_replay_status(self));
-                return task.map(Message::Replay);
-            }
-            replay::ReplayCommand::Pause => {
-                let task = self.handle_replay(ReplayMessage::User(ReplayUserMessage::Pause));
-                reply_tx.send(reply_replay_status(self));
-                return task;
-            }
-            replay::ReplayCommand::Resume => {
-                let task = self.handle_replay(ReplayMessage::User(ReplayUserMessage::Resume));
-                reply_tx.send(reply_replay_status(self));
-                return task;
-            }
-            replay::ReplayCommand::StepForward => {
-                let task = self.handle_replay(ReplayMessage::User(ReplayUserMessage::StepForward));
-                reply_tx.send(reply_replay_status(self));
-                return task;
-            }
-            replay::ReplayCommand::StepBackward => {
-                let task = self.handle_replay(ReplayMessage::User(ReplayUserMessage::StepBackward));
-                reply_tx.send(reply_replay_status(self));
-                return task;
-            }
-            replay::ReplayCommand::CycleSpeed => {
-                let task = self.handle_replay(ReplayMessage::User(ReplayUserMessage::CycleSpeed));
                 reply_tx.send(reply_replay_status(self));
                 return task;
             }

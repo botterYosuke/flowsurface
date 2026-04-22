@@ -115,6 +115,7 @@ pub fn parse_timeframe_str(s: &str) -> Result<Timeframe, String> {
 // ── HeadlessEngine ─────────────────────────────────────────────────────────────
 
 /// kline ロードタスクの完了通知。
+#[allow(dead_code)] // サブフェーズ S でエンジンごと整理
 enum LoadResult {
     Ok {
         stream: StreamKind,
@@ -133,6 +134,7 @@ struct HeadlessPane {
 
 /// headless モード専用リプレイエンジン。
 /// iced への依存を持たず、tokio 非同期タスクで動作する。
+#[allow(dead_code)] // サブフェーズ S でフィールド整理
 struct HeadlessEngine {
     state: ReplayState,
     virtual_engine: VirtualExchangeEngine,
@@ -150,6 +152,11 @@ struct HeadlessEngine {
     agent_session_state: crate::api::agent_session_state::AgentSessionState,
 }
 
+// NOTE: ADR-0001 §2 自動再生機構の廃止に伴い、
+// HeadlessEngine の play / step_forward / step_backward / resume / pause 系メソッドは
+// サブフェーズ M で match arm が削除されて orphaned 化している。
+// サブフェーズ S（headless 重複実装削除）で構造体・メソッド・関連フィールドごと整理する。
+#[allow(dead_code)]
 impl HeadlessEngine {
     fn new(
         ticker: Ticker,
@@ -233,7 +240,12 @@ impl HeadlessEngine {
                 },
                 Err(e) => LoadResult::Err(e),
             };
-            let _ = tx.send(msg).await;
+            if let Err(e) = tx.send(msg).await {
+                log::error!(
+                    "headless: kline load result channel closed before delivery; \
+                     main loop may have exited prematurely: {e}"
+                );
+            }
         });
 
         Ok(serde_json::json!({
@@ -334,7 +346,8 @@ impl HeadlessEngine {
                 let store = self.narrative_store.clone();
                 let order_id = fill.order_id.clone();
                 let fill_price = fill.fill_price;
-                let fill_time_ms = fill.fill_time_ms as i64;
+                let fill_time_ms =
+                    crate::api::contract::EpochMs::new(fill.fill_time_ms).saturating_to_i64();
                 tokio::spawn(async move {
                     if let Err(e) = crate::narrative::service::update_outcome_from_fill(
                         &store,
@@ -434,7 +447,8 @@ impl HeadlessEngine {
                     let store = self.narrative_store.clone();
                     let order_id = fill.order_id.clone();
                     let fill_price = fill.fill_price;
-                    let fill_time_ms = fill.fill_time_ms as i64;
+                    let fill_time_ms =
+                        crate::api::contract::EpochMs::new(fill.fill_time_ms).saturating_to_i64();
                     tokio::spawn(async move {
                         if let Err(e) = crate::narrative::service::update_outcome_from_fill(
                             &store,
@@ -599,8 +613,8 @@ impl HeadlessEngine {
                         let trade_stream = StreamKind::Trades {
                             ticker_info: *ticker_info,
                         };
-                        let trade_start = now_ms
-                            .saturating_sub(crate::replay::controller::api::TRADE_WINDOW_MS);
+                        let trade_start =
+                            now_ms.saturating_sub(crate::replay::controller::api::TRADE_WINDOW_MS);
                         let all_trades = store.trades_in(&trade_stream, trade_start..now_ms + 1);
                         let trade_slice = if all_trades.len() > limit {
                             &all_trades[all_trades.len() - limit..]
@@ -610,8 +624,7 @@ impl HeadlessEngine {
                         if !trade_slice.is_empty() {
                             let exchange_str =
                                 format!("{:?}", ticker_info.ticker.exchange).replace(' ', "");
-                            let label =
-                                format!("{exchange_str}:{}:Trades", ticker_info.ticker);
+                            let label = format!("{exchange_str}:{}:Trades", ticker_info.ticker);
                             let items: Vec<serde_json::Value> = trade_slice
                                 .iter()
                                 .map(|t| {
@@ -741,23 +754,22 @@ impl HeadlessEngine {
             {
                 clock.seek(new_time);
                 let ticker_str = self.ticker_str.clone();
-                let synthetic: Vec<exchange::Trade> = active_streams
-                    .iter()
-                    .filter(|s| matches!(s, StreamKind::Kline { .. }))
-                    .filter_map(|stream| {
-                        let klines = store.klines_in(stream, 0..new_time.saturating_add(1));
-                        klines
-                            .iter()
-                            .rev()
-                            .find(|k| k.time <= new_time)
-                            .map(|k| exchange::Trade {
-                                time: new_time,
-                                is_sell: false,
-                                price: k.close,
-                                qty: exchange::unit::qty::Qty::from_f32(1.0),
+                let synthetic: Vec<exchange::Trade> =
+                    active_streams
+                        .iter()
+                        .filter(|s| matches!(s, StreamKind::Kline { .. }))
+                        .filter_map(|stream| {
+                            let klines = store.klines_in(stream, 0..new_time.saturating_add(1));
+                            klines.iter().rev().find(|k| k.time <= new_time).map(|k| {
+                                exchange::Trade {
+                                    time: new_time,
+                                    is_sell: false,
+                                    price: k.close,
+                                    qty: exchange::unit::qty::Qty::from_f32(1.0),
+                                }
                             })
-                    })
-                    .collect();
+                        })
+                        .collect();
                 if synthetic.is_empty() {
                     Vec::new()
                 } else {
@@ -774,7 +786,7 @@ impl HeadlessEngine {
                     &self.narrative_store,
                     &fill.order_id,
                     fill.fill_price,
-                    fill.fill_time_ms as i64,
+                    crate::api::contract::EpochMs::new(fill.fill_time_ms).saturating_to_i64(),
                     None,
                 )
                 .await
@@ -996,7 +1008,19 @@ impl HeadlessEngine {
                     (current + pane_step, false)
                 }
             }
-            _ => unreachable!("session active verified above"),
+            // 冒頭で ReplaySession::Active をチェック済みだが、await を挟まない
+            // ため状態遷移は起こらない。それでも panic ではなく 500 を返すことで、
+            // 将来 await が混入した場合の silent crash を防ぐ。
+            other => {
+                log::error!(
+                    "agent_session_step: session state unexpectedly changed to {:?}",
+                    std::mem::discriminant(other)
+                );
+                return (
+                    500,
+                    r#"{"error":"internal: session state changed unexpectedly"}"#.to_string(),
+                );
+            }
         };
 
         // 進行処理（reached_end でない場合のみ）
@@ -1009,23 +1033,22 @@ impl HeadlessEngine {
             {
                 clock.seek(new_time);
                 let ticker_str = self.ticker_str.clone();
-                let synthetic: Vec<exchange::Trade> = active_streams
-                    .iter()
-                    .filter(|s| matches!(s, StreamKind::Kline { .. }))
-                    .filter_map(|stream| {
-                        let klines = store.klines_in(stream, 0..new_time.saturating_add(1));
-                        klines
-                            .iter()
-                            .rev()
-                            .find(|k| k.time <= new_time)
-                            .map(|k| exchange::Trade {
-                                time: new_time,
-                                is_sell: false,
-                                price: k.close,
-                                qty: exchange::unit::qty::Qty::from_f32(1.0),
+                let synthetic: Vec<exchange::Trade> =
+                    active_streams
+                        .iter()
+                        .filter(|s| matches!(s, StreamKind::Kline { .. }))
+                        .filter_map(|stream| {
+                            let klines = store.klines_in(stream, 0..new_time.saturating_add(1));
+                            klines.iter().rev().find(|k| k.time <= new_time).map(|k| {
+                                exchange::Trade {
+                                    time: new_time,
+                                    is_sell: false,
+                                    price: k.close,
+                                    qty: exchange::unit::qty::Qty::from_f32(1.0),
+                                }
                             })
-                    })
-                    .collect();
+                        })
+                        .collect();
                 if synthetic.is_empty() {
                     Vec::new()
                 } else {
@@ -1049,7 +1072,7 @@ impl HeadlessEngine {
                 &self.narrative_store,
                 &fill.order_id,
                 fill.fill_price,
-                fill.fill_time_ms as i64,
+                crate::api::contract::EpochMs::new(fill.fill_time_ms).saturating_to_i64(),
                 None,
             )
             .await
@@ -1447,22 +1470,10 @@ impl HeadlessEngine {
             ApiCommand::Replay(ReplayCommand::GetStatus) => {
                 reply.send(self.get_status_json());
             }
-            ApiCommand::Replay(ReplayCommand::Play { start, end }) => {
-                match self.play(&start, &end) {
-                    Ok(json) => reply.send(json),
-                    Err(e) => reply.send_status(400, serde_json::json!({"error": e}).to_string()),
-                }
-            }
-            ApiCommand::Replay(ReplayCommand::Pause) => {
-                reply.send(self.pause());
-            }
-            ApiCommand::Replay(ReplayCommand::Resume) => {
-                reply.send(self.resume());
-            }
-            ApiCommand::Replay(ReplayCommand::StepForward) => {
-                reply.send(self.step_forward());
-            }
             ApiCommand::Replay(ReplayCommand::Toggle) => {
+                // NOTE: サブフェーズ M スコープ内では旧 play/pause 意味論を維持する。
+                // ADR-0001 §3 の Live↔Replay 切替 + SessionLifecycleEvent::Terminated
+                // 発火はサブフェーズ Q で実装する。
                 let result = if self.is_playing() {
                     self.pause()
                 } else {
@@ -1470,16 +1481,15 @@ impl HeadlessEngine {
                 };
                 reply.send(result);
             }
-            ApiCommand::Replay(ReplayCommand::SetMode { .. }) => {
-                // headless では常に Replay モードなので no-op
+            ApiCommand::Replay(ReplayCommand::SetMode { mode }) => {
+                // headless では Live モードに遷移できないため実質 no-op だが、
+                // `"live"` 指定時は ADR-0001 の `SessionLifecycleEvent::Terminated`
+                // 契約として生成世代を進める（agent API 側の `client_order_id`
+                // map を前セッションから確実に切り離すため）。
+                if mode.eq_ignore_ascii_case("live") {
+                    self.virtual_engine.mark_session_terminated();
+                }
                 reply.send(self.get_status_json());
-            }
-            ApiCommand::Replay(ReplayCommand::CycleSpeed) => {
-                self.state.cycle_speed();
-                reply.send(self.get_status_json());
-            }
-            ApiCommand::Replay(ReplayCommand::StepBackward) => {
-                reply.send(self.step_backward());
             }
             ApiCommand::Replay(ReplayCommand::SaveState) => {
                 // headless では保存不要
@@ -2101,7 +2111,10 @@ mod tests {
             "fills",
             "updated_narrative_ids",
         ] {
-            assert!(v.get(key).is_some(), "missing top-level key {key} in {body}");
+            assert!(
+                v.get(key).is_some(),
+                "missing top-level key {key} in {body}"
+            );
         }
     }
 
@@ -2209,9 +2222,7 @@ mod tests {
         // ADR-0001 / plan §5.2 の核不変条件:
         // step レスポンスの `updated_narrative_ids` は同期 await 後に確定し、
         // agent が polling 不要で UUID を取得できる。
-        use crate::narrative::model::{
-            Narrative, NarrativeAction, NarrativeSide, SnapshotRef,
-        };
+        use crate::narrative::model::{Narrative, NarrativeAction, NarrativeSide, SnapshotRef};
         use crate::replay::virtual_exchange::{PositionSide, VirtualOrder, VirtualOrderStatus};
 
         let start_ms = 1_000_000u64;
@@ -2288,7 +2299,10 @@ mod tests {
 
     // ── agent_session_place_order (Phase 4b-1 サブフェーズ E) ────────────────
 
-    fn sample_order_request(cli_id: &str, qty: f64) -> crate::api::order_request::AgentOrderRequest {
+    fn sample_order_request(
+        cli_id: &str,
+        qty: f64,
+    ) -> crate::api::order_request::AgentOrderRequest {
         use crate::api::contract::{ClientOrderId, TickerContract};
         use crate::api::order_request::{AgentOrderRequest, AgentOrderSide, AgentOrderType};
         AgentOrderRequest {
@@ -2589,11 +2603,7 @@ mod tests {
         });
 
         let (_, body) = engine
-            .agent_session_advance(make_advance_request(
-                start_ms + step_ms * 2,
-                vec![],
-                true,
-            ))
+            .agent_session_advance(make_advance_request(start_ms + step_ms * 2, vec![], true))
             .await;
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         let fills = v["fills"].as_array().expect("fills array must be present");
