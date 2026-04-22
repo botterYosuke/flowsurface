@@ -509,3 +509,70 @@ Cargo.toml                           # rusqlite（bundled）・flate2・sha2 追
 - 症状: `FLOWSURFACE_DATA_PATH=/tmp/somewhere` を設定して起動すると、`NarrativeStore::open_default()` が `data_path(Some("narratives.db"))` を呼ぶが、env が設定されていると **path_name の suffix が捨てられる**。結果として SQLite は `/tmp/somewhere` というパスをファイルとして作成し、後続の `SnapshotStore::new(data_path(None))` が `/tmp/somewhere/narratives/snapshots/...` を作ろうとして 500（OS error 183 "既に存在するファイルを作成することはできません"）。
 - 影響範囲: env で差し替えた temp dir で起動すると narrative 書き込みが全滅。default `AppData/flowsurface/` で起動する分には問題なし。
 - スコープ判定: Phase 4a 非スコープの既存バグだが、計画 §488 Tips の「FLOWSURFACE_DATA_PATH 環境変数が設定されていれば...temp dir を差し替えたい場合は環境変数経由で」が path_name=Some の場合に誤誘導となる。Phase 4b 以降の `data` クレート修正課題として残す。
+
+### 2026-04-22: 再検証セッション（エージェントになりきってアプリを使う・2 回目）
+
+**状況**: Phase 4a のサブフェーズ F 完了 + 前回の実アプリ検証 2 件修正が入った状態で、ゼロベースで再確認。新規の実行時バグは **発見されず**、前回修正済みの 2 件が release ビルドでも正しく機能することを確認。
+
+**実施した検証**:
+
+1. `cargo build --release --bin flowsurface` / `cargo build --bin flowsurface` — 両方成功、warning 3 件（dead_code 相当、機能に影響なし）。
+2. `cargo test --lib` — **437/437 PASS**（narrative 46 件・replay_api 93 件を含む）。
+3. ヘッドレス起動（`--ticker BinanceSpot:BTCUSDT --timeframe M1`、`FLOWSURFACE_DATA_PATH` 未設定 = 既定 `AppData/Roaming/flowsurface/`）。
+4. curl で 7 エンドポイント + 追加バリデーション計 15 パターン:
+   - `POST /api/agent/narrative`: 201 成功 / `idempotent_replay=true` 冪等性 / 400（空 agent_id, side="flip", confidence=1.5, 不正 JSON）/ 413（11 MB payload）
+   - `GET /api/agent/narrative/:id`: 200 / 404
+   - `GET /api/agent/narrative/:id/snapshot`: 200（decompressed JSON 本体）/ 404
+   - `GET /api/agent/narratives?agent_id=&ticker=&since_ms=&limit=`: 全フィルタ動作
+   - `PATCH /api/agent/narrative/:id`: `public=true/false` 双方向
+   - `GET /api/agent/narratives/storage`: total_count / total_bytes / warn_count
+   - `GET /api/agent/narratives/orphans`: 孤児ファイル 8 件検出（前回までの検証で作成された snapshot が残存 — GC API は Phase 4a 非スコープ）
+   - confidence 境界値 0.0 / 1.0 受理、1.5 拒否 ✅
+5. 並行 POST 40 リクエスト（8 スレッド）— **全 201**、SQLite 書き込み競合なし。
+6. E2E（release バイナリに対して）:
+   - `s51_narrative_crud.py`: **9/9 PASS**
+   - `s52_narrative_outcome_link.py`: **3/3 PASS**（TC-S52-04 で outcome 自動更新の配線が headless step_forward 経由で生きていることを再確認）
+   - `s53_narrative_snapshot_size.py`: **3/3 PASS**（TC-S53-01 で 11 MB → 413、TC-S53-03 で sha256 改ざん検出 → 410）
+7. `tests/python/test_narrative.py`: **11/11 PASS**（pytest）。
+8. Python SDK 疎通: `fs.narrative.create / get / list / publish / unpublish / snapshot / storage_stats` 全 OK。
+
+**新たな知見・観察（機能上の問題ではないが記録）**:
+
+- `snapshot_ref.path` が Windows でバックスラッシュ区切り (`narratives/snapshots\2023\11\14\...`) で JSON に出る。Unix ホストで読ませると見栄えが悪いが Phase 4a は単一ホスト前提なので実害なし。Phase 4b 以降で公開配信する際はサーバー側で forward slash へ正規化することを検討。
+- 400 レスポンスがすべて `{"error":"Bad Request: invalid JSON body"}` に統一されている（serde のデシリアライズ失敗として一括処理）。バリデーションエラー（confidence 範囲外、空 agent_id など）の理由が区別できないため、Python SDK からはエラーメッセージでのデバッグが難しい。DX 改善候補（Phase 4b で `unknown_variant` / `out_of_range` 等の詳細エラーコードを返す設計にすると良い）。
+- 孤児スナップショット検出 API はあるが GC 実行 API がない。テストのたびにファイルが残るため `narratives/` ディレクトリが肥大化する。ユーザー運用で `gc_orphans()` を叩ける CLI/API が欲しい — Phase 4b の運用課題として残す。
+- SDK メソッド名は `snapshot()`（`get_snapshot` ではない）。本タスク内で誤って `get_snapshot` を呼び `AttributeError` を出したが、これは呼び出し側のタイポで実装バグではない。ただし「`get` と `snapshot` の命名が対称でない」ことは将来的に混乱の種になりうる。
+
+**結論**: Phase 4a は release ビルドで完全に動作する。実行時バグの新規発見は 0 件。Phase 4b に進める状態。
+
+### 2026-04-22: 3 回目の実アプリ検証（エージェント体験サイクル）
+
+**状況**: debug / release 両ビルド成功（warning 3 件のみ、機能影響なし）。`cargo test --lib` **437/437 PASS**。実エージェントとして 5 サイクルを回した結果、**新規実行時バグ 0 件**。前回までの修正がすべて生きていることを確認。
+
+**5 サイクルの内訳**:
+
+| # | 注文 | snapshot | idempotency_key | public 往復 | outcome 自動 | 結果 |
+|---|---|---|---|---|---|---|
+| 1 | market buy 0.005 | 〜80 KB（OHLCV 500本＋OB 400 段） | あり（再送→`idempotent_replay=true`、同 ID 返却） | — | ✅ fill_price=75484.0 | OK |
+| 2 | limit sell 0.003 @ +0.01% | 極小 | なし（同 payload 2 回 → 別 ID） | true→false | ✅ fill_price=75500.4 | OK |
+| 3 | 観測のみ × 3 連続 | — | — | — | — | state は完全に決定的（current_time / klines が同一） |
+| 4 | 大容量境界 | 600 KB raw → gzip 1.7 KB / 11 MB raw | — | — | — | 大容量 201、11 MB は **413 Payload Too Large** で正しく拒否 |
+| 5 | Python SDK 経由 | 極小 | — | publish→unpublish | — | `fs.narrative.create/get/list/publish/unpublish/snapshot/storage_stats` 全 OK |
+
+**HTTP API 検証結果**: 全 7 エンドポイント + バリデーション分岐すべて仕様通り。
+
+**E2E テスト（release バイナリ実行）**:
+- `s51_narrative_crud.py`: **9/9 PASS**
+- `s52_narrative_outcome_link.py`: **3/3 PASS**（前回修正の headless `step_forward` での FillEvent 配線が機能継続）
+- `s53_narrative_snapshot_size.py`: **3/3 PASS**（前回修正の動的バッファ拡張による 11 MB ボディ 413 が機能継続）
+
+**Python SDK ユニットテスト（アプリ起動状態）**: `tests/python/test_narrative.py` **11/11 PASS**。
+
+**今回の作業中に得た DX 観察（バグではない、§9 既存知見の追認）**:
+
+1. **POST `/api/replay/order` の `order_type` は `string("market")` か `object({"limit": price})`** — 自分で叩いたときに `{"order_type":"limit","price":X}` を投げて 400 を食らった。仕様 (`src/replay_api.rs:605-616`) は `order_type` 自体に limit 価格を抱かせる設計。`/api/replay/order` の API ドキュメントにこの形式が明記されると Python SDK 拡張時にも迷わない（Phase 4b で `flowsurface_sdk.replay.place_order(side, qty, limit_price=...)` ヘルパー追加時の課題候補）。
+2. **`fs.narrative.create()` の `action` 引数は dict / `NarrativeAction` のみ** — 個別の `side`/`qty`/`price` キーワードは受け付けない（前回のセッションログで `record_narrative()` ヘルパーが Env 経由で展開する設計）。`NarrativeApi.create()` 直叩きでは `action={"side":..., "qty":..., "price":...}` の dict を渡す必要がある。SDK 利用者向けドキュメント追記候補。
+3. **idempotency_key 動作確認**: 同一キー再送で `idempotent_replay: true` が返り、`id` も snapshot_bytes も完全一致。SQLite の `(agent_id, idempotency_key)` UNIQUE 部分インデックスが機能している。
+4. **paused 状態の決定性**: `GET /api/replay/state` を 3 連続呼んでも `current_time_ms` も `klines[-1].close` もまったく同一。エージェントが同じ状態で複数回判断しても観測ぶれは発生しない。
+
+**結論**: Phase 4a は引き続き release ビルドで完全に動作。新規バグ 0 件。次フェーズ Phase 4b の前提として安定している。
