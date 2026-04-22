@@ -713,7 +713,10 @@ impl HeadlessEngine {
                     "client_order_id": request.client_order_id.as_str(),
                     "idempotent_replay": false,
                 });
-                (201, body.to_string())
+                // 新規/冪等リプレイともに 200 で統一する。レスポンスボディの形は同一なので、
+                // Python SDK は `idempotent_replay` フラグだけで分岐できる
+                // （ステータスコードで分岐しない方が実装が単純になる）。
+                (200, body.to_string())
             }
             PlaceOrderOutcome::IdempotentReplay { order_id } => {
                 let body = serde_json::json!({
@@ -758,6 +761,12 @@ impl HeadlessEngine {
             }
             ReplaySession::Active { .. } => {}
         }
+
+        // Agent state を lifecycle イベントに同期（ハンドラ入口で 1 回のみ）。
+        // 前回の step/order 以降に UI リモコン経由で /play や seek が走った場合、
+        // ここで stale な client_order_id マップが破棄される。
+        self.agent_session_state
+            .observe_generation(self.virtual_engine.session_generation());
 
         // Playing 中なら自動 pause（step-forward 仕様と対称）。
         if self.is_playing() {
@@ -870,9 +879,8 @@ impl HeadlessEngine {
         // サブフェーズ E: fill.order_id から agent_session_state を逆引きして
         // client_order_id を埋める。他経路（UI リモコン `/api/replay/order`）発注の fill
         // は agent の map に無いため None のまま（設計通り）。
-        // 世代変化を先に観測してから逆引きする（世代跨ぎの取り違えを防ぐ）。
-        self.agent_session_state
-            .observe_generation(self.virtual_engine.session_generation());
+        // 世代同期はハンドラ開始時に済んでいるため、ここでは再取得しない
+        // （step 内で generation を変える処理は存在しない）。
         let step_fills: Vec<StepFill> = fills
             .iter()
             .map(|f| {
@@ -2084,18 +2092,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn place_order_creates_new_order_and_returns_201() {
+    async fn place_order_returns_503_when_session_loading() {
+        // StepClock / EventStore は super::* 経由で既に import 済み。
+        let ticker = parse_ticker_str("HyperliquidLinear:BTC").unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let mut engine = HeadlessEngine::new(ticker, Timeframe::M1, tx);
+        // Loading セッションを手動構築
+        let clock = StepClock::new(0, 3_600_000, 60_000);
+        engine.state.session = ReplaySession::Loading {
+            clock,
+            pending_count: 1,
+            store: EventStore::new(),
+            active_streams: HashSet::new(),
+        };
+        let (status, body) = engine.agent_session_place_order(sample_order_request("cli_1", 0.1));
+        assert_eq!(status, 503, "body: {body}");
+        assert!(body.contains("loading"));
+    }
+
+    #[tokio::test]
+    async fn place_order_creates_new_order_and_returns_200() {
         let start_ms = 1_000_000u64;
         let step_ms = 60_000u64;
         let mut engine =
             make_active_engine_with_klines(start_ms, start_ms + step_ms * 5, step_ms, start_ms);
         let (status, body) = engine.agent_session_place_order(sample_order_request("cli_1", 0.1));
-        assert_eq!(status, 201, "body: {body}");
+        // 新規・冪等リプレイともに 200 で統一。分岐は idempotent_replay フラグで行う。
+        assert_eq!(status, 200, "body: {body}");
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(v["client_order_id"], "cli_1");
         assert_eq!(v["idempotent_replay"], false);
         assert!(v["order_id"].is_string());
-        // VirtualExchange にも登録されている。
         assert_eq!(engine.virtual_engine.get_orders().len(), 1);
     }
 
@@ -2107,7 +2134,7 @@ mod tests {
             make_active_engine_with_klines(start_ms, start_ms + step_ms * 5, step_ms, start_ms);
 
         let (s1, b1) = engine.agent_session_place_order(sample_order_request("cli_1", 0.1));
-        assert_eq!(s1, 201);
+        assert_eq!(s1, 200);
         let v1: serde_json::Value = serde_json::from_str(&b1).unwrap();
         let first_order_id = v1["order_id"].as_str().unwrap().to_string();
 
@@ -2130,7 +2157,7 @@ mod tests {
             make_active_engine_with_klines(start_ms, start_ms + step_ms * 5, step_ms, start_ms);
 
         let (s1, _) = engine.agent_session_place_order(sample_order_request("cli_1", 0.1));
-        assert_eq!(s1, 201);
+        assert_eq!(s1, 200);
 
         // 同じ cli_1 で qty 違い → 409
         let (s2, b2) = engine.agent_session_place_order(sample_order_request("cli_1", 0.2));
@@ -2152,8 +2179,8 @@ mod tests {
 
         let (s1, _) = engine.agent_session_place_order(sample_order_request("cli_1", 0.1));
         let (s2, _) = engine.agent_session_place_order(sample_order_request("cli_2", 0.2));
-        assert_eq!(s1, 201);
-        assert_eq!(s2, 201);
+        assert_eq!(s1, 200);
+        assert_eq!(s2, 200);
         assert_eq!(engine.virtual_engine.get_orders().len(), 2);
     }
 
@@ -2166,7 +2193,7 @@ mod tests {
             make_active_engine_with_klines(start_ms, start_ms + step_ms * 5, step_ms, start_ms);
 
         let (s1, _) = engine.agent_session_place_order(sample_order_request("cli_1", 0.1));
-        assert_eq!(s1, 201);
+        assert_eq!(s1, 200);
 
         // lifecycle event 発火（実運用では /play / step-backward が呼ぶ）。
         engine.virtual_engine.mark_session_reset();
@@ -2174,7 +2201,7 @@ mod tests {
         // 同じ cli_1 で qty 違い → 新規受付（クリア後なので 201）。
         let (s2, b2) = engine.agent_session_place_order(sample_order_request("cli_1", 0.2));
         assert_eq!(
-            s2, 201,
+            s2, 200,
             "after lifecycle event, same client_order_id can be reused: {b2}"
         );
     }
@@ -2189,7 +2216,7 @@ mod tests {
             make_active_engine_with_klines(start_ms, start_ms + step_ms * 5, step_ms, start_ms);
 
         let (s1, _) = engine.agent_session_place_order(sample_order_request("cli_trace", 0.1));
-        assert_eq!(s1, 201);
+        assert_eq!(s1, 200);
 
         let (_status, body) = engine.agent_session_step().await;
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
