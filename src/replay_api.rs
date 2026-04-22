@@ -450,9 +450,12 @@ fn body_uuid_field(body: &str, key: &str) -> Result<uuid::Uuid, RouteError> {
 
 /// "YYYY-MM-DD HH:MM" 形式の日時文字列を検証する。不正なら RouteError::BadRequest を返す。
 fn validate_datetime_str(s: &str) -> Result<(), RouteError> {
-    chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M")
+    const FORMATS: &[&str] = &["%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"];
+    FORMATS
+        .iter()
+        .find_map(|fmt| chrono::NaiveDateTime::parse_from_str(s, fmt).ok())
         .map(|_| ())
-        .map_err(|_| RouteError::BadRequest)
+        .ok_or(RouteError::BadRequest)
 }
 
 /// パスとメソッドから ApiCommand にルーティング
@@ -1294,6 +1297,19 @@ mod tests {
     fn route_root_path_not_found() {
         let result = route("GET", "/", "");
         assert!(matches!(result, Err(RouteError::NotFound)));
+    }
+
+    #[test]
+    fn route_post_play_accepts_datetime_with_seconds() {
+        let body = r#"{"start":"2024-01-01 09:00:00","end":"2024-01-01 15:30:00"}"#;
+        let cmd = route("POST", "/api/replay/play", body).unwrap();
+        match unwrap_replay(cmd) {
+            ReplayCommand::Play { start, end } => {
+                assert_eq!(start, "2024-01-01 09:00:00");
+                assert_eq!(end, "2024-01-01 15:30:00");
+            }
+            _ => panic!("expected Play"),
+        }
     }
 
     #[test]
