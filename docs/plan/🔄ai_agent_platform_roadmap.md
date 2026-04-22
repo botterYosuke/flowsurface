@@ -100,7 +100,7 @@ while not done:
 
 ## Phase 4a: Agent ナラティブ基盤（ローカル） ✅ 完了
 
-**実装計画・進捗**: [phase4a_narrative_foundation.md](phase4a_narrative_foundation.md)
+**実装計画・進捗**: [✅phase4a_narrative_foundation.md](✅phase4a_narrative_foundation.md)
 
 ### コンセプト
 

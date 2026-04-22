@@ -11,7 +11,7 @@
 **対象ブランチ**: `sasa/develop`（Phase 4a 完了時点）
 
 **実装計画ドキュメント**:
-- [docs/plan/phase4a_narrative_foundation.md](../plan/phase4a_narrative_foundation.md) — Phase 4a 実装計画・進捗・実アプリ検証ログ
+- [docs/plan/✅phase4a_narrative_foundation.md](../plan/✅phase4a_narrative_foundation.md) — Phase 4a 実装計画・進捗・実アプリ検証ログ
 - [docs/plan/🔄ai_agent_platform_roadmap.md](../plan/🔄ai_agent_platform_roadmap.md) — 親ロードマップ
 
 本書は flowsurface に追加されたナラティブ基盤を、実装・API 利用・運用に十分な粒度で説明するリファレンス仕様書である。Phase 4b（ASI 統合）以降の拡張点は §13 を参照。
@@ -595,7 +595,7 @@ orphans = fs.narrative.orphans()            # list[str]
 | 2 | 512 KB 超ボディで接続が黙って切断（10 MB ナラティブが常に失敗） | `read_full_request` を動的バッファ化（16 KB→16 MB）＋ `ReadRequestOutcome::TooLarge` 追加 |
 | 3 | `POST /api/replay/order` が `BinanceLinear:BTCUSDT` 形式をサイレント受理し、全注文が永遠 Pending | `parse_virtual_order_command` で `Exchange:Symbol` prefix を剥がし symbol だけに正規化 |
 
-これらは [plan §9 実装ログ](../plan/phase4a_narrative_foundation.md#9-実装ログ作業者追記) に詳細あり。
+これらは [plan §9 実装ログ](../plan/✅phase4a_narrative_foundation.md#9-実装ログ作業者追記) に詳細あり。
 
 ### 13.3 既存バグ（未修正・Phase 4b 課題）
 
