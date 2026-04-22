@@ -7,6 +7,7 @@ pub(crate) use iced::widget::tooltip::Position as TooltipPosition;
 pub(crate) use screen::dashboard;
 pub(crate) use widget::tooltip;
 
+pub mod api;
 pub mod audio;
 pub mod chart;
 pub mod connector;
