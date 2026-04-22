@@ -644,3 +644,56 @@ Cargo.toml                           # rusqlite（bundled）・flate2・sha2 追
 4. **release バイナリでは `DEV_USER_ID/PASSWORD` 自動ログインが効かない** — `#[cfg(debug_assertions)]` ガード（[`src/screen/login.rs:140`](../../src/screen/login.rs#L140) / [`src/connector/auth.rs:91-100`](../../src/connector/auth.rs#L91)）。E2E を release で回したい場合は事前に keyring セッションを作っておく前提（手動 ID/PW 入力 1 回 → 以降は自動復元）。今回もそのパス。
 
 **結論**: バグ 1（ticker 正規化）は **GUI / headless 両方の API 契約上の silent failure** だったが GUI 経路の体験で初めて踏み抜けた典型例。修正済み・テスト追加済み。バグ 2（GUI が CLI 引数無視）は GUI 起動シーケンスの設計上の制約で Phase 4b 課題。**Phase 4a のナラティブ基盤本体は GUI 起動中でも完全に機能する**ことを再確認。次フェーズ進行に支障なし。
+
+---
+
+### 2026-04-22: 5 回目の実アプリ検証（立花銘柄・GUI デバッグモード）
+
+**目的**: 4 回目の GUI 検証で見つけた `/api/replay/order` の ticker 正規化バグが修正された後、**日本株（立花証券）銘柄 `Tachibana:7203` + 日足 `D1`** で同じ体験ループが通るかを検証。Binance 固有の不具合だけでなく Tachibana セッション復元経路・日足リプレイ・単元株 100 株発注でも基盤が機能することを確認する。
+
+**起動・環境**:
+- **モード**: GUI debug (`./target/debug/flowsurface.exe`)、`.env` ロード済み
+- 起動ログ: `Attempting to restore tachibana session from keyring` → `Loaded tachibana session from keyring` → `Tachibana session validated successfully, restoring` の 3 行を 0.2 秒で確認。`Failed to bind` ログなし（H1 クリア）。
+- 保存済みレイアウトが既に Tachibana:7203 D1 の candlestick + DOM + Order Entry + Buying Power + Order List の 5 pane 構成で復元され、`streams_ready=true` のまま起動 → `/api/pane/set-ticker` の再設定は不要だった（H2 の「違う ticker で起動」問題は発生せず、前回保存状態が追い風になった）。
+- リプレイ区間: 当初 `2024-01-04 09:00`〜`2024-06-28 15:30`（約 6 ヶ月）で `play` したところ、**D1 データは 1 秒間で 4 日分進行**することが判明し約 2 秒で end に到達。ステップフォワードを入れたいサイクル実施のため `2024-01-04 09:00`〜`2024-03-01 15:30` に短縮し即 pause。以降は `current_time=1704704400000`（2024-01-08 09:00 JST）を基準点として各サイクルを走らせた。
+
+**サイクル実施結果（5 本中 5 本成立、うち 1 本は自己ミスで再実行）**:
+
+| # | 注文 / 観測 | `snapshot_bytes`（gzip） | 期待 vs 実際 |
+|---|---|---|---|
+| C1 | 成行 buy 100 株 @ 7203、ct=2024-01-08（prev close 2701） | 78 B | **一致**: order=pending → narrative 作成（`idempotent_replay: false`） → 同ボディ再送で `idempotent_replay: true` かつ同 id。step-forward × 5 回で outcome 自動充填（`fill_price=2694, fill_time_ms=1704790800000` = Jan 9 JST 18:00）。bar open 付近で約定、Trade EventStore が空の日足でも `synthetic_trades_at_current_time` 経由で自然に fill |
+| C2 | 指値 sell 100 株 @ 2960（≈ current close 2931 の +1%） | 81 B | **一致**: 3 bar 後の Jan 18 close=2962（>=2960）で fill。`order_book.rs:119` の `tp >= limit` 判定と合致。ただし 1 本目は自己誤用（スキーマ見間違え）で市場注文扱いになり即 fill → 是正 |
+| C3 | 観測のみ x3（narrative 生成なし）| — | **一致**: 3 連続 `GET /api/replay/state` 応答が完全同一（`current_time_ms`=1705827600000, `klines.length`=50, 最終 close=2962）。決定性 OK |
+| C4a | 成行 buy 100 + observation 614 KB raw → gzip 664 B | 664 B | **一致**: HTTP 201。`snapshot_ref.size_bytes=664`、`sha256` 発行、decompress 後 614,400 bytes の `"junk": "aaa..."` が完全復元 |
+| C4b | 同 + 11 MB payload | — | **一致**: HTTP 413「Payload Too Large」（S53 と同じ挙動） |
+| C5 | `tests/python/test_narrative.py`（SDK 経路）| — | **11/11 PASS**（1.76 秒）。Tachibana ticker とは独立の SDK 疎通テストも含め破綻なし |
+
+**追加確認**:
+- `GET /api/agent/narratives?agent_id=<今回分>&ticker=Tachibana:7203`: 今セッション分 4 件（C1/C2v2/C4a と C2v1 のゴミ）が正しく返る
+- `PATCH /api/agent/narrative/:id {public: true}` → `false` 往復で反映確認
+- `GET /api/agent/narratives/storage`: `total_count=128, total_bytes=13454`（過去セッション分含む）
+
+**根本修正したバグ**: **新規バグ 0 件**。前回の ticker 正規化修正（[`src/replay_api.rs:584-598`](../../src/replay_api.rs#L584)）が Tachibana 側 `"Tachibana:7203"` に対しても期待通り prefix を剥がし、`VirtualOrderBook::on_tick` の比較で hit することを確認。
+
+**立花固有の観察**:
+1. **D1 リプレイは 1 秒で 4 日進行**（`1 tick = 1 kline`、StepClock が秒単位に紐づいていないため）。6 ヶ月レンジを `play` するとほぼ瞬間的に end に到達し、pause が間に合わない。**headless E2E を立花データで書く場合は、`play` 直後に即 `pause` を投げるか 1 ヶ月以下の短レンジを使う前提**。Phase 4b の Python SDK で D1 銘柄を扱う際のデフォルト設計検討事項。
+2. **合成トレードの価格=kline.close**: 日足は Trade EventStore 空なので `synthetic_trades_at_current_time`（[`src/replay/controller/tick.rs:191`](../../src/replay/controller/tick.rs#L191)）が close 1 本だけのトレードを生成する。結果、**成行は「その日の close」、指値は「close が限界価格に達した日」に fill** という挙動になる。実取引の寄り付き/引け/ザラ場の区別はなし。narrative の `fill_price` 解釈時に要注意（`outcome.fill_price` は「約定した日の close」）。
+3. **単元株 100 株発注**は浮動小数点問題なく通過（`qty: 100.0`）。`min_qty: Power10 { power: 2 }` の TickerInfo も正しく反映されていることを起動ログで確認。
+4. **keyring 復元は 0.2 秒**でセッション再利用 → master 4566 件 disk cache ロード → 疎通確認完了まで合計 ~1 秒。4 回目 Binance 検証のような 3 秒遅延は今回は観測されず（ペイン `streams_ready=true` が即立つ）。
+5. **p_no 競合エラーは起床時に出なかった**（前回は Tachibana daily history fetch で `code=6, p_no 逆順` を踏んだ）。起動直後に replay を即起動しなかったタイミング差かもしれない。
+
+**DX 観察（エージェント体験としての違和感）**:
+- **`/api/replay/order` のスキーマが寛容すぎる**: `{"type": "limit", "price": 2960}` のように `type` / `price` を送ると、サーバーはそれを無視して `order_type` フィールド欠落 → **デフォルトで market 扱い**になる（[`src/replay_api.rs:614-629`](../../src/replay_api.rs#L614)）。HTTP 201 は返るが実態は違うので、**出力/入力フォーマット不一致による silent failure** の再発パターン。E2E スクリプト（`tests/e2e/s34_virtual_order_basic.py`）は正しい `order_type: {"limit": N}` 形式を使っているが、SDK や外部エージェントが schema を見ずに「type」「price」を試みたら気付かず市場注文される。**`order_type` 欠落 → 400 にする**か、`type` / `price` の別名も受けて正規化する方が「サイレント破綻しない API」の原則（バグ 1 の教訓）と整合する。Phase 4b 改善候補。
+- **snapshot 配送 API (`GET /api/agent/narrative/:id/snapshot`) は `Content-Type: application/json` で decompress 済みボディ**を返す。ドキュメントの「gzip 解凍 + sha256 検証が通ること」表現から gzip バイナリを期待したが、サーバー側で既に解凍済み。sha256 は `snapshot_ref.sha256` に保持される（gzip バイト列のハッシュ）。整合性検証は `/api/agent/narratives/storage` 経由で行う。こちらはドキュメント更新余地あり。
+
+**テスト結果（既存プロセス kill 後に別プロセスで実行）**:
+- `cargo test --lib`: **440/440 PASS**（前回と同じ）
+- `tests/e2e/s51_narrative_crud.py` (headless): **9/9 PASS**
+- `tests/e2e/s53_narrative_snapshot_size.py` (headless): **3/3 PASS**
+- `tests/e2e/s52_narrative_outcome_link.py`: **skip**（BinanceLinear 前提・立花に改修不要・タスク指示通り）
+- `tests/python/test_narrative.py`: **11/11 PASS**（GUI debug 稼働中に pytest 実行）
+- 手動サイクル C1〜C5: 5/5 成立（C2 の 1 回目の自己ミスを除く）
+
+**結論**: **ナラティブ基盤（create / get / list / patch / snapshot / storage / idempotency / gzip 圧縮）は立花証券 D1 銘柄でも完全に機能する**。GUI debug モードでの `.env` 経由 keyring 復元パスも安定。新規バグ 0 件。Phase 4a の仕様は取引所非依存であることを再確認。
+
+**サブエージェント呼び出し記録**: `rust-build-resolver` × 2 並列（debug + release、それぞれ 12 秒 / 54 秒で成功）。Investigator / SDK Verifier は破綻未検出のため未起動。
