@@ -3,10 +3,7 @@
 /// `flowsurface --headless --ticker HyperliquidLinear:BTC --timeframe M1` で起動する。
 /// iced::daemon を一切起動しないため、Python SDK のような外部プログラムから
 /// HTTP API (port 9876) 経由で高速に強化学習ループを回せる。
-use std::{
-    collections::HashSet,
-    time::{Duration, Instant},
-};
+use std::{collections::HashSet, time::Instant};
 
 use exchange::{
     Ticker, TickerInfo, Timeframe,
@@ -1635,9 +1632,9 @@ pub async fn run(args: &[String]) {
 
     let mut engine = HeadlessEngine::new(ticker, timeframe, load_tx);
 
-    // 100ms tick インターバル（Playing 中のみ有効）
-    let mut tick_interval = tokio::time::interval(Duration::from_millis(100));
-    tick_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // ADR-0001 §2 自動再生機構の全廃:
+    // 以前は 100ms interval で `engine.tick()` を発火させ Playing 中の replay を自動進行させていたが、
+    // agent session API (`/api/agent/session/:id/{step,advance}`) への一本化に伴い削除。
 
     log::info!("headless event loop started (API port: {})", {
         std::env::var("FLOWSURFACE_API_PORT")
@@ -1658,13 +1655,6 @@ pub async fn run(args: &[String]) {
             // API コマンド受信
             Some((cmd, reply)) = api_rx.next() => {
                 engine.handle_command(cmd, reply).await;
-            }
-
-            // 再生中の tick（Playing 時のみ処理）
-            _ = tick_interval.tick() => {
-                if engine.is_playing() {
-                    engine.tick(Instant::now());
-                }
             }
         }
     }

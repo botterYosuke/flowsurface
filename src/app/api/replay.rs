@@ -1,9 +1,7 @@
-use crate::replay::{self, ReplayMessage, ReplayUserMessage};
 // NOTE: ADR-0001 §2 で Play/Pause/Resume/StepForward/StepBackward/CycleSpeed variant は
 // 削除済み。UI 側の `▶` / `⏭` / `⏮` は agent session API を直接叩く方式に移行中。
+use crate::replay::{self, ReplayMessage, ReplayUserMessage};
 use crate::replay_api;
-use crate::screen::dashboard;
-use crate::widget::toast::Toast;
 use crate::{Flowsurface, Message};
 use iced::Task;
 
@@ -25,48 +23,11 @@ impl Flowsurface {
 
         match cmd {
             replay::ReplayCommand::GetStatus => {
-                // headless CI 対応: iced::time::every が発火しない環境でも
-                // API ポーリング毎に clock を前進させる。
-                let mut tick_tasks: Vec<Task<Message>> = Vec::new();
-                if self.replay.is_playing() {
-                    let now = std::time::Instant::now();
-                    let main_window_id = self.main_window.id;
-                    if let Some(id) = self.layout_manager.active_layout_id().map(|l| l.unique)
-                        && let Some(dash) =
-                            self.layout_manager.get_mut(id).map(|l| &mut l.dashboard)
-                    {
-                        let outcome = self.replay.tick(now, dash, main_window_id);
-                        if outcome.reached_end {
-                            self.notifications.push(Toast::info("Replay reached end"));
-                        }
-                        for (stream, trades, update_t) in outcome.trade_events {
-                            if let Some(engine) = &mut self.virtual_engine {
-                                let ticker = stream.ticker_info().ticker.to_string();
-                                let clock_ms = self.replay.current_time_ms().unwrap_or(0);
-                                let fills = engine.on_tick(&ticker, &trades, clock_ms);
-                                for fill in fills {
-                                    tick_tasks.push(Task::done(Message::Dashboard {
-                                        layout_id: None,
-                                        event: dashboard::Message::VirtualOrderFilled(fill),
-                                    }));
-                                }
-                            }
-                            if let Some(d) = self.active_dashboard_mut() {
-                                let ingest_task = d
-                                    .ingest_trades(&stream, &trades, update_t, main_window_id)
-                                    .map(move |msg| Message::Dashboard {
-                                        layout_id: None,
-                                        event: msg,
-                                    });
-                                tick_tasks.push(ingest_task);
-                            }
-                        }
-                    }
-                }
+                // ADR-0001 §2 自動再生機構の全廃:
+                // 以前はここで `self.replay.tick(...)` による headless CI 向け
+                // auto-tick 発火を行っていたが削除。Replay 進行は agent session API
+                // からの明示的 step / advance / rewind-to-start に限定される。
                 reply_tx.send(reply_replay_status(self));
-                if !tick_tasks.is_empty() {
-                    return Task::batch(tick_tasks);
-                }
             }
             replay::ReplayCommand::Toggle => {
                 // NOTE: 本サブフェーズ M の責務は `ReplayCommand` variant 整理のみ。

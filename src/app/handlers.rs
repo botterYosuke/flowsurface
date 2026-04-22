@@ -208,100 +208,21 @@ impl Flowsurface {
     }
 
     pub(crate) fn handle_tick(&mut self, now: std::time::Instant) -> Task<Message> {
+        // ADR-0001 §2: 自動再生機構の全廃に伴い、ここでの `self.replay.tick(...)` による
+        // wall-clock 駆動 replay 前進処理は削除。Replay の進行は
+        // `/api/agent/session/:id/{step,advance,rewind-to-start}` からのみ発火する。
+        // このハンドラは iced::window::frames() による dashboard 描画アニメーション tick
+        // の配送のみを担う。
         let main_window_id = self.main_window.id;
-        let mut all_tasks: Vec<Task<Message>> = Vec::new();
 
-        if self.replay.is_replay() {
-            let Some(active_id) = self.layout_manager.active_layout_id().map(|l| l.unique) else {
-                return Task::none();
-            };
-            let Some(dashboard) = self
-                .layout_manager
-                .get_mut(active_id)
-                .map(|l| &mut l.dashboard)
-            else {
-                return Task::none();
-            };
-            let outcome = self.replay.tick(now, dashboard, main_window_id);
-
-            for (stream, trades, update_t) in outcome.trade_events {
-                if let Some(engine) = &mut self.virtual_engine {
-                    let ticker = stream.ticker_info().ticker.to_string();
-                    let clock_ms = self.replay.current_time_ms().unwrap_or(0);
-                    let fills = engine.on_tick(&ticker, &trades, clock_ms);
-                    if !fills.is_empty() {
-                        // Phase 4a D-1: outcome 反映後にマーカー再描画を依頼。
-                        all_tasks.push(self.refresh_narrative_markers_task());
-                    }
-                    for fill in fills {
-                        // ナラティブ outcome 自動更新（Phase 4a C-1）
-                        let narrative_store = self.narrative_store.clone();
-                        let order_id = fill.order_id.clone();
-                        let fill_price = fill.fill_price;
-                        let fill_time_ms = fill.fill_time_ms as i64;
-                        let side_hint = match fill.side {
-                            crate::replay::virtual_exchange::PositionSide::Long => {
-                                Some(crate::narrative::model::NarrativeSide::Buy)
-                            }
-                            crate::replay::virtual_exchange::PositionSide::Short => {
-                                Some(crate::narrative::model::NarrativeSide::Sell)
-                            }
-                        };
-                        all_tasks.push(Task::perform(
-                            async move {
-                                if let Err(e) =
-                                    crate::narrative::service::update_outcome_from_fill(
-                                        &narrative_store,
-                                        &order_id,
-                                        fill_price,
-                                        fill_time_ms,
-                                        side_hint,
-                                    )
-                                    .await
-                                {
-                                    log::warn!(
-                                        "failed to update narrative outcome for order {order_id}: {e}"
-                                    );
-                                }
-                            },
-                            |()| Message::Noop,
-                        ));
-
-                        let fill_msg = dashboard::Message::VirtualOrderFilled(fill);
-                        all_tasks.push(Task::done(Message::Dashboard {
-                            layout_id: None,
-                            event: fill_msg,
-                        }));
-                    }
-                }
-
-                if let Some(d) = self.active_dashboard_mut() {
-                    let task = d
-                        .ingest_trades(&stream, &trades, update_t, main_window_id)
-                        .map(move |msg| Message::Dashboard {
-                            layout_id: None,
-                            event: msg,
-                        });
-                    all_tasks.push(task);
-                }
-            }
-
-            if outcome.reached_end {
-                self.notifications.push(Toast::info("Replay reached end"));
-            }
-        }
-
-        if let Some(d) = self.active_dashboard_mut() {
-            let tick_task = d
-                .tick(now, main_window_id)
-                .map(move |msg| Message::Dashboard {
-                    layout_id: None,
-                    event: msg,
-                });
-            all_tasks.push(tick_task);
-        }
-
-        Task::batch(all_tasks)
+        let Some(d) = self.active_dashboard_mut() else {
+            return Task::none();
+        };
+        d.tick(now, main_window_id)
+            .map(move |msg| Message::Dashboard {
+                layout_id: None,
+                event: msg,
+            })
     }
 
     pub(crate) fn handle_window_event(&mut self, event: window::Event) -> Task<Message> {

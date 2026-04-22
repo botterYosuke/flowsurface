@@ -385,26 +385,19 @@ impl Flowsurface {
             }
         });
 
-        if self.replay.is_replay() {
-            // headless 環境（CI=true）では window::frames() が発火しないためタイマーを使用。
-            let replay_tick = if self.is_headless {
-                iced::time::every(std::time::Duration::from_millis(100)).map(Message::Tick)
-            } else {
-                tick
-            };
-            return Subscription::batch(vec![
-                window_events,
-                sidebar,
-                replay_tick,
-                hotkeys,
-                replay_api,
-            ]);
-        }
-
-        let exchange_streams = self
-            .active_dashboard()
-            .map(|d| d.market_subscriptions().map(Message::MarketWsEvent))
-            .unwrap_or_else(Subscription::none);
+        // ADR-0001 §2 自動再生機構の全廃:
+        // 以前は Replay モード時に `iced::time::every(100ms)` で Message::Tick を
+        // wall-clock 駆動していたが、agent session API への一本化に伴い廃止。
+        // Replay 進行は `/api/agent/session/:id/{step,advance,rewind-to-start}` 経由のみ。
+        // `tick`（iced::window::frames()）は dashboard 描画アニメーション用として Live /
+        // Replay 両方で発火させる（handle_tick 側で replay.tick は呼ばれない）。
+        let exchange_streams = if self.replay.is_replay() {
+            Subscription::none()
+        } else {
+            self.active_dashboard()
+                .map(|d| d.market_subscriptions().map(Message::MarketWsEvent))
+                .unwrap_or_else(Subscription::none)
+        };
 
         Subscription::batch(vec![
             exchange_streams,

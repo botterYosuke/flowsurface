@@ -124,8 +124,12 @@ impl ReplayController {
         self.state.range_input.end = s;
     }
 
-    /// API コマンド `ReplayCommand::Play { start, end }` の処理を一括実行する。
-    /// range_input を更新してから ReplayMessage::Play を処理する。
+    /// range_input を更新してから `ReplayMessage::Play` を処理する。
+    ///
+    /// ADR-0001 §3: `ReplayCommand::Play` variant は削除されたため直接の caller はないが、
+    /// 後続サブフェーズで `POST /api/replay/toggle`（Live→Replay + body `{start, end}`）
+    /// と `POST /api/agent/session/:id/rewind-to-start` の session 初期化経路に再利用する。
+    #[allow(dead_code)]
     pub fn play_with_range(
         &mut self,
         start: String,

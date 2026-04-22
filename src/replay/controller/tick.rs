@@ -1,4 +1,8 @@
-use std::time::Instant;
+// ADR-0001 §2: 自動再生機構の全廃に伴い、旧 `ReplayController::tick` と `TickOutcome`
+// は削除。wall-clock 駆動の dispatcher 経由の kline/trade 注入は agent session API
+// (`/api/agent/session/:id/step` / `advance`) 側のハンドラに移動している。
+// 残すのは system event（ペイン構成変更・stream 再ロード）と
+// `synthetic_trades_at_current_time`（agent step が使用）。
 
 use exchange::Trade;
 use exchange::adapter::StreamKind;
@@ -12,74 +16,7 @@ use super::super::{
 };
 use super::ReplayController;
 
-/// `ReplayController::tick` の戻り値。
-/// kline 注入はコントローラ内で完結するが、trade 注入には `Task` が必要なため
-/// 呼び出し側 (main.rs) で処理できるよう trade イベントを返す。
-pub struct TickOutcome {
-    /// (stream, trades, update_t) のリスト。空でないものだけ含まれる。
-    pub trade_events: Vec<(StreamKind, Vec<Trade>, u64)>,
-    /// true なら replay 終端に到達した（clock は Paused 済み）。
-    pub reached_end: bool,
-}
-
 impl ReplayController {
-    /// Tick ごとに `dispatch_tick` を実行し、kline をチャートに直接注入する。
-    /// Trade 注入には `Task` が必要なため [`TickOutcome`] として返す。
-    ///
-    /// C-2: `reached_end == true` のとき呼び出し側で Toast を発行する。
-    pub fn tick(
-        &mut self,
-        now: Instant,
-        dashboard: &mut Dashboard,
-        main_window_id: iced::window::Id,
-    ) -> TickOutcome {
-        let (clock, store, active_streams) = match &mut self.state.session {
-            ReplaySession::Loading {
-                clock,
-                store,
-                active_streams,
-                ..
-            }
-            | ReplaySession::Active {
-                clock,
-                store,
-                active_streams,
-                ..
-            } => (clock, store, active_streams),
-            ReplaySession::Idle => {
-                return TickOutcome {
-                    trade_events: vec![],
-                    reached_end: false,
-                };
-            }
-        };
-
-        let dispatch = super::super::dispatcher::dispatch_tick(clock, store, active_streams, now);
-
-        // kline をチャートへ同期注入
-        for (stream, klines) in &dispatch.kline_events {
-            if !klines.is_empty() {
-                dashboard.ingest_replay_klines(stream, klines, main_window_id);
-            }
-        }
-
-        // trade イベントは Task が必要なため呼び出し側に委ねる
-        let trade_events = dispatch
-            .trade_events
-            .into_iter()
-            .filter(|(_, trades)| !trades.is_empty())
-            .map(|(stream, trades)| {
-                let update_t = trades.last().map_or(dispatch.current_time, |t| t.time);
-                (stream, trades, update_t)
-            })
-            .collect();
-
-        TickOutcome {
-            trade_events,
-            reached_end: dispatch.reached_end,
-        }
-    }
-
     /// システムイベントを処理する。
     pub fn handle_system_event(
         &mut self,
