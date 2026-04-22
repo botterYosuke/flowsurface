@@ -249,7 +249,13 @@ mod tests {
         };
         let resp = StepResponse::new(42, false, obs, vec![]);
         let v: serde_json::Value = serde_json::from_str(&resp.to_json_string().unwrap()).unwrap();
-        for key in ["clock_ms", "reached_end", "observation", "fills", "updated_narrative_ids"] {
+        for key in [
+            "clock_ms",
+            "reached_end",
+            "observation",
+            "fills",
+            "updated_narrative_ids",
+        ] {
             assert!(v.get(key).is_some(), "missing top-level key: {key}");
         }
     }

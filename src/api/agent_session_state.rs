@@ -130,7 +130,12 @@ mod tests {
     fn created_on_first_placement() {
         let mut state = AgentSessionState::new();
         let outcome = state.place_or_replay(cli("cli_1"), key(0.1), "ord_uuid_1".to_string());
-        assert_eq!(outcome, PlaceOrderOutcome::Created { order_id: "ord_uuid_1".to_string() });
+        assert_eq!(
+            outcome,
+            PlaceOrderOutcome::Created {
+                order_id: "ord_uuid_1".to_string()
+            }
+        );
         assert_eq!(state.len(), 1);
     }
 
@@ -139,7 +144,11 @@ mod tests {
         // 同じ client_order_id + 同じ key の再送は既存 order_id を返す。
         let mut state = AgentSessionState::new();
         state.place_or_replay(cli("cli_1"), key(0.1), "ord_uuid_1".to_string());
-        let outcome = state.place_or_replay(cli("cli_1"), key(0.1), "ord_uuid_should_not_use".to_string());
+        let outcome = state.place_or_replay(
+            cli("cli_1"),
+            key(0.1),
+            "ord_uuid_should_not_use".to_string(),
+        );
         assert_eq!(
             outcome,
             PlaceOrderOutcome::IdempotentReplay {
@@ -205,10 +214,7 @@ mod tests {
     fn client_order_id_for_returns_mapping_after_placement() {
         let mut state = AgentSessionState::new();
         state.place_or_replay(cli("cli_1"), key(0.1), "ord_uuid_1".to_string());
-        assert_eq!(
-            state.client_order_id_for("ord_uuid_1"),
-            Some(cli("cli_1"))
-        );
+        assert_eq!(state.client_order_id_for("ord_uuid_1"), Some(cli("cli_1")));
     }
 
     #[test]

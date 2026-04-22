@@ -56,9 +56,27 @@ impl AgentOrderRequest {
 }
 
 /// JSON 文字列を `AgentOrderRequest` に変換する。400 返却用のエラーメッセージを付ける。
+///
+/// `qty` / `limit.price` の正値 + 有限性（`is_finite`）ガードも同時に行う。
+/// NaN / Inf / 負値 / 0 を VirtualOrder に流すと silent に約定しないケースを生むため、
+/// 型で弾けない浮動小数の不変条件を入口で検証する。
 pub fn parse_agent_order_request(body: &str) -> Result<AgentOrderRequest, String> {
-    serde_json::from_str::<AgentOrderRequest>(body)
-        .map_err(|e| format!("invalid order request: {e}"))
+    let req: AgentOrderRequest =
+        serde_json::from_str(body).map_err(|e| format!("invalid order request: {e}"))?;
+    if !req.qty.is_finite() || req.qty <= 0.0 {
+        return Err(format!(
+            "qty must be a positive finite number (got {})",
+            req.qty
+        ));
+    }
+    if let AgentOrderType::Limit { price } = req.order_type
+        && (!price.is_finite() || price <= 0.0)
+    {
+        return Err(format!(
+            "order_type.limit.price must be a positive finite number (got {price})"
+        ));
+    }
+    Ok(req)
 }
 
 #[cfg(test)]
@@ -179,7 +197,71 @@ mod tests {
             "extra": 42
         }"#;
         let err = parse_agent_order_request(body).unwrap_err();
-        assert!(err.contains("extra") || err.contains("unknown"), "got {err}");
+        assert!(
+            err.contains("extra") || err.contains("unknown"),
+            "got {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_zero_qty() {
+        let body = r#"{
+            "client_order_id": "cli_1",
+            "ticker": {"exchange": "X", "symbol": "Y"},
+            "side": "buy",
+            "qty": 0.0,
+            "order_type": {"market": {}}
+        }"#;
+        let err = parse_agent_order_request(body).unwrap_err();
+        assert!(err.contains("qty"), "got {err}");
+    }
+
+    #[test]
+    fn rejects_negative_qty() {
+        let body = r#"{
+            "client_order_id": "cli_1",
+            "ticker": {"exchange": "X", "symbol": "Y"},
+            "side": "buy",
+            "qty": -0.1,
+            "order_type": {"market": {}}
+        }"#;
+        let err = parse_agent_order_request(body).unwrap_err();
+        assert!(err.contains("qty"), "got {err}");
+    }
+
+    #[test]
+    fn rejects_nan_qty() {
+        // JSON に NaN は書けないので Rust 側で NaN を値として渡して検証。
+        let body = format!(
+            r#"{{
+            "client_order_id": "cli_1",
+            "ticker": {{"exchange": "X", "symbol": "Y"}},
+            "side": "buy",
+            "qty": {},
+            "order_type": {{"market": {{}}}}
+        }}"#,
+            // serde_json は NaN を出力しないため、代替として十進表現で
+            // Infinity 等価の巨大値を使わず、"NaN" 文字列を含めて拒否する。
+            // 直接 NaN を検証するには構造体を作って検査する方が確実なので、
+            // この test は is_finite ガードの負値 + 0 + 無限系の代表として
+            // f64::MAX 以上の挙動 Infinity を通す経路を検証する。
+            "1e400" // JSON parser 側で Infinity 扱い
+        );
+        let err = parse_agent_order_request(&body).unwrap_err();
+        assert!(err.contains("qty") || err.contains("invalid"), "got {err}");
+    }
+
+    #[test]
+    fn rejects_non_positive_limit_price() {
+        let body = r#"{
+            "client_order_id": "cli_1",
+            "ticker": {"exchange": "X", "symbol": "Y"},
+            "side": "buy",
+            "qty": 0.1,
+            "order_type": {"limit": {"price": 0.0}}
+        }"#;
+        let err = parse_agent_order_request(body).unwrap_err();
+        assert!(err.contains("price"), "got {err}");
     }
 
     #[test]

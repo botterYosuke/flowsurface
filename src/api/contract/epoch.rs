@@ -8,7 +8,7 @@ use std::num::TryFromIntError;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct EpochMs(pub u64);
+pub struct EpochMs(pub(crate) u64);
 
 impl EpochMs {
     pub const fn new(ms: u64) -> Self {
@@ -24,6 +24,19 @@ impl EpochMs {
     /// 負値化（`as i64` の振る舞い）を回避する。
     pub fn try_as_i64(self) -> Result<i64, TryFromIntError> {
         i64::try_from(self.0)
+    }
+
+    /// `i64` 境界へのサチュレーション変換。overflow 時は `i64::MAX` に
+    /// クランプして警告ログを残す。narrative ストア等、失敗を呼び出し側で
+    /// 伝搬させにくい経路向け。`try_as_i64()` と使い分ける。
+    pub fn saturating_to_i64(self) -> i64 {
+        self.try_as_i64().unwrap_or_else(|_| {
+            log::warn!(
+                "EpochMs::saturating_to_i64 overflow: {} clamped to i64::MAX",
+                self.0
+            );
+            i64::MAX
+        })
     }
 }
 
@@ -95,5 +108,17 @@ mod tests {
     fn from_u64_conversion() {
         let t: EpochMs = 100_u64.into();
         assert_eq!(t.as_u64(), 100);
+    }
+
+    #[test]
+    fn saturating_to_i64_passthrough_within_range() {
+        let t = EpochMs::new(1_704_067_200_000);
+        assert_eq!(t.saturating_to_i64(), 1_704_067_200_000_i64);
+    }
+
+    #[test]
+    fn saturating_to_i64_clamps_on_overflow() {
+        let t = EpochMs::new(u64::MAX);
+        assert_eq!(t.saturating_to_i64(), i64::MAX);
     }
 }
