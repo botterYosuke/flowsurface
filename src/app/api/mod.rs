@@ -27,6 +27,55 @@ fn serialize_advance_response(resp: &crate::api::advance_request::AdvanceRespons
     })
 }
 
+/// 1 件の仮想 fill に対する非同期タスクを組み立てる:
+/// 1. narrative outcome 更新 (`update_outcome_from_fill`) — `Task::perform`
+/// 2. Dashboard への `VirtualOrderFilled` 通知 — `Task::done`
+///
+/// `context` は warn ログの前置詞 (`"step"` / `"advance"` 等)。
+/// handle_agent (handlers.rs) と handle_agent_advance (api/mod.rs) で共有する。
+/// advance に `stop_on: [Fill]` が追加される際の同期漏れを防ぐため集約してある。
+pub(crate) fn narrative_tasks_for_fill(
+    narrative_store: std::sync::Arc<crate::narrative::store::NarrativeStore>,
+    fill: crate::replay::virtual_exchange::FillEvent,
+    context: &'static str,
+) -> (Task<Message>, Task<Message>) {
+    let order_id = fill.order_id.clone();
+    let fill_price = fill.fill_price;
+    let fill_time_ms = crate::api::contract::EpochMs::new(fill.fill_time_ms).saturating_to_i64();
+    let side_hint = match fill.side {
+        crate::replay::virtual_exchange::PositionSide::Long => {
+            Some(crate::narrative::model::NarrativeSide::Buy)
+        }
+        crate::replay::virtual_exchange::PositionSide::Short => {
+            Some(crate::narrative::model::NarrativeSide::Sell)
+        }
+    };
+
+    let narrative_task = Task::perform(
+        async move {
+            if let Err(e) = crate::narrative::service::update_outcome_from_fill(
+                &narrative_store,
+                &order_id,
+                fill_price,
+                fill_time_ms,
+                side_hint,
+            )
+            .await
+            {
+                log::warn!("{context}: failed to update narrative outcome for {order_id}: {e}");
+            }
+        },
+        |()| Message::Noop,
+    );
+
+    let dashboard_task = Task::done(Message::Dashboard {
+        layout_id: None,
+        event: crate::screen::dashboard::Message::VirtualOrderFilled(fill),
+    });
+
+    (narrative_task, dashboard_task)
+}
+
 impl Flowsurface {
     fn start_replay_session(
         &mut self,
@@ -80,18 +129,12 @@ impl Flowsurface {
 
     fn handle_agent_rewind_request(
         &mut self,
-        session_id: String,
         init_range: Option<(String, String)>,
         reply_tx: replay_api::ReplySender,
     ) -> Task<Message> {
-        if session_id != "default" {
-            reply_tx.send_status(
-                501,
-                r#"{"error":"multi-session not yet implemented; use 'default' until Phase 4c"}"#
-                    .to_string(),
-            );
-            return Task::none();
-        }
+        // session_id != "default" は routing 段階で 501 NotImplemented に変換済み
+        // (replay_api.rs::parse_agent_session_rewind)。Phase 4c の multi-session 対応までは
+        // ここに到達するのは "default" のみ。
 
         if self.replay.is_loading() {
             reply_tx.send_status(409, r#"{"error":"session loading"}"#.to_string());
@@ -242,7 +285,7 @@ impl Flowsurface {
             ApiCommand::AgentSession(cmd) => {
                 use replay_api::AgentSessionCommand;
                 match cmd {
-                    AgentSessionCommand::Step { .. } | AgentSessionCommand::PlaceOrder { .. } => {
+                    AgentSessionCommand::Step | AgentSessionCommand::PlaceOrder { .. } => {
                         // Step / PlaceOrder は GUI で未実装。
                         // agent 駆動のバックテストは `--headless` ランタイムを使う前提。
                         // UI からの 1 bar 進行は `Message::Agent(AgentMessage::Step)` 経由
@@ -253,20 +296,14 @@ impl Flowsurface {
                                 .to_string(),
                         );
                     }
-                    AgentSessionCommand::Advance {
-                        session_id,
-                        request,
-                    } => {
+                    AgentSessionCommand::Advance { request } => {
                         // ADR-0001 §3: GUI / Headless 両方で受理（旧 400 ガードは撤廃）。
                         // GUI 実装は MVP — advance 本体のみ。stop_on / include_fills の
                         // 完全サポートは別サブフェーズで shared helper を抽出する際に追加。
-                        return self.handle_agent_advance(session_id, *request, reply_tx);
+                        return self.handle_agent_advance(*request, reply_tx);
                     }
-                    AgentSessionCommand::RewindToStart {
-                        session_id,
-                        init_range,
-                    } => {
-                        return self.handle_agent_rewind_request(session_id, init_range, reply_tx);
+                    AgentSessionCommand::RewindToStart { init_range } => {
+                        return self.handle_agent_rewind_request(init_range, reply_tx);
                     }
                 }
             }
@@ -297,20 +334,13 @@ impl Flowsurface {
     /// 将来 shared helper を抽出した時点で制約を解消する。
     pub(crate) fn handle_agent_advance(
         &mut self,
-        session_id: String,
         request: crate::api::advance_request::AgentAdvanceRequest,
         reply_tx: replay_api::ReplySender,
     ) -> Task<Message> {
         use crate::api::advance_request::{AdvanceResponse, AdvanceStoppedReason};
 
-        if session_id != "default" {
-            reply_tx.send_status(
-                501,
-                r#"{"error":"multi-session not yet implemented; use 'default' until Phase 4c"}"#
-                    .to_string(),
-            );
-            return Task::none();
-        }
+        // session_id != "default" は routing 段階で 501 NotImplemented に変換済み
+        // (replay_api.rs::parse_agent_session_advance)。
 
         if !request.stop_on.is_empty() || request.include_fills {
             reply_tx.send_status(
@@ -322,10 +352,11 @@ impl Flowsurface {
         }
 
         // session 状態チェック（headless と同じルール）。
-        // Loading は 503、Idle は 404、Active のみ進行する。
+        // Loading は 409、Idle は 404、Active のみ進行する。
         // `current_time_ms()` は Loading でも Some を返すため、is_loading を先に判定する。
+        // 409 は rewind-to-start / headless advance と一致させている（ADR-0001 §6）。
         if self.replay.is_loading() {
-            reply_tx.send_status(503, r#"{"error":"session loading"}"#.to_string());
+            reply_tx.send_status(409, r#"{"error":"session loading"}"#.to_string());
             return Task::none();
         }
         let (start_time, end_time) = match (
@@ -413,41 +444,10 @@ impl Flowsurface {
                 }
                 aggregate_fills += fills.len();
                 for fill in fills {
-                    let narrative_store = self.narrative_store.clone();
-                    let order_id = fill.order_id.clone();
-                    let fill_price = fill.fill_price;
-                    let fill_time_ms =
-                        crate::api::contract::EpochMs::new(fill.fill_time_ms).saturating_to_i64();
-                    let side_hint = match fill.side {
-                        crate::replay::virtual_exchange::PositionSide::Long => {
-                            Some(crate::narrative::model::NarrativeSide::Buy)
-                        }
-                        crate::replay::virtual_exchange::PositionSide::Short => {
-                            Some(crate::narrative::model::NarrativeSide::Sell)
-                        }
-                    };
-                    narrative_tasks.push(Task::perform(
-                        async move {
-                            if let Err(e) = crate::narrative::service::update_outcome_from_fill(
-                                &narrative_store,
-                                &order_id,
-                                fill_price,
-                                fill_time_ms,
-                                side_hint,
-                            )
-                            .await
-                            {
-                                log::warn!(
-                                    "advance: failed to update narrative outcome for {order_id}: {e}"
-                                );
-                            }
-                        },
-                        |()| Message::Noop,
-                    ));
-                    fill_msgs.push(Task::done(Message::Dashboard {
-                        layout_id: None,
-                        event: crate::screen::dashboard::Message::VirtualOrderFilled(fill),
-                    }));
+                    let (narrative_task, dashboard_task) =
+                        narrative_tasks_for_fill(self.narrative_store.clone(), fill, "advance");
+                    narrative_tasks.push(narrative_task);
+                    fill_msgs.push(dashboard_task);
                 }
             }
         }

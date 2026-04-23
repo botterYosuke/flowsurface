@@ -413,41 +413,13 @@ impl Flowsurface {
         }
 
         for fill in virtual_fills {
-            let narrative_store = self.narrative_store.clone();
-            let order_id = fill.order_id.clone();
-            let fill_price = fill.fill_price;
-            let fill_time_ms =
-                crate::api::contract::EpochMs::new(fill.fill_time_ms).saturating_to_i64();
-            let side_hint = match fill.side {
-                crate::replay::virtual_exchange::PositionSide::Long => {
-                    Some(crate::narrative::model::NarrativeSide::Buy)
-                }
-                crate::replay::virtual_exchange::PositionSide::Short => {
-                    Some(crate::narrative::model::NarrativeSide::Sell)
-                }
-            };
-
-            all_tasks.push(Task::perform(
-                async move {
-                    if let Err(e) = crate::narrative::service::update_outcome_from_fill(
-                        &narrative_store,
-                        &order_id,
-                        fill_price,
-                        fill_time_ms,
-                        side_hint,
-                    )
-                    .await
-                    {
-                        log::warn!("failed to update narrative outcome for order {order_id}: {e}");
-                    }
-                },
-                |()| Message::Noop,
-            ));
-
-            all_tasks.push(Task::done(Message::Dashboard {
-                layout_id: None,
-                event: crate::screen::dashboard::Message::VirtualOrderFilled(fill),
-            }));
+            let (narrative_task, dashboard_task) = crate::app::api::narrative_tasks_for_fill(
+                self.narrative_store.clone(),
+                fill,
+                "agent",
+            );
+            all_tasks.push(narrative_task);
+            all_tasks.push(dashboard_task);
         }
 
         Task::batch(all_tasks)

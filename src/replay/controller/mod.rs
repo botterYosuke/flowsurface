@@ -70,11 +70,6 @@ impl ReplayController {
         matches!(self.state.session, ReplaySession::Active { .. })
     }
 
-    /// 現在の仮想時刻がリプレイ終端に達しているかどうか
-    pub fn is_at_end(&self) -> bool {
-        matches!(&self.state.session, ReplaySession::Active { clock, .. } if clock.now_ms() >= clock.full_range().end)
-    }
-
     /// 現在の再生モード（永続化用）
     pub fn mode(&self) -> ReplayMode {
         self.state.mode

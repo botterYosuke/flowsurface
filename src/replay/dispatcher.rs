@@ -7,13 +7,16 @@ use super::clock::StepClock;
 use super::store::EventStore;
 
 /// `dispatch_tick` の戻り値。
+///
+/// `reached_end` は持たない — caller が終端判定を必要とする場合は
+/// `clock.reached_end()` を直接参照する（agent.rs の step/advance は `next_ms`
+/// を `end` で clamp 済みのため不要。headless の step ハンドラは
+/// `StepResponse` 生成時に clock を直接参照している）。
 pub struct DispatchResult {
     /// 現在の仮想時刻
     pub current_time: u64,
     pub trade_events: Vec<(StreamKind, Vec<Trade>)>,
     pub kline_events: Vec<(StreamKind, Vec<Kline>)>,
-    /// true なら replay 終端に到達。
-    pub reached_end: bool,
 }
 
 impl DispatchResult {
@@ -22,7 +25,6 @@ impl DispatchResult {
             current_time,
             trade_events: vec![],
             kline_events: vec![],
-            reached_end: false,
         }
     }
 }
@@ -63,7 +65,6 @@ pub fn dispatch_tick(
         current_time: clock.now_ms(),
         trade_events,
         kline_events,
-        reached_end: clock.reached_end(),
     }
 }
 
@@ -91,7 +92,6 @@ mod tests {
         let result = dispatch_tick(&mut clock, &store, &streams, 500);
         assert!(result.trade_events.is_empty());
         assert!(result.kline_events.is_empty());
-        assert!(!result.reached_end);
     }
 
     #[test]
@@ -132,7 +132,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_sets_reached_end_when_range_end_reached() {
+    fn dispatch_advances_clock_to_range_end() {
         let stream = trade_stream();
         let store = make_store_with_data(stream, 0..3_000);
         let mut clock = StepClock::new(0, 3_000, 1_000);
@@ -141,7 +141,8 @@ mod tests {
         streams.insert(stream);
 
         let result = dispatch_tick(&mut clock, &store, &streams, 5_000);
-        assert!(result.reached_end);
+        assert_eq!(result.current_time, 3_000);
         assert_eq!(clock.now_ms(), 3_000);
+        assert!(clock.reached_end());
     }
 }

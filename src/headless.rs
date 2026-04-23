@@ -107,6 +107,10 @@ pub fn parse_timeframe_str(s: &str) -> Result<Timeframe, String> {
 
 // 笏笏 HeadlessEngine 笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏
 
+// ADR-0001 §2 サブフェーズ S で headless 重複実装を整理する際、
+// LoadResult / HeadlessEngine 構造体フィールド・メソッドが段階的に未使用化する過程で
+// dead_code warning を一時的に抑制している。サブフェーズ S 完了時に `#[allow(dead_code)]`
+// と未使用フィールドを同時削除する予定。
 #[allow(dead_code)]
 enum LoadResult {
     Ok {
@@ -123,6 +127,7 @@ struct HeadlessPane {
     timeframe: Timeframe,
 }
 
+// 抑制理由は LoadResult 上のブロックコメントを参照（サブフェーズ S で削除予定）。
 #[allow(dead_code)]
 struct HeadlessEngine {
     state: ReplayState,
@@ -1345,29 +1350,24 @@ impl HeadlessEngine {
             ApiCommand::Narrative(cmd) => {
                 self.handle_narrative_command(cmd, reply).await;
             }
-            ApiCommand::AgentSession(crate::replay_api::AgentSessionCommand::Step {
-                session_id: _,
-            }) => {
+            ApiCommand::AgentSession(crate::replay_api::AgentSessionCommand::Step) => {
                 // session_id 縺ｯ route 螻､縺ｧ "default" 縺ｫ髯仙ｮ壽ｸ医∩・磯撼 default 縺ｯ 501 縺ｧ譌｢縺ｫ諡貞凄・峨・
                 let (status, body) = self.agent_session_step().await;
                 reply.send_status(status, body);
             }
             ApiCommand::AgentSession(crate::replay_api::AgentSessionCommand::PlaceOrder {
-                session_id: _,
                 request,
             }) => {
                 let (status, body) = self.agent_session_place_order(*request);
                 reply.send_status(status, body);
             }
             ApiCommand::AgentSession(crate::replay_api::AgentSessionCommand::Advance {
-                session_id: _,
                 request,
             }) => {
                 let (status, body) = self.agent_session_advance(*request).await;
                 reply.send_status(status, body);
             }
             ApiCommand::AgentSession(crate::replay_api::AgentSessionCommand::RewindToStart {
-                session_id: _,
                 init_range,
             }) => {
                 let (status, body) = self.agent_session_rewind(init_range).await;

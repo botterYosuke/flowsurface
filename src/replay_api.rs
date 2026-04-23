@@ -56,19 +56,17 @@ pub enum VirtualExchangeCommand {
 
 #[derive(Debug, Clone)]
 pub enum AgentSessionCommand {
-    Step {
-        session_id: String,
-    },
+    // Non-default session IDs are rejected at the routing boundary (501
+    // NotImplemented) until Phase 4c ships multi-session, so variants carry
+    // no `session_id` field.
+    Step,
     PlaceOrder {
-        session_id: String,
         request: Box<crate::api::order_request::AgentOrderRequest>,
     },
     Advance {
-        session_id: String,
         request: Box<crate::api::advance_request::AgentAdvanceRequest>,
     },
     RewindToStart {
-        session_id: String,
         init_range: Option<(String, String)>,
     },
 }
@@ -479,9 +477,8 @@ fn parse_agent_session_step(path: &str) -> Result<ApiCommand, RouteError> {
     if session_id != "default" {
         return Err(RouteError::NotImplemented);
     }
-    Ok(ApiCommand::AgentSession(AgentSessionCommand::Step {
-        session_id: session_id.to_string(),
-    }))
+    let _ = session_id;
+    Ok(ApiCommand::AgentSession(AgentSessionCommand::Step))
 }
 
 fn parse_agent_session_advance(path: &str, body: &str) -> Result<ApiCommand, RouteError> {
@@ -491,8 +488,8 @@ fn parse_agent_session_advance(path: &str, body: &str) -> Result<ApiCommand, Rou
     }
     let request = crate::api::advance_request::parse_agent_advance_request(body)
         .map_err(RouteError::BadRequestWithMessage)?;
+    let _ = session_id;
     Ok(ApiCommand::AgentSession(AgentSessionCommand::Advance {
-        session_id: session_id.to_string(),
         request: Box::new(request),
     }))
 }
@@ -513,12 +510,10 @@ fn parse_agent_session_rewind(path: &str, body: &str) -> Result<ApiCommand, Rout
     if session_id != "default" {
         return Err(RouteError::NotImplemented);
     }
+    let _ = session_id;
     let init_range = parse_init_range_body(body)?;
     Ok(ApiCommand::AgentSession(
-        AgentSessionCommand::RewindToStart {
-            session_id: session_id.to_string(),
-            init_range,
-        },
+        AgentSessionCommand::RewindToStart { init_range },
     ))
 }
 
@@ -529,8 +524,8 @@ fn parse_agent_session_order(path: &str, body: &str) -> Result<ApiCommand, Route
     }
     let request = crate::api::order_request::parse_agent_order_request(body)
         .map_err(RouteError::BadRequestWithMessage)?;
+    let _ = session_id;
     Ok(ApiCommand::AgentSession(AgentSessionCommand::PlaceOrder {
-        session_id: session_id.to_string(),
         request: Box::new(request),
     }))
 }
@@ -1253,9 +1248,7 @@ mod tests {
     fn route_agent_session_step_accepts_default() {
         let cmd = route("POST", "/api/agent/session/default/step", "").unwrap();
         match cmd {
-            ApiCommand::AgentSession(AgentSessionCommand::Step { session_id }) => {
-                assert_eq!(session_id, "default");
-            }
+            ApiCommand::AgentSession(AgentSessionCommand::Step) => {}
             other => panic!("Expected AgentSession::Step, got {other:?}"),
         }
     }
@@ -1325,11 +1318,7 @@ mod tests {
     fn route_agent_session_order_accepts_default_with_valid_body() {
         let cmd = route("POST", "/api/agent/session/default/order", VALID_ORDER_BODY).unwrap();
         match cmd {
-            ApiCommand::AgentSession(AgentSessionCommand::PlaceOrder {
-                session_id,
-                request,
-            }) => {
-                assert_eq!(session_id, "default");
+            ApiCommand::AgentSession(AgentSessionCommand::PlaceOrder { request }) => {
                 assert_eq!(request.client_order_id.as_str(), "cli_42");
                 assert_eq!(request.ticker.symbol, "BTC");
             }
@@ -1427,11 +1416,7 @@ mod tests {
         let body = r#"{"until_ms": 1704067200000}"#;
         let cmd = route("POST", "/api/agent/session/default/advance", body).unwrap();
         match cmd {
-            ApiCommand::AgentSession(AgentSessionCommand::Advance {
-                session_id,
-                request,
-            }) => {
-                assert_eq!(session_id, "default");
+            ApiCommand::AgentSession(AgentSessionCommand::Advance { request }) => {
                 assert_eq!(request.until_ms.as_u64(), 1_704_067_200_000);
             }
             other => panic!("expected Advance, got {other:?}"),
@@ -2389,11 +2374,7 @@ mod tests {
     fn route_post_agent_rewind_default_empty_body() {
         let cmd = route("POST", "/api/agent/session/default/rewind-to-start", "").unwrap();
         match cmd {
-            ApiCommand::AgentSession(AgentSessionCommand::RewindToStart {
-                session_id,
-                init_range,
-            }) => {
-                assert_eq!(session_id, "default");
+            ApiCommand::AgentSession(AgentSessionCommand::RewindToStart { init_range }) => {
                 assert!(init_range.is_none(), "empty body 竊・init_range None");
             }
             other => panic!("expected RewindToStart, got {other:?}"),
@@ -2407,7 +2388,6 @@ mod tests {
         match cmd {
             ApiCommand::AgentSession(AgentSessionCommand::RewindToStart {
                 init_range: Some((start, end)),
-                ..
             }) => {
                 assert_eq!(start, "2026-04-01 09:00");
                 assert_eq!(end, "2026-04-01 15:00");

@@ -42,7 +42,8 @@ impl StepClock {
         self.range.clone()
     }
 
-    /// `range.end` に到達済みか。
+    /// `range.end` に到達済みか（テスト補助）。
+    #[cfg(test)]
     pub fn reached_end(&self) -> bool {
         self.now_ms >= self.range.end
     }
