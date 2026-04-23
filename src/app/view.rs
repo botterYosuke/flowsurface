@@ -18,11 +18,7 @@ impl Flowsurface {
 
         let is_replay = self.replay.is_replay();
         let is_highlighted = true;
-        let mode_label = if is_replay {
-            "REPLAY"
-        } else {
-            "● LIVE"
-        };
+        let mode_label = if is_replay { "REPLAY" } else { "● LIVE" };
         let mode_toggle = button(text(mode_label).size(11))
             .on_press(Message::Replay(ReplayMessage::User(
                 ReplayUserMessage::ToggleMode,
@@ -46,17 +42,18 @@ impl Flowsurface {
                     Message::Replay(ReplayMessage::User(ReplayUserMessage::EndTimeChanged(s)))
                 });
 
-            let mut btn_rewind = button(text("⏮").size(11))
-                .padding(padding::all(2).left(6).right(6));
-            let mut btn_step = button(text("▶").size(11))
-                .padding(padding::all(2).left(6).right(6));
-            let mut btn_advance = button(text("⏭").size(11))
-                .padding(padding::all(2).left(6).right(6));
+            let mut btn_rewind =
+                button(text("⏮").size(11)).padding(padding::all(2).left(6).right(6));
+            let mut btn_step = button(text("▶").size(11)).padding(padding::all(2).left(6).right(6));
+            let mut btn_advance =
+                button(text("⏭").size(11)).padding(padding::all(2).left(6).right(6));
 
             if self.replay.is_active() {
-                btn_rewind = btn_rewind.on_press(Message::Agent(crate::replay::AgentMessage::RewindToStart));
+                btn_rewind =
+                    btn_rewind.on_press(Message::Agent(crate::replay::AgentMessage::RewindToStart));
                 btn_step = btn_step.on_press(Message::Agent(crate::replay::AgentMessage::Step));
-                btn_advance = btn_advance.on_press(Message::Agent(crate::replay::AgentMessage::Advance));
+                btn_advance =
+                    btn_advance.on_press(Message::Agent(crate::replay::AgentMessage::Advance));
             }
 
             header = header

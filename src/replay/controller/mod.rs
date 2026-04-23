@@ -8,8 +8,8 @@ use super::{
     ReplayMessage, ReplayMode, ReplayRangeInput, ReplaySession, ReplayState, ReplayStatus,
 };
 
-pub mod api;
 mod agent;
+pub mod api;
 mod session;
 mod tick;
 
@@ -56,8 +56,6 @@ impl ReplayController {
         self.state.is_replay()
     }
 
-
-
     /// ロード中かどうか
     pub fn is_loading(&self) -> bool {
         self.state.is_loading()
@@ -83,8 +81,6 @@ impl ReplayController {
         self.state.mode
     }
 
-
-
     /// 範囲入力の開始テキスト
     pub fn range_input_start(&self) -> &str {
         &self.state.range_input.start
@@ -104,13 +100,6 @@ impl ReplayController {
     pub fn set_range_end(&mut self, s: String) {
         self.state.range_input.end = s;
     }
-
-    /// range_input を更新してから `ReplayMessage::Play` を処理する。
-    ///
-    /// ADR-0001 §3: `ReplayCommand::Play` variant は削除されたため直接の caller はないが、
-    /// 後続サブフェーズで `POST /api/replay/toggle`（Live→Replay + body `{start, end}`）
-    /// と `POST /api/agent/session/:id/rewind-to-start` の session 初期化経路に再利用する。
-
 
     /// 現在の状態を API レスポンス用に変換
     pub fn to_status(&self) -> ReplayStatus {
@@ -278,8 +267,6 @@ mod tests {
     }
 
     // ── P3: ReplaySession State Machine ──────────────────────────────────────
-
-
 
     #[test]
     fn session_transitions_to_idle_on_data_load_failed() {

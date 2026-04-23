@@ -332,7 +332,6 @@ impl Flowsurface {
 
     pub(crate) fn handle_agent(&mut self, msg: crate::replay::AgentMessage) -> Task<Message> {
         let main_window_id = self.main_window.id;
-        
         let layout_id = match self.layout_manager.active_layout_id() {
             Some(l) => l.unique,
             None => return Task::none(),
@@ -344,48 +343,104 @@ impl Flowsurface {
         };
 
         let mut virtual_fills = Vec::new();
-        let mut ui_task = Task::none();
+        let mut all_tasks = Vec::new();
+        let mut needs_marker_refresh = false;
 
         match msg {
             crate::replay::AgentMessage::Step => {
-                let (current_time, trade_events) = self.replay.agent_step(dashboard, main_window_id);
-                if let Some(ve) = &mut self.virtual_engine {
-                    for (stream, trades) in trade_events {
-                        let ticker_str = stream.ticker().to_string();
-                        let fills = ve.on_tick(&ticker_str, &trades, current_time);
-                        virtual_fills.extend(fills);
+                if let Some((current_time, trade_events)) =
+                    self.replay.agent_step(dashboard, main_window_id)
+                {
+                    if let Some(ve) = &mut self.virtual_engine {
+                        for (stream, trades) in trade_events {
+                            let ticker_str = stream.ticker_info().ticker.to_string();
+                            let fills = ve.on_tick(&ticker_str, &trades, current_time);
+                            if !fills.is_empty() {
+                                needs_marker_refresh = true;
+                            }
+                            virtual_fills.extend(fills);
+                        }
                     }
+                } else {
+                    log::warn!("agent_step called but session is not Active.");
                 }
             }
             crate::replay::AgentMessage::Advance => {
-                const UI_ADVANCE_CAP_MS: u64 = 3_600_000;
-                let (current_time, trade_events) = self.replay.agent_advance(dashboard, main_window_id, UI_ADVANCE_CAP_MS);
-                if let Some(ve) = &mut self.virtual_engine {
-                    for (stream, trades) in trade_events {
-                        let ticker_str = stream.ticker().to_string();
-                        let fills = ve.on_tick(&ticker_str, &trades, current_time);
-                        virtual_fills.extend(fills);
+                if let Some((current_time, trade_events)) = self.replay.agent_advance(
+                    dashboard,
+                    main_window_id,
+                    crate::replay::controller::ReplayController::UI_ADVANCE_CAP_MS,
+                ) {
+                    if let Some(ve) = &mut self.virtual_engine {
+                        for (stream, trades) in trade_events {
+                            let ticker_str = stream.ticker_info().ticker.to_string();
+                            let fills = ve.on_tick(&ticker_str, &trades, current_time);
+                            if !fills.is_empty() {
+                                needs_marker_refresh = true;
+                            }
+                            virtual_fills.extend(fills);
+                        }
                     }
+                } else {
+                    log::warn!("agent_advance called but session is not Active.");
                 }
             }
             crate::replay::AgentMessage::RewindToStart => {
                 self.replay.agent_rewind(dashboard, main_window_id);
-                // AgentSessionLifecycle::Reset に相当する処理
+                // ADR-0001 §4 Reset 不変条件の部分実装:
+                // ここでは `VirtualExchange` のローカル reset（open orders キャンセル・
+                // fills 履歴破棄・仮想残高リセット）のみを呼ぶ。
+                // 未実装: SessionLifecycleEvent::Reset 発火、client_order_id UNIQUE map
+                // クリア、NarrativeState::Reset、UI チャートの「新 session 扱い」再描画。
+                // 未実装項目は専用サブフェーズで対応予定（計画書参照）。
                 if let Some(ve) = &mut self.virtual_engine {
                     ve.reset();
                 }
-                // NOTE: ADR-0001 §4 (Reset 不変条件) の完全な実装（client_order_id map のクリアや
-                // NarrativeState Reset 発火等）はサブフェーズ Q に委譲する。
             }
         }
 
-        let fills_tasks = virtual_fills.into_iter().map(|fill| {
-            Task::done(Message::Dashboard {
+        if needs_marker_refresh {
+            all_tasks.push(self.refresh_narrative_markers_task());
+        }
+
+        for fill in virtual_fills {
+            let narrative_store = self.narrative_store.clone();
+            let order_id = fill.order_id.clone();
+            let fill_price = fill.fill_price;
+            let fill_time_ms =
+                crate::api::contract::EpochMs::new(fill.fill_time_ms).saturating_to_i64();
+            let side_hint = match fill.side {
+                crate::replay::virtual_exchange::PositionSide::Long => {
+                    Some(crate::narrative::model::NarrativeSide::Buy)
+                }
+                crate::replay::virtual_exchange::PositionSide::Short => {
+                    Some(crate::narrative::model::NarrativeSide::Sell)
+                }
+            };
+
+            all_tasks.push(Task::perform(
+                async move {
+                    if let Err(e) = crate::narrative::service::update_outcome_from_fill(
+                        &narrative_store,
+                        &order_id,
+                        fill_price,
+                        fill_time_ms,
+                        side_hint,
+                    )
+                    .await
+                    {
+                        log::warn!("failed to update narrative outcome for order {order_id}: {e}");
+                    }
+                },
+                |()| Message::Noop,
+            ));
+
+            all_tasks.push(Task::done(Message::Dashboard {
                 layout_id: None,
                 event: crate::screen::dashboard::Message::VirtualOrderFilled(fill),
-            })
-        });
+            }));
+        }
 
-        Task::batch([ui_task, Task::batch(fills_tasks)])
+        Task::batch(all_tasks)
     }
 }

@@ -189,7 +189,6 @@ impl HeadlessEngine {
         }
     }
 
-
     /// `POST /api/replay/play {"start":"...","end":"..."}` を処理する。
     fn play(&mut self, start: &str, end: &str) -> Result<String, String> {
         use crate::replay::parse_replay_range;
@@ -300,10 +299,6 @@ impl HeadlessEngine {
             }
         }
     }
-
-
-
-
 
     fn get_status_json(&self) -> String {
         serde_json::to_string(&self.state.to_status())
@@ -432,7 +427,6 @@ impl HeadlessEngine {
             }
             ReplaySession::Active { .. } => {}
         }
-
 
         let stop_on_fill = request.stop_on.contains(&AdvanceStopCondition::Fill);
         let stop_on_narrative = request.stop_on.contains(&AdvanceStopCondition::Narrative);
@@ -741,7 +735,6 @@ impl HeadlessEngine {
             .observe_generation(self.virtual_engine.session_generation());
 
         // Playing 中なら自動 pause（step-forward 仕様と対称）。
-
 
         // 1 バー進める。範囲終端なら reached_end = true で現在時刻を据え置き。
         let pane_step = self.min_step_ms();
@@ -1641,8 +1634,6 @@ mod tests {
         };
         engine
     }
-
-
 
     #[test]
     fn get_state_returns_error_when_not_active() {

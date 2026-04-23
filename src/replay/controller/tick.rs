@@ -63,8 +63,6 @@ impl ReplayController {
                         return (Task::none(), None);
                     };
 
-
-
                     if let Some(old) = old_stream {
                         active_streams.remove(&old);
                     }

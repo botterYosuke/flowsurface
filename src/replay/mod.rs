@@ -288,8 +288,6 @@ impl ReplayState {
 
 // ── ユーティリティ ────────────────────────────────────────────────────────────
 
-
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParseRangeError {
     InvalidStartFormat,
@@ -419,7 +417,6 @@ mod tests {
     }
 
     // ── ReplaySession 状態表現 ─────────────────────────────────────────
-
 
     #[test]
     fn is_loading_returns_true_when_session_is_loading() {

@@ -4,8 +4,7 @@ use crate::screen::dashboard::Dashboard;
 use crate::widget::toast::Toast;
 
 use super::super::{
-    ReplayLoadEvent, ReplayMessage, ReplaySession, ReplayUserMessage,
-    store::LoadedData,
+    ReplayLoadEvent, ReplayMessage, ReplaySession, ReplayUserMessage, store::LoadedData,
 };
 use super::ReplayController;
 
@@ -40,7 +39,6 @@ impl ReplayController {
                 self.state.range_input.end = s;
                 (Task::none(), None)
             }
-
         }
     }
 
@@ -97,8 +95,6 @@ impl ReplayController {
                             active_streams,
                         };
                     }
-
-
                 }
 
                 // Start 時刻より前のバーのみを注入する（pre_start_history バー）。
@@ -125,8 +121,6 @@ impl ReplayController {
             }
         }
     }
-
-
 
     /// session を Idle にリセットする。
     /// `DataLoadFailed` 時に呼ぶことで次回 Play 時に残留状態が混入しないようにする。

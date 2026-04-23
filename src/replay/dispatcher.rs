@@ -145,4 +145,3 @@ mod tests {
         assert_eq!(clock.now_ms(), 3_000);
     }
 }
-
