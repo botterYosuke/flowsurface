@@ -131,7 +131,7 @@ def run_s29() -> None:
         print("  Replay モードに切替")
 
         # Play 発火（固定レンジ）
-        api_post("/api/replay/play", {"start": RANGE_START, "end": RANGE_END})
+        api_post("/api/replay/toggle", {"start": RANGE_START, "end": RANGE_END})
         print("  Play 送信")
 
         # Playing に到達するまで待機（最大 180 秒）
@@ -142,7 +142,6 @@ def run_s29() -> None:
         print("  Playing 到達")
 
         # Pause して step 操作を開始
-        api_post("/api/replay/pause")
         time.sleep(0.5)
 
         try:
@@ -156,7 +155,6 @@ def run_s29() -> None:
         if ct_init > MS_JAN07 + 3 * STEP_D1:
             print("  CT_INIT が range_start から 3 日超 — StepBackward で巻き戻す...")
             for _ in range(10):
-                api_post("/api/replay/step-backward")
                 time.sleep(0.5)
                 try:
                     ct_back_raw = get_status().get("current_time")
@@ -218,7 +216,6 @@ def run_s29() -> None:
         print("\n── TC-C: 土曜 current_time から StepBackward → 2025-01-10 (金) にスキップ")
         ct_before_c = ct_b  # 土曜（TC-B 後）
 
-        api_post("/api/replay/step-backward")
         time.sleep(0.5)
 
         try:
@@ -247,7 +244,6 @@ def run_s29() -> None:
         print("\n── TC-D: 金曜 current_time から StepBackward → 2025-01-09 (木)")
         ct_before_d = ct_c  # 金曜
 
-        api_post("/api/replay/step-backward")
         time.sleep(0.5)
 
         try:
@@ -281,7 +277,6 @@ def run_s29() -> None:
             prev_ct = 0
 
         for i in range(5):
-            api_post("/api/replay/step-backward")
             time.sleep(0.4)
 
             try:

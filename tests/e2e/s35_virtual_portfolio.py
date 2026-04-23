@@ -74,7 +74,6 @@ def run_s35() -> None:
     print("  REPLAY Playing 到達")
 
     # Paused にして状態を安定させてから検証する
-    api_post("/api/replay/pause")
     wait_status("Paused", 10)
 
     # ──────────────────────────────────────────────────────────────────────

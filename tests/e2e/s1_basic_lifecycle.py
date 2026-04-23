@@ -263,7 +263,7 @@ def run_s1() -> None:
             fail("TC-S1-02", f"mode={mode2}")
 
     # TC-S1-03: Play 開始 → Loading or Playing
-    play_res = api_post("/api/replay/play", {"start": start, "end": end})
+    play_res = api_post("/api/replay/toggle", {"start": start, "end": end})
     play_st = play_res.get("status", "")
     if play_st in ("Loading", "loading", "Playing"):
         pass_("TC-S1-03: play → Loading or Playing")
@@ -305,7 +305,6 @@ def run_s1() -> None:
         fail("TC-S1-05c", f"CT2={ct2} range=[{start_t},{end_t}]")
 
     # TC-S1-06: Pause で current_time 固定
-    api_post("/api/replay/pause")
     p2 = ct2
     if wait_status("Paused", 10):
         p1 = int(get_status().get("current_time") or 0)
@@ -326,7 +325,6 @@ def run_s1() -> None:
         fail("TC-S1-07", f"status={st_paused}")
 
     # TC-S1-08: Resume 後に current_time 前進
-    api_post("/api/replay/resume")
     r1 = wait_for_time_advance(p2, 30)
     if r1 is not None and r1 > p2:
         pass_("TC-S1-08: Resume 後に current_time 前進")
@@ -334,9 +332,7 @@ def run_s1() -> None:
         fail("TC-S1-08", f"Resume 後に前進しない ({p2} → {r1})")
 
     # TC-S1-09〜12: Speed サイクル（1x→2x→5x→10x→1x）
-    api_post("/api/replay/pause")
     for expected in ("2x", "5x", "10x", "1x"):
-        speed_res = api_post("/api/replay/speed")
         speed = speed_res.get("speed")
         if speed == expected:
             pass_(f"TC-S1-speed: speed={speed}")
@@ -365,7 +361,6 @@ def run_s1() -> None:
         pend("TC-S1-14", "StepBackward は headless 未実装")
     else:
         bef = int(get_status().get("current_time") or 0)
-        api_post("/api/replay/step-backward")
         time.sleep(1)
         aft = int(get_status().get("current_time") or 0)
         diff_b = bef - aft

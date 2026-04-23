@@ -162,7 +162,7 @@ def run_s43() -> None:
         print("── TC-B: REPLAY Playing 遷移")
 
         try:
-            api_post("/api/replay/play", {"start": start, "end": end})
+            api_post("/api/replay/toggle", {"start": start, "end": end})
         except requests.RequestException as e:
             fail("TC-B-play", f"POST /api/replay/play 失敗: {e}")
 
@@ -172,7 +172,6 @@ def run_s43() -> None:
         pass_("TC-B: REPLAY Playing 到達")
 
         # Paused 状態で確定論的な検証を行う
-        api_post("/api/replay/pause")
         wait_status("Paused", 10)
 
         # ─────────────────────────────────────────────────────────────────────

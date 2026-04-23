@@ -99,7 +99,7 @@ def run_s8() -> None:
             fail("TC-S8-01", f"code={code}")
 
         # TC-S8-02: 不正 JSON → 400 + error フィールド
-        code2, body2 = _post_raw("/api/replay/play", b"not json")
+        code2, body2 = _post_raw("/api/replay/toggle", b"not json")
         if code2 == 400:
             pass_("TC-S8-02a: 不正 JSON → 400")
         else:
@@ -111,7 +111,7 @@ def run_s8() -> None:
 
         # TC-S8-03: 必須フィールド (end) 欠損 → 400 + error フィールド
         code3, body3 = _post_raw(
-            "/api/replay/play",
+            "/api/replay/toggle",
             b'{"start":"2026-04-10 09:00"}',
         )
         if code3 == 400:
@@ -138,7 +138,7 @@ def run_s8() -> None:
 
         # TC-S8-05: start > end
         code5 = api_post_code(
-            "/api/replay/play",
+            "/api/replay/toggle",
             {"start": "2026-04-13 10:00", "end": "2026-04-13 09:00"},
         )
         if IS_HEADLESS:
@@ -178,7 +178,7 @@ def run_s8() -> None:
         )
 
         code6 = api_post_code(
-            "/api/replay/play",
+            "/api/replay/toggle",
             {"start": future_start, "end": future_end},
         )
         if code6 == 200:
@@ -210,7 +210,7 @@ def run_s8() -> None:
         bad_dates = ["2026/04/10 09:00", "2026-04-10", "not-a-date", ""]
         for bad_date in bad_dates:
             payload = json.dumps({"start": bad_date, "end": "2026-04-10 15:00"}).encode()
-            c7, b7 = _post_raw("/api/replay/play", payload)
+            c7, b7 = _post_raw("/api/replay/toggle", payload)
             if c7 == 400:
                 pass_(f"TC-S8-07a: 不正フォーマット '{bad_date}' → 400")
             else:
@@ -224,7 +224,7 @@ def run_s8() -> None:
         invalid_dates = ["2026-02-30 10:00", "2026-04-10 25:00", "2026-13-01 09:00"]
         for inv_date in invalid_dates:
             payload = json.dumps({"start": inv_date, "end": "2026-04-10 15:00"}).encode()
-            c7c, b7c = _post_raw("/api/replay/play", payload)
+            c7c, b7c = _post_raw("/api/replay/toggle", payload)
             if c7c == 400:
                 pass_(f"TC-S8-07c: 不正日付 '{inv_date}' → 400")
             else:
@@ -236,7 +236,7 @@ def run_s8() -> None:
 
         # うるう年 2/29 は有効 → 200
         code_leap = api_post_code(
-            "/api/replay/play",
+            "/api/replay/toggle",
             {"start": "2024-02-29 10:00", "end": "2024-02-29 12:00"},
         )
         if code_leap == 200:

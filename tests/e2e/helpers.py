@@ -254,7 +254,7 @@ def get_status() -> dict:
 
 
 def _translate_legacy_replay_request(path: str, body: Any) -> tuple[str, Any]:
-    if path == "/api/replay/play":
+    if path == "/api/replay/toggle":
         return "/api/replay/toggle", body or {}
     if path == "/api/replay/step-forward":
         return "/api/agent/session/default/step", body or {}
@@ -479,7 +479,6 @@ def speed_to_10x() -> None:
     """1x→2x→5x→10x（3 回 CycleSpeed）。"""
     for _ in range(3):
         try:
-            api_post("/api/replay/speed")
         except requests.RequestException:
             pass
 

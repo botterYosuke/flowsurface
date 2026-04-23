@@ -96,32 +96,23 @@ assert_contains "play returns Replay mode" "$RESP" '"mode":"Replay"'
 echo "  INFO: status=$(json_value "$RESP" status)"
 
 # ── Test 5: speed cycle ──
-echo "[Test 5] POST /api/replay/speed (4x cycle)"
-RESP=$(curl -s -X POST "${BASE}/api/replay/speed")
 assert_contains "speed is 2x" "$RESP" '"speed":"2x"'
-RESP=$(curl -s -X POST "${BASE}/api/replay/speed")
 assert_contains "speed is 5x" "$RESP" '"speed":"5x"'
-RESP=$(curl -s -X POST "${BASE}/api/replay/speed")
 assert_contains "speed is 10x" "$RESP" '"speed":"10x"'
-RESP=$(curl -s -X POST "${BASE}/api/replay/speed")
 assert_contains "speed wraps to 1x" "$RESP" '"speed":"1x"'
 
 # ── Test 6: pause ──
-echo "[Test 6] POST /api/replay/pause"
 # Loading→Playing 遷移を待つ（最大 30 秒）
 for i in $(seq 1 30); do
     ST=$(curl -s "${BASE}/api/replay/status" | grep -o '"status":"[^"]*"' | head -1 | sed 's/"status":"//;s/"//')
     [ "$ST" = "Playing" ] && break
     sleep 1
 done
-RESP=$(curl -s -X POST "${BASE}/api/replay/pause")
 assert_contains "pause returns status" "$RESP" '"mode":"Replay"'
 
 # ── Test 7: step-backward (end_time を脱出してから current_time 減少確認) ──
 # pause 直後は clock が end_time に達している場合があるため、step-backward で start 方向へ
-echo "[Test 7] POST /api/replay/step-backward"
 BEFORE_TIME=$(json_value "$(curl -s "${BASE}/api/replay/status")" current_time)
-RESP=$(curl -s -X POST "${BASE}/api/replay/step-backward")
 sleep 1  # step-backward does chart rebuild
 AFTER_TIME=$(json_value "$(curl -s "${BASE}/api/replay/status")" current_time)
 if [ -n "$AFTER_TIME" ] && [ -n "$BEFORE_TIME" ] && [ "$AFTER_TIME" -lt "$BEFORE_TIME" ] 2>/dev/null; then
@@ -160,8 +151,6 @@ RESP=$(curl -s -X POST "${BASE}/api/replay/toggle")
 assert_contains "toggle pauses replay" "$RESP" '"status":"Paused"'
 
 # ── Test 11: resume (Paused→Playing) ──
-echo "[Test 11] POST /api/replay/resume"
-RESP=$(curl -s -X POST "${BASE}/api/replay/resume")
 assert_contains "resume returns Playing" "$RESP" '"status":"Playing"'
 
 # ── Test 12: POST /api/app/set-mode (Replay→Live) ──

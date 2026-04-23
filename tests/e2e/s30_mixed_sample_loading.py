@@ -169,7 +169,7 @@ def run_s30(start: str, end: str) -> None:
         except requests.RequestException:
             pass
     try:
-        api_post("/api/replay/play", {"start": start, "end": end})
+        api_post("/api/replay/toggle", {"start": start, "end": end})
     except requests.RequestException:
         pass
 

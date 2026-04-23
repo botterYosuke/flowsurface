@@ -97,7 +97,7 @@ def run_s34(start: str, end: str) -> None:
     print("── TC-D: REPLAY Playing に遷移")
 
     api_post("/api/replay/toggle")
-    api_post("/api/replay/play", {"start": start, "end": end})
+    api_post("/api/replay/toggle", {"start": start, "end": end})
 
     if not wait_status("Playing", 60):
         fail("TC-D", "REPLAY Playing に到達せず（60s タイムアウト）")
@@ -106,7 +106,6 @@ def run_s34(start: str, end: str) -> None:
     pass_("TC-D: REPLAY Playing 到達")
 
     # 以降の注文テストは Paused 状態で行う（約定を防いで結果を決定論的にする）
-    api_post("/api/replay/pause")
     wait_status("Paused", 10)
 
     # ── TC-E〜G: 成行買い注文 ────────────────────────────────────────────────

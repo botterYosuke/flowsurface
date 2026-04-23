@@ -93,7 +93,7 @@ def _tachibana_start(start: str, end: str) -> FlowsurfaceEnv:
             print("  WARN: streams_ready timeout (continuing)")
 
     api_post("/api/replay/toggle")
-    api_post("/api/replay/play", {"start": start, "end": end})
+    api_post("/api/replay/toggle", {"start": start, "end": end})
     return env
 
 
@@ -185,7 +185,7 @@ def run_s21() -> None:
             fail("TC-S21-04-pre", "Tachibana セッション確立せず（120 秒タイムアウト）")
         else:
             api_post("/api/replay/toggle")
-            api_post("/api/replay/play", {"start": same_time, "end": same_time})
+            api_post("/api/replay/toggle", {"start": same_time, "end": same_time})
             time.sleep(5)
 
             alive = api_get_code("/api/replay/status") == 200
@@ -214,7 +214,7 @@ def run_s21() -> None:
             fail("TC-S21-05-pre", "Tachibana セッション確立せず（120 秒タイムアウト）")
         else:
             api_post("/api/replay/toggle")
-            api_post("/api/replay/play", {"start": future_start, "end": future_end})
+            api_post("/api/replay/toggle", {"start": future_start, "end": future_end})
             time.sleep(10)
 
             alive = api_get_code("/api/replay/status") == 200
@@ -244,7 +244,6 @@ def run_s21() -> None:
                 fail("TC-S21-06-pre", "Playing 到達せず")
             else:
                 try:
-                    api_post("/api/replay/pause")
                 except requests.RequestException:
                     pass
 

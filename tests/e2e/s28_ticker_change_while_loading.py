@@ -184,7 +184,6 @@ def run_s28() -> None:
             print("  WARN: PANE0 streams_ready timeout (continuing)")
 
         try:
-            api_post("/api/replay/resume")
         except requests.RequestException:
             pass
 

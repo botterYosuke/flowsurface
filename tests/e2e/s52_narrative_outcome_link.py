@@ -94,7 +94,7 @@ def run_s52() -> None:
     start = utc_offset(-3)
     end = utc_offset(-1)
     try:
-        api_post("/api/replay/play", {"start": start, "end": end})
+        api_post("/api/replay/toggle", {"start": start, "end": end})
     except requests.HTTPError as e:
         fail("TC-S52-00", f"play failed: {e}")
         return
@@ -106,7 +106,6 @@ def run_s52() -> None:
             return
 
     # 一時停止
-    api_post("/api/replay/pause")
     wait_status("Paused", 10)
 
     # TC-S52-01: 仮想注文を発注

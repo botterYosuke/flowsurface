@@ -154,7 +154,6 @@ def run_s24() -> None:
     print()
     print("── TC-C: sidebar/select-ticker 後 Resume → Playing")
     try:
-        api_post("/api/replay/resume")
     except Exception:
         pass
     if wait_status("Playing", 30):

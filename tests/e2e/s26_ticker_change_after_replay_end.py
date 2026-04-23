@@ -160,7 +160,6 @@ def run_s26() -> None:
         print("── TC-C: Paused → Resume → Playing")
 
         try:
-            api_post("/api/replay/resume")
         except requests.RequestException:
             pass
 

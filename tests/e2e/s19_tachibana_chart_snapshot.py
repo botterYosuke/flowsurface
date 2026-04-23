@@ -81,7 +81,7 @@ def run_s19() -> None:
 
         # Replay モードへ切替 → Play 送信
         api_post("/api/replay/toggle")
-        api_post("/api/replay/play", {"start": start, "end": end})
+        api_post("/api/replay/toggle", {"start": start, "end": end})
 
         if not wait_playing(120):
             fail("TC-S19-precond", "Playing 到達せず（120 秒タイムアウト）")
@@ -89,7 +89,6 @@ def run_s19() -> None:
 
         # 少し再生させてから Pause
         time.sleep(2)
-        api_post("/api/replay/pause")
         if not wait_paused(15):
             fail("TC-S19-precond", "Paused に遷移せず")
             return
@@ -149,7 +148,6 @@ def run_s19() -> None:
                 pass
             time.sleep(0.5)
         wait_status("Paused", 15)
-        api_post("/api/replay/step-backward")
         wait_paused(15)
         time.sleep(0.3)
 

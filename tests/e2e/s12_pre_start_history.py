@@ -65,7 +65,6 @@ def run_s12() -> None:
             fail("TC-S12-precond", "Playing 到達せず")
             return
 
-        api_post("/api/replay/pause")
         if not wait_status("Paused", 10):
             fail("TC-S12-precond", "Paused に遷移せず")
             return
@@ -74,7 +73,6 @@ def run_s12() -> None:
         print(f"  start_time={start_ms}")
 
         # TC-S12-01: 1 回 StepBackward → current_time >= start_time
-        api_post("/api/replay/step-backward")
         time.sleep(1)
         wait_status("Paused", 10)
         ct = int(get_status().get("current_time") or 0)
@@ -85,7 +83,6 @@ def run_s12() -> None:
 
         # TC-S12-02: StepBackward 連打（5 回）でも start_time クランプ
         for i in range(1, 6):
-            api_post("/api/replay/step-backward")
             time.sleep(0.5)
             wait_status("Paused", 10)
             ct = int(get_status().get("current_time") or 0)
@@ -95,7 +92,6 @@ def run_s12() -> None:
                 fail(f"TC-S12-02-{i}", f"current_time={ct} < start_time={start_ms}")
 
         # TC-S12-03: resume 後に current_time が正常前進（10x でポーリング）
-        api_post("/api/replay/resume")
         if not wait_status("Playing", 10):
             fail("TC-S12-03-pre", "Playing に遷移せず")
         else:

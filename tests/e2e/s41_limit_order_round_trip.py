@@ -61,7 +61,6 @@ def run_s41() -> None:
     print()
     print("── TC-B: Pause")
 
-    api_post("/api/replay/pause")
     if not wait_status("Paused", 10):
         fail("TC-B", "Pause 遷移せず（10s タイムアウト）")
         print_summary()

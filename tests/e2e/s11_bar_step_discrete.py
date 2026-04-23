@@ -98,7 +98,6 @@ def run_s11() -> None:
                 fail("TC-S11-01", "15 秒待機しても current_time が変化しなかった")
 
             # ── TC-S11-02: M1 Pause → StepForward × 3、各 delta = 60000ms ─────
-            api_post("/api/replay/pause")
             if not wait_status("Paused", 10):
                 fail("TC-S11-02-pre", "Paused に遷移せず")
             else:
@@ -122,7 +121,6 @@ def run_s11() -> None:
         if not wait_playing(60):   # was 30 — CI で不安定なため延長
             fail("TC-S11-03-pre", "Playing 到達せず")
         else:
-            api_post("/api/replay/pause")
             wait_status("Paused", 10)
             delta = _step_forward_delta()
             if delta == STEP_M5:
@@ -143,7 +141,6 @@ def run_s11() -> None:
         if not wait_playing(60):
             fail("TC-S11-04-pre", "Playing 到達せず")
         else:
-            api_post("/api/replay/pause")
             wait_status("Paused", 10)
             delta = _step_forward_delta()
             if delta == STEP_H1:
@@ -164,7 +161,6 @@ def run_s11() -> None:
             if not wait_playing(60):   # was 30 — CI で不安定なため延長
                 fail("TC-S11-05-pre", "Playing 到達せず")
             else:
-                api_post("/api/replay/pause")
                 wait_status("Paused", 10)
 
                 pane0 = get_pane_id(0)
@@ -246,7 +242,6 @@ def run_s11() -> None:
             if not wait_playing(60):   # was 30 — CI で不安定なため延長
                 fail("TC-S11-05-pre", "Playing 到達せず")
             else:
-                api_post("/api/replay/pause")
                 wait_status("Paused", 10)
                 delta = _step_forward_delta()
                 if delta == STEP_M1:
@@ -267,7 +262,6 @@ def run_s11() -> None:
         if not wait_playing(60):   # was 30 — CI で不安定なため延長
             fail("TC-S11-06-pre", "Playing 到達せず")
         else:
-            api_post("/api/replay/pause")
             if not wait_status("Paused", 10):
                 fail("TC-S11-06-pre", "Paused に遷移せず")
             else:

@@ -221,7 +221,6 @@ def run_s17() -> None:
             fail("TC-S17-06-pre", "Playing 到達せず（60s タイムアウト）")
         else:
             try:
-                api_post("/api/replay/pause")
             except requests.RequestException:
                 pass
 

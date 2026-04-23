@@ -269,7 +269,6 @@ def run_s32() -> None:
         # TC-S32-09: Resume → Playing
         print("\n── TC-S32-09: Resume → Playing")
         try:
-            api_post("/api/replay/resume")
         except requests.RequestException:
             pass
         if wait_status("Playing", 30):

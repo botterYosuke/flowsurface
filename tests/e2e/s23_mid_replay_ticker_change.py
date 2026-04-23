@@ -184,7 +184,6 @@ def run_s23() -> None:
         # ──────────────────────────────────────────────────────────────────────
         print()
         print("── TC-D: Paused → Resume → Playing")
-        api_post("/api/replay/resume")
         if wait_status("Playing", 30):
             pass_("TC-D: Resume → Playing 到達")
         else:
@@ -226,7 +225,6 @@ def run_s23() -> None:
         print("── TC-G: 連続銘柄変更後 Resume → Playing")
 
         # まず Playing に戻す
-        api_post("/api/replay/resume")
         if not wait_status("Playing", 30):
             fail(
                 "TC-G-pre",
@@ -244,7 +242,6 @@ def run_s23() -> None:
         print(f"  G: 連続変更後 status={st_g_after}")
 
         # Resume → Playing
-        api_post("/api/replay/resume")
         if wait_status("Playing", 30):
             pass_("TC-G: 連続銘柄変更後 Resume → Playing 到達")
         else:

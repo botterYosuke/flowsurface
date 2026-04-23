@@ -59,14 +59,12 @@ def run_s16() -> None:
         else:
             for _ in range(20):
                 try:
-                    api_post("/api/replay/speed")
                 except requests.RequestException:
                     pass
 
             # CycleSpeed は Paused + range.start リセットを伴うため、連打後は Paused になる。
             # Resume して Playing に戻してから状態を確認する。
             try:
-                api_post("/api/replay/resume")
             except requests.RequestException:
                 pass
             wait_status("Playing", 10)
@@ -107,14 +105,12 @@ def run_s16() -> None:
             pend("TC-S16-02", "日付境界 range でデータなし / Playing 到達せず")
         else:
             try:
-                api_post("/api/replay/pause")
             except requests.RequestException:
                 pass
             wait_status("Paused", 10)
 
             speed_to_10x()
             try:
-                api_post("/api/replay/resume")
             except requests.RequestException:
                 pass
             wait_status("Playing", 10)
@@ -132,7 +128,6 @@ def run_s16() -> None:
                 time.sleep(0.5)
 
             try:
-                api_post("/api/replay/pause")
             except requests.RequestException:
                 pass
             wait_status("Paused", 10)
@@ -151,7 +146,6 @@ def run_s16() -> None:
                         fail("TC-S16-02a", f"delta={delta} (expected 60000)")
 
                     # StepBackward → crash なし
-                    api_post("/api/replay/step-backward")
                     wait_status("Paused", 10)
                     status = get_status().get("status")
                     if status == "Paused":
@@ -251,7 +245,6 @@ def run_s16() -> None:
                 fail("TC-S16-05-pre", "Playing 到達せず")
             else:
                 try:
-                    api_post("/api/replay/pause")
                 except requests.RequestException:
                     pass
 

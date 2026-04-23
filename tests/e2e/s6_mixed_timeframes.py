@@ -211,7 +211,7 @@ def run_s6_3pane(start: str, end: str) -> bool:
 
     # TC-S6-01: Play → Playing
     try:
-        api_post("/api/replay/play", {"start": start, "end": end})
+        api_post("/api/replay/toggle", {"start": start, "end": end})
     except requests.RequestException:
         pass
 
@@ -223,7 +223,6 @@ def run_s6_3pane(start: str, end: str) -> bool:
 
     # TC-S6-02: step_size = M1 = 60000ms
     try:
-        api_post("/api/replay/pause")
     except requests.RequestException:
         pass
     time.sleep(0.5)
@@ -267,7 +266,7 @@ def run_s6_m5only(start: str, end: str) -> None:
             pass
 
     try:
-        api_post("/api/replay/play", {"start": start, "end": end})
+        api_post("/api/replay/toggle", {"start": start, "end": end})
     except requests.RequestException:
         pass
 
@@ -276,7 +275,6 @@ def run_s6_m5only(start: str, end: str) -> None:
         return
 
     try:
-        api_post("/api/replay/pause")
     except requests.RequestException:
         pass
     time.sleep(0.5)

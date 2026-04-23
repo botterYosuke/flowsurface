@@ -131,7 +131,6 @@ def run_s39() -> None:
     print("── TC-C: 初期 portfolio.cash 確認")
 
     try:
-        api_post("/api/replay/pause")
     except Exception:
         pass
     wait_status("Paused", 10)

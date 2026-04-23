@@ -163,7 +163,7 @@ def run_s31(start: str, end: str) -> None:
         except requests.RequestException:
             pass
     try:
-        api_post("/api/replay/play", {"start": start, "end": end})
+        api_post("/api/replay/toggle", {"start": start, "end": end})
     except requests.RequestException:
         pass
 
@@ -181,7 +181,6 @@ def run_s31(start: str, end: str) -> None:
     # 1x→2x→5x→10x（3 回 CycleSpeed）
     for _ in range(3):
         try:
-            api_post("/api/replay/speed")
         except requests.RequestException:
             pass
 

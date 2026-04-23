@@ -129,7 +129,6 @@ def run_s7() -> None:
             # set-timeframe は ReloadKlineStream を発生させ clock.pause() を呼ぶ（新仕様）。
             # TC-S7-06 でペイン close 後も Playing 継続を確認するため、ここで Resume する。
             try:
-                api_post("/api/replay/resume")
             except Exception:
                 pass
             wait_status("Playing", 10)

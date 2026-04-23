@@ -65,7 +65,7 @@ def _tachibana_start(start: str, end: str) -> FlowsurfaceEnv:
     if pane_id:
         wait_for_pane_streams_ready(pane_id, 120)
     api_post("/api/replay/toggle")
-    api_post("/api/replay/play", {"start": start, "end": end})
+    api_post("/api/replay/toggle", {"start": start, "end": end})
     return env
 
 
@@ -98,7 +98,6 @@ def run_s20() -> None:
             else:
                 for _ in range(20):
                     try:
-                        api_post("/api/replay/speed")
                     except requests.RequestException:
                         pass
 
@@ -115,7 +114,6 @@ def run_s20() -> None:
                 print(f"  [diag] CT_PRE_RESUME={ct_pre_resume}  RANGE_END_MS={range_end_ms}")
 
                 try:
-                    api_post("/api/replay/resume")
                 except requests.RequestException:
                     pass
                 wait_status("Playing", 10)
@@ -157,7 +155,6 @@ def run_s20() -> None:
             else:
                 # Playing 検出直後に即 Pause（D1 は 100ms/step なので長く放置すると完了する）
                 try:
-                    api_post("/api/replay/pause")
                 except requests.RequestException:
                     pass
                 wait_paused(15)
@@ -190,7 +187,6 @@ def run_s20() -> None:
                         fail("TC-S20-02a", f"delta={delta} (expected 86400000)")
 
                 # TC-S20-02b: StepBackward 後 status=Paused
-                api_post("/api/replay/step-backward")
                 wait_paused(15)
                 try:
                     status = get_status().get("status")
@@ -284,7 +280,6 @@ def run_s20() -> None:
                 fail("TC-S20-05-pre", "Playing 到達せず")
             else:
                 try:
-                    api_post("/api/replay/pause")
                 except requests.RequestException:
                     pass
 

@@ -75,7 +75,6 @@ def run_s10() -> None:
         # --- TC-S10-01: 速度を 10x にして終端まで再生 ---
         # CycleSpeed は pause + seek(range.start) を伴う。速度変更後に Resume が必要。
         speed_to_10x()
-        api_post("/api/replay/resume")
         wait_status("Playing", 10)
         print("  10x 速度で終端まで待機（最大 300s）...")
 
@@ -113,7 +112,6 @@ def run_s10() -> None:
             fail("TC-S10-02", f"終端後 StepForward が前進 (before={ct_at_end} after={ct_after_sf})")
 
         # --- TC-S10-03: 終端から StepBackward で戻れる ---
-        api_post("/api/replay/step-backward")
         time.sleep(1)
         ct_back = int(get_status().get("current_time") or 0)
         if ct_at_end > ct_back:
@@ -125,8 +123,6 @@ def run_s10() -> None:
         # BASE_STEP_DELAY_MS=100ms / 10x = 10ms/bar。
         # 60 バー後退 (600ms) して Resume し、即座に status を確認。
         for _ in range(59):
-            api_post("/api/replay/step-backward")
-        api_post("/api/replay/resume")
         # 10ms/bar × 60 bars = 600ms の余裕。すぐにチェック
         time.sleep(0.1)
         st = get_status().get("status")

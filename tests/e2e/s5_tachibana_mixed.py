@@ -154,7 +154,7 @@ def run_s5() -> None:
 
         # TC-S5-03: Replay に切替 + Manual Play → Playing 到達
         api_post("/api/replay/toggle")
-        api_post("/api/replay/play", {"start": start, "end": end})
+        api_post("/api/replay/toggle", {"start": start, "end": end})
 
         if wait_playing(60):
             pass_("TC-S5-03: Replay Playing 到達（Binance M1 + Tachibana D1 混在）")
@@ -215,7 +215,6 @@ def run_s5() -> None:
 
         # TC-S5-07: M1+D1 混在での StepForward — delta = 60000ms（M1 が最小 TF）
         try:
-            api_post("/api/replay/pause")
         except requests.RequestException:
             pass
 

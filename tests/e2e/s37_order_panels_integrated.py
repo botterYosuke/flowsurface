@@ -166,7 +166,6 @@ def run_s37() -> None:
     print("── TC-E〜F: Pause → portfolio 確認")
 
     try:
-        api_post("/api/replay/pause")
     except Exception:
         pass
     wait_status("Paused", 10)

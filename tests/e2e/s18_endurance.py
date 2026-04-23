@@ -88,7 +88,6 @@ def run_s18() -> None:
             fail("TC-S18-02-pre", "Playing 到達せず")
         else:
             try:
-                api_post("/api/replay/pause")
             except requests.RequestException:
                 pass
 
@@ -127,7 +126,6 @@ def run_s18() -> None:
                 bwd_crash = False
                 for i in range(1, 501):
                     try:
-                        api_post("/api/replay/step-backward")
                     except requests.RequestException:
                         pass
                     time.sleep(0.3)

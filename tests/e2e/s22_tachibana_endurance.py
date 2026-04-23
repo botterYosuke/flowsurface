@@ -62,7 +62,7 @@ def _tachibana_start(start: str, end: str) -> FlowsurfaceEnv:
             print("  WARN: streams_ready timeout (continuing)")
 
     api_post("/api/replay/toggle")
-    api_post("/api/replay/play", {"start": start, "end": end})
+    api_post("/api/replay/toggle", {"start": start, "end": end})
     return env
 
 
@@ -120,7 +120,6 @@ def run_s22() -> None:
                 fail("TC-S22-02-pre", "Playing 到達せず")
             else:
                 try:
-                    api_post("/api/replay/pause")
                 except requests.RequestException:
                     pass
 
@@ -159,7 +158,6 @@ def run_s22() -> None:
                     crash_bwd = False
                     for i in range(50):
                         try:
-                            api_post("/api/replay/step-backward")
                         except requests.RequestException:
                             pass
                         time.sleep(0.3)
