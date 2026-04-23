@@ -386,15 +386,24 @@ impl Flowsurface {
                 }
             }
             crate::replay::AgentMessage::RewindToStart => {
+                // ADR-0001 §4 Reset 不変条件:
+                // 1. StepClock.now_ms → range.start   : agent_rewind 内で seek(start)
+                // 2. EventStore cursor → 先頭          : 同上（seek は cursor を戻す）
+                // 3. VirtualExchange open orders cancel + fills 破棄 + balance リセット
+                //                                       : `ve.reset()`
+                // 4. SessionLifecycleEvent::Reset 発火  : `ve.mark_session_reset()`
+                //    （世代カウンタを進め、AgentSessionState::observe_generation で
+                //     `client_order_id` UNIQUE map がクリアされる）
+                // 5. UI チャート「新 session 扱い」再描画
+                //                                       : agent_rewind 内で reset_charts_for_seek
+                //
+                // NarrativeState: `narrative_store` は SQLite DB でナラティブ履歴を保持する
+                // 永続ストアのため reset 対象外（rewind は session 時刻を戻すのみで、
+                // 過去に記録したナラティブ自体は削除しない）。これは headless 実装と一致。
                 self.replay.agent_rewind(dashboard, main_window_id);
-                // ADR-0001 §4 Reset 不変条件の部分実装:
-                // ここでは `VirtualExchange` のローカル reset（open orders キャンセル・
-                // fills 履歴破棄・仮想残高リセット）のみを呼ぶ。
-                // 未実装: SessionLifecycleEvent::Reset 発火、client_order_id UNIQUE map
-                // クリア、NarrativeState::Reset、UI チャートの「新 session 扱い」再描画。
-                // 未実装項目は専用サブフェーズで対応予定（計画書参照）。
                 if let Some(ve) = &mut self.virtual_engine {
                     ve.reset();
+                    ve.mark_session_reset();
                 }
             }
         }

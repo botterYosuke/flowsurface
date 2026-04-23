@@ -51,6 +51,26 @@ impl ReplayController {
         }
     }
 
+    /// リプレイ範囲の終端（ms）を返す。`Active` / `Loading` のみ値を返す。
+    pub fn range_end_ms(&self) -> Option<u64> {
+        match &self.state.session {
+            ReplaySession::Active { clock, .. } | ReplaySession::Loading { clock, .. } => {
+                Some(clock.full_range().end)
+            }
+            ReplaySession::Idle => None,
+        }
+    }
+
+    /// 1 step で進む仮想時刻幅（ms）を返す。`Active` / `Loading` のみ値を返す。
+    pub fn step_size_ms(&self) -> Option<u64> {
+        match &self.state.session {
+            ReplaySession::Active { clock, .. } | ReplaySession::Loading { clock, .. } => {
+                Some(clock.step_size_ms())
+            }
+            ReplaySession::Idle => None,
+        }
+    }
+
     /// アクティブな kline ストリームを収集する（mid-replay 銘柄変更用）。
     /// `Kline` 種別のみを返す。
     pub fn active_kline_streams(&self) -> Vec<StreamKind> {

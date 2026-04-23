@@ -62,11 +62,15 @@ impl ReplayController {
 
     /// `AgentMessage::RewindToStart`（UI の ⏮ ボタン）。clock を `range.start` に戻す。
     ///
-    /// NOTE: ADR-0001 §4 Reset 不変条件のうち、本メソッドは clock 巻き戻しと
-    /// chart の seek-reset + 再注入のみを担う。`SessionLifecycleEvent::Reset` 発火 /
-    /// `client_order_id` map クリア / `NarrativeState::Reset` / `VirtualExchange::reset`
-    /// は呼び出し側（`src/app/handlers.rs::handle_agent`）の責務で、さらに完全実装は
-    /// 後続サブフェーズに分離されている（計画書 Q 参照）。
+    /// ADR-0001 §4 Reset 不変条件のうち本メソッドの責務は次のとおり:
+    /// - `StepClock.now_ms` を `range.start` へ seek
+    /// - EventStore cursor を先頭へ巻き戻し
+    /// - UI チャートの「新 session 扱い」再描画（`reset_charts_for_seek`）
+    ///
+    /// `VirtualExchange::reset()` + `mark_session_reset()` の発火 (fills / orders /
+    /// balance クリア + SessionLifecycleEvent::Reset + `client_order_id` UNIQUE map
+    /// クリア) は呼び出し側（`src/app/handlers.rs::handle_agent` または headless の
+    /// 対応ハンドラ）の責務。
     pub fn agent_rewind(&mut self, dashboard: &mut Dashboard, main_window_id: iced::window::Id) {
         let start = match &self.state.session {
             ReplaySession::Active { clock, .. } | ReplaySession::Loading { clock, .. } => {

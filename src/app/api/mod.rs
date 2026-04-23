@@ -8,6 +8,25 @@ use crate::{Flowsurface, Message};
 use crate::{connector, replay_api};
 use iced::Task;
 
+/// virtual_engine 未初期化時用の空 PortfolioSnapshot を返す。
+fn empty_portfolio_snapshot() -> crate::replay::virtual_exchange::portfolio::PortfolioSnapshot {
+    crate::replay::virtual_exchange::portfolio::PortfolioSnapshot {
+        cash: 0.0,
+        unrealized_pnl: 0.0,
+        realized_pnl: 0.0,
+        total_equity: 0.0,
+        open_positions: Vec::new(),
+        closed_positions: Vec::new(),
+    }
+}
+
+fn serialize_advance_response(resp: &crate::api::advance_request::AdvanceResponse) -> String {
+    serde_json::to_string(resp).unwrap_or_else(|e| {
+        log::error!("serialize AdvanceResponse failed: {e}");
+        r#"{"error":"serialize failed"}"#.to_string()
+    })
+}
+
 impl Flowsurface {
     pub(crate) fn handle_replay_api(
         &mut self,
@@ -95,24 +114,27 @@ impl Flowsurface {
                 return self.handle_narrative_api(cmd, reply_tx);
             }
             ApiCommand::AgentSession(cmd) => {
-                // GUI ランタイムでは agent API は未対応。
-                // - Step / PlaceOrder: 501（将来対応候補）
-                // - Advance: 400（ADR-0001 不変条件: instant mode は headless のみ）
                 use replay_api::AgentSessionCommand;
                 match cmd {
                     AgentSessionCommand::Step { .. } | AgentSessionCommand::PlaceOrder { .. } => {
+                        // Step / PlaceOrder は GUI で未実装。
+                        // agent 駆動のバックテストは `--headless` ランタイムを使う前提。
+                        // UI からの 1 bar 進行は `Message::Agent(AgentMessage::Step)` 経由
+                        // （UI ▶ ボタン）で別途利用可能。
                         reply_tx.send_status(
                             501,
                             r#"{"error":"agent session commands not yet supported in GUI mode; use headless"}"#
                                 .to_string(),
                         );
                     }
-                    AgentSessionCommand::Advance { .. } => {
-                        reply_tx.send_status(
-                            400,
-                            r#"{"error":"instant mode requires headless runtime (pass --headless)"}"#
-                                .to_string(),
-                        );
+                    AgentSessionCommand::Advance {
+                        session_id,
+                        request,
+                    } => {
+                        // ADR-0001 §3: GUI / Headless 両方で受理（旧 400 ガードは撤廃）。
+                        // GUI 実装は MVP — advance 本体のみ。stop_on / include_fills の
+                        // 完全サポートは別サブフェーズで shared helper を抽出する際に追加。
+                        return self.handle_agent_advance(session_id, *request, reply_tx);
                     }
                 }
             }
@@ -124,6 +146,213 @@ impl Flowsurface {
             }
         }
         Task::none()
+    }
+
+    /// `POST /api/agent/session/:id/advance` (GUI mode) の MVP ハンドラ。
+    ///
+    /// ADR-0001 §3 / §5 に基づく。UI ボタン経由の `AgentMessage::Advance` と同じ
+    /// コアロジック（`ReplayController::agent_advance` + `virtual_engine.on_tick`
+    /// + narrative outcome 非同期更新）を再利用し、HTTP レスポンスとして
+    /// `AdvanceResponse` を返す。
+    ///
+    /// 制約（headless 実装との差分）:
+    /// - `stop_on`（fill / narrative 到達時に中途停止）は未サポート。指定時は 501。
+    /// - `include_fills`（fills 配列をレスポンスに同梱）は未サポート。指定時は 501。
+    /// - `aggregate_updated_narratives` は常に `0` を返す（narrative 更新は非同期
+    ///   タスクで発火するが、完了を待たずに応答するため正確な件数を集計できない）。
+    ///
+    /// 完全な parity が必要な場合は `--headless` ランタイムを利用すること。
+    /// 将来 shared helper を抽出した時点で制約を解消する。
+    pub(crate) fn handle_agent_advance(
+        &mut self,
+        session_id: String,
+        request: crate::api::advance_request::AgentAdvanceRequest,
+        reply_tx: replay_api::ReplySender,
+    ) -> Task<Message> {
+        use crate::api::advance_request::{AdvanceResponse, AdvanceStoppedReason};
+
+        if session_id != "default" {
+            reply_tx.send_status(
+                501,
+                r#"{"error":"multi-session not yet implemented; use 'default' until Phase 4c"}"#
+                    .to_string(),
+            );
+            return Task::none();
+        }
+
+        if !request.stop_on.is_empty() || request.include_fills {
+            reply_tx.send_status(
+                501,
+                r#"{"error":"stop_on / include_fills not yet supported in GUI mode; use headless"}"#
+                    .to_string(),
+            );
+            return Task::none();
+        }
+
+        // session 状態チェック（headless と同じルール）
+        let (start_time, end_time) = match self.replay.current_time_ms() {
+            Some(t) => {
+                let end = self.replay.range_end_ms().unwrap_or(t);
+                (t, end)
+            }
+            None => {
+                if self.replay.is_loading() {
+                    reply_tx.send_status(503, r#"{"error":"session loading"}"#.to_string());
+                } else {
+                    reply_tx.send_status(
+                        404,
+                        r#"{"error":"session not started","hint":"toggle to Replay mode and start a range first"}"#
+                            .to_string(),
+                    );
+                }
+                return Task::none();
+            }
+        };
+
+        let until_ms = request.until_ms.as_u64();
+        let snapshot_price = self.replay.last_close_price().unwrap_or(0.0);
+
+        if until_ms <= start_time {
+            // 既に until_ms 到達済 — 進行 0 で成功を返す
+            let portfolio = self
+                .virtual_engine
+                .as_ref()
+                .map(|ve| ve.portfolio_snapshot(snapshot_price))
+                .unwrap_or_else(empty_portfolio_snapshot);
+            let resp = AdvanceResponse {
+                clock_ms: crate::api::contract::EpochMs::from(start_time),
+                stopped_reason: AdvanceStoppedReason::UntilReached,
+                ticks_advanced: 0,
+                aggregate_fills: 0,
+                aggregate_updated_narratives: 0,
+                fills: None,
+                final_portfolio: portfolio,
+            };
+            reply_tx.send(serialize_advance_response(&resp));
+            return Task::none();
+        }
+
+        // layout / dashboard を取り出す
+        let main_window_id = self.main_window.id;
+        let Some(layout_id) = self.layout_manager.active_layout_id().map(|l| l.unique) else {
+            reply_tx.send_status(500, r#"{"error":"no active layout"}"#.to_string());
+            return Task::none();
+        };
+        let Some(dashboard) = self
+            .layout_manager
+            .get_mut(layout_id)
+            .map(|l| &mut l.dashboard)
+        else {
+            reply_tx.send_status(500, r#"{"error":"no active dashboard"}"#.to_string());
+            return Task::none();
+        };
+
+        // agent_advance は cap_ms を受け取って min(now + cap, range.end) まで進める。
+        // UI ボタン経由では UI_ADVANCE_CAP_MS が適用されるが、HTTP 経由では ADR §5 の
+        // 「HTTP の cap なし」原則に従い `until_ms - now_ms` をそのまま渡す。
+        let cap_ms = until_ms.saturating_sub(start_time);
+        let outcome = self.replay.agent_advance(dashboard, main_window_id, cap_ms);
+
+        let (current_time, trade_events) = match outcome {
+            Some(o) => o,
+            None => {
+                reply_tx.send_status(404, r#"{"error":"session not active"}"#.to_string());
+                return Task::none();
+            }
+        };
+
+        // fills 集計 + narrative outcome 非同期更新（handle_agent と同じパターン）
+        let mut aggregate_fills: usize = 0;
+        let mut narrative_tasks: Vec<Task<Message>> = Vec::new();
+        let mut fill_msgs: Vec<Task<Message>> = Vec::new();
+        let mut needs_marker_refresh = false;
+
+        if let Some(ve) = &mut self.virtual_engine {
+            for (stream, trades) in trade_events {
+                let ticker_str = stream.ticker_info().ticker.to_string();
+                let fills = ve.on_tick(&ticker_str, &trades, current_time);
+                if !fills.is_empty() {
+                    needs_marker_refresh = true;
+                }
+                aggregate_fills += fills.len();
+                for fill in fills {
+                    let narrative_store = self.narrative_store.clone();
+                    let order_id = fill.order_id.clone();
+                    let fill_price = fill.fill_price;
+                    let fill_time_ms =
+                        crate::api::contract::EpochMs::new(fill.fill_time_ms).saturating_to_i64();
+                    let side_hint = match fill.side {
+                        crate::replay::virtual_exchange::PositionSide::Long => {
+                            Some(crate::narrative::model::NarrativeSide::Buy)
+                        }
+                        crate::replay::virtual_exchange::PositionSide::Short => {
+                            Some(crate::narrative::model::NarrativeSide::Sell)
+                        }
+                    };
+                    narrative_tasks.push(Task::perform(
+                        async move {
+                            if let Err(e) = crate::narrative::service::update_outcome_from_fill(
+                                &narrative_store,
+                                &order_id,
+                                fill_price,
+                                fill_time_ms,
+                                side_hint,
+                            )
+                            .await
+                            {
+                                log::warn!(
+                                    "advance: failed to update narrative outcome for {order_id}: {e}"
+                                );
+                            }
+                        },
+                        |()| Message::Noop,
+                    ));
+                    fill_msgs.push(Task::done(Message::Dashboard {
+                        layout_id: None,
+                        event: crate::screen::dashboard::Message::VirtualOrderFilled(fill),
+                    }));
+                }
+            }
+        }
+
+        // ticks_advanced は「進行した bar 数」。step_size_ms を基準に算出する。
+        let ticks_advanced = self
+            .replay
+            .step_size_ms()
+            .filter(|&s| s > 0)
+            .map(|s| (current_time.saturating_sub(start_time)) / s)
+            .unwrap_or(0);
+
+        let stopped_reason = if current_time >= end_time {
+            AdvanceStoppedReason::End
+        } else {
+            AdvanceStoppedReason::UntilReached
+        };
+
+        let final_portfolio = self
+            .virtual_engine
+            .as_ref()
+            .map(|ve| ve.portfolio_snapshot(snapshot_price))
+            .unwrap_or_else(empty_portfolio_snapshot);
+
+        let resp = AdvanceResponse {
+            clock_ms: crate::api::contract::EpochMs::from(current_time),
+            stopped_reason,
+            ticks_advanced,
+            aggregate_fills,
+            aggregate_updated_narratives: 0, // MVP: async 更新のため集計省略
+            fills: None,
+            final_portfolio,
+        };
+        reply_tx.send(serialize_advance_response(&resp));
+
+        let mut tasks: Vec<Task<Message>> = Vec::new();
+        if needs_marker_refresh {
+            tasks.push(self.refresh_narrative_markers_task());
+        }
+        tasks.extend(narrative_tasks);
+        tasks.extend(fill_msgs);
+        Task::batch(tasks)
     }
 
     pub(crate) fn handle_auth_api(&self, cmd: replay_api::AuthCommand) -> String {
