@@ -84,7 +84,8 @@ def run_s57() -> None:
     if not wait_status("Active", 30):
         fail("TC-S57-setup", "replay session did not reach Active")
         return
-    r = requests.get(f"{API_BASE}/api/replay/status", timeout=10)
+
+    r = requests.get(f"{API_BASE}/api/replay/status", timeout=10)
     if r.status_code != 200:
         fail("TC-S57-setup", f"status failed: {r.status_code}")
         return
@@ -109,8 +110,7 @@ def run_s57() -> None:
     else:
         fail("TC-S57-01", f"status={r.status_code} body={r.text}")
 
-    if not IS_HEADLESS:
-        return
+    # GUI/headless 両方で以下を実行 (ADR-0001 仕様反転)
 
     # TC-S57-02: 謌占｡梧ｳｨ譁・ｾ・stop_on=["fill"] 竊・1 tick 縺ｧ蛛懈ｭ｢
     cli = f"s57_cli_{int(time.time() * 1000)}"

@@ -1,4 +1,4 @@
-﻿# Phase 4b-1 follow-up: 自動再生機構の廃止と agent session API への統合
+# Phase 4b-1 follow-up: 自動再生機構の廃止と agent session API への統合
 
 **親計画**: [phase4b\_agent\_replay\_api.md](https://www.google.com/search?q=phase4b_agent_replay_api.md)
 **関連 ADR**: [ADR-0001 Agent 専用 Replay API の新設と自動再生機構の廃止](https://www.google.com/search?q=../adr/0001-agent-replay-api-separation.md)（本計画で実装）
@@ -183,9 +183,9 @@ Windows 実機実行が必要。grep ベースで 98 ファイル規模の依存
 
 **作業**:
 
-  - [ ] 上記カテゴリに従って対象ファイルを grep で全走査し一覧化
-  - [ ] 削除 / 書き換え / 機械置換の対応を一覧にチェックインしながら実施
-  - [ ] `.github/workflows/e2e.yml` の該当スクリプト行を整理
+  - [x] 上記カテゴリに従って対象ファイルを grep で全走査し一覧化
+  - [x] 削除 / 書き換え / 機械置換の対応を一覧にチェックインしながら実施
+  - [x] `.github/workflows/e2e.yml` の該当スクリプト行を整理
 
 ### サブフェーズ U: Python SDK 更新
 
@@ -219,7 +219,7 @@ Windows 実機実行が必要。grep ベースで 98 ファイル規模の依存
 | P: UI ボタン配線繋ぎ替え | 🚀 | 2026-04-23 | ea24979 | **一部完了**。AgentMessage::{Step, Advance, RewindToStart} 新設と UI 配線 |
 | Q: advance GUI ガード削除 + rewind reset 不変条件 | ✅ | 2026-04-23 | 0a1f406 | **ADR-0001 §3 / §4 + hotfix follow-up 完了**。GUI advance の 400 ガード削除、rewind reset の実装等 |
 | R: is\_paused 呼び出し元書き換え | ⏳ | | | |
-| T: E2E 調査 | ⏳ | | | |
+| T: E2E 調査 | ✅ | 2026-04-23 | - | スクリプト一括置換および obsolete なテストの削除完了。e2e.yml 更新済 |
 | U: Python SDK 更新 | ⏳ | | | |
 | V: ドキュメント更新 + ADR Status accepted | ⏳ | | | |
 

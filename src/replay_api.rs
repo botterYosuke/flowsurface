@@ -156,7 +156,6 @@ pub enum PaneCommand {
 type ReplySenderInner = Arc<Mutex<Option<oneshot::Sender<(u16, String)>>>>;
 
 /// oneshot::Sender 繧・Clone 蜿ｯ閭ｽ縺ｫ縺吶ｋ繝ｩ繝・ヱ繝ｼ・・ced 縺ｮ Message 縺ｯ Clone 縺悟ｿ・ｦ・ｼ・/// 繝ｬ繧ｹ繝昴Φ繧ｹ縺ｯ main.rs 蛛ｴ縺ｧ繧ｷ繝ｪ繧｢繝ｩ繧､繧ｺ貂医∩ JSON 繧帝√ｋ縲・/// 繧ｿ繝励Ν (status_code, body) 縺ｧ繧ｹ繝・・繧ｿ繧ｹ繧ｳ繝ｼ繝峨ｒ謖・ｮ壹〒縺阪ｋ縲・
-
 #[derive(Debug, Clone)]
 pub struct ReplySender(ReplySenderInner);
 
@@ -166,7 +165,6 @@ impl ReplySender {
     }
 
     /// HTTP 200 縺ｧ繝ｬ繧ｹ繝昴Φ繧ｹ繧帝∽ｿ｡縺吶ｋ縲・蝗樒岼莉･髯阪・蜻ｼ縺ｳ蜃ｺ縺励・菴輔ｂ縺励↑縺・・    
-
     pub fn send(self, body: String) {
         if let Ok(mut guard) = self.0.lock()
             && let Some(tx) = guard.take()
@@ -176,7 +174,6 @@ impl ReplySender {
     }
 
     /// 莉ｻ諢上・繧ｹ繝・・繧ｿ繧ｹ繧ｳ繝ｼ繝峨〒繝ｬ繧ｹ繝昴Φ繧ｹ繧帝∽ｿ｡縺吶ｋ縲・蝗樒岼莉･髯阪・蜻ｼ縺ｳ蜃ｺ縺励・菴輔ｂ縺励↑縺・・    
-
     pub fn send_status(self, status: u16, body: String) {
         if let Ok(mut guard) = self.0.lock()
             && let Some(tx) = guard.take()
@@ -187,11 +184,9 @@ impl ReplySender {
 }
 
 /// API 繧ｵ繝ｼ繝舌・縺九ｉ iced 縺ｫ騾√ｋ繝｡繝・そ繝ｼ繧ｸ・医さ繝槭Φ繝・+ 蠢懃ｭ皮畑繝√Ε繝阪Ν・・
-
 pub type ApiMessage = (ApiCommand, ReplySender);
 
 /// channel() 繝代ち繝ｼ繝ｳ縺ｧ API 繧ｵ繝ｼ繝舌・繧定ｵｷ蜍輔＠縲｀essage 繧ｹ繝医Μ繝ｼ繝繧定ｿ斐☆縲・/// exchange/src/connect.rs:111-122 縺ｮ蜀榊茜逕ｨ繝代ち繝ｼ繝ｳ縲・
-
 pub fn subscription() -> impl futures::Stream<Item = ApiMessage> {
     exchange::connect::channel(32, |sender| async move {
         run_server(sender).await;
@@ -199,13 +194,11 @@ pub fn subscription() -> impl futures::Stream<Item = ApiMessage> {
 }
 
 /// headless 繝｢繝ｼ繝牙髄縺・ 螟夜Κ縺九ｉ sender 繧呈ｸ｡縺励※ HTTP 繧ｵ繝ｼ繝舌・繧定ｵｷ蜍輔☆繧九・
-
 pub async fn start_server(sender: futures::channel::mpsc::Sender<ApiMessage>) {
     run_server(sender).await;
 }
 
 /// 繝昴・繝育分蜿ｷ繧堤腸蠅・､画焚縺ｾ縺溘・ 繝・ヵ繧ｩ繝ｫ繝・9876 縺九ｉ蜿門ｾ・
-
 fn api_port() -> u16 {
     std::env::var("FLOWSURFACE_API_PORT")
         .ok()
@@ -214,7 +207,6 @@ fn api_port() -> u16 {
 }
 
 /// Content-Length 繝倥ャ繝繝ｼ縺ｮ蛟､繧偵ヱ繝ｼ繧ｹ縺吶ｋ・郁ｦ九▽縺九ｉ縺ｪ縺代ｌ縺ｰ 0・峨・
-
 fn parse_content_length_from_headers(headers: &str) -> usize {
     for line in headers.lines() {
         if line.to_ascii_lowercase().starts_with("content-length:")
@@ -228,7 +220,6 @@ fn parse_content_length_from_headers(headers: &str) -> usize {
 }
 
 /// 荳企剞: 繝倥ャ繝繝ｼ 64KB + 繝懊ョ繧｣ 16MB・・hase 4a 縺ｮ繧ｹ繝翫ャ繝励す繝ｧ繝・ヨ 10MB ・倶ｽ呵｣輔ｒ隕九◆蛟､・峨・
-
 const MAX_HEADER_BYTES: usize = 64 * 1024;
 const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 
@@ -242,7 +233,6 @@ pub(crate) enum ReadRequestOutcome {
 }
 
 /// HTTP 繝ｪ繧ｯ繧ｨ繧ｹ繝医ｒ螳悟・縺ｫ隱ｭ縺ｿ霎ｼ繧・・ontent-Length 縺ｫ蠕薙▲縺ｦ繝懊ョ繧｣繧ら｢ｺ菫晢ｼ峨・/// TCP 縺悟・蜑ｲ縺励※螻翫＞縺ｦ繧よｭ｣縺励￥邨仙粋縺励√・繝・ぅ繧ｵ繧､繧ｺ縺ｫ蠢懊§縺ｦ繝舌ャ繝輔ぃ繧貞虚逧・僑蠑ｵ縺吶ｋ縲・
-
 pub(crate) async fn read_full_request(stream: &mut tokio::net::TcpStream) -> ReadRequestOutcome {
     let mut buf = vec![0u8; 16 * 1024];
     let mut total = 0usize;
@@ -419,7 +409,6 @@ async fn run_server(mut sender: mpsc::Sender<ApiMessage>) {
 }
 
 /// 邁｡譏・HTTP 繝ｪ繧ｯ繧ｨ繧ｹ繝医ヱ繝ｼ繧ｵ繝ｼ縲・method, path, body) 繧定ｿ斐☆縲・
-
 fn parse_request(raw: &str) -> Option<(String, String, String)> {
     let mut lines = raw.split("\r\n");
     let request_line = lines.next()?;
@@ -450,12 +439,10 @@ enum RouteError {
 }
 
 /// `RouteError::NotImplemented` 縺ｫ蟇ｾ蠢懊☆繧・501 繝ｬ繧ｹ繝昴Φ繧ｹ譛ｬ譁・・/// ADR-0001 / phase4b_agent_replay_api.md ﾂｧ4.5 縺ｧ蝗ｺ螳壽枚險縺ｨ縺励※螳夂ｾｩ縲・
-
 pub(crate) const NOT_IMPLEMENTED_MULTI_SESSION_BODY: &str =
     r#"{"error":"multi-session not yet implemented; use 'default' until Phase 4c"}"#;
 
 /// body 縺九ｉ譁・ｭ怜・繝輔ぅ繝ｼ繝ｫ繝峨ｒ蜿悶ｊ蜃ｺ縺・
-
 fn body_str_field(body: &str, key: &str) -> Result<String, RouteError> {
     let parsed: serde_json::Value =
         serde_json::from_str(body).map_err(|_| RouteError::BadRequest)?;
@@ -467,14 +454,12 @@ fn body_str_field(body: &str, key: &str) -> Result<String, RouteError> {
 }
 
 /// body 縺九ｉ uuid 繝輔ぅ繝ｼ繝ｫ繝峨ｒ蜿悶ｊ蜃ｺ縺・
-
 fn body_uuid_field(body: &str, key: &str) -> Result<uuid::Uuid, RouteError> {
     let s = body_str_field(body, key)?;
     uuid::Uuid::parse_str(&s).map_err(|_| RouteError::BadRequest)
 }
 
 /// `/api/agent/session/:id/<suffix>` 蠖｢蠑上・繝代せ縺九ｉ `:id` 繧呈歓蜃ｺ縺吶ｋ縲・/// `:id` 縺檎ｩｺ繝ｻ`/` 繧貞性繧縺ｪ縺ｩ縺ｮ蝣ｴ蜷医・ `BadRequest`縲・/// ADR-0001 縺ｫ蝓ｺ縺･縺・`:id != "default"` 縺ｯ `NotImplemented`・・01・峨・
-
 fn extract_agent_session_id<'a>(path: &'a str, suffix: &str) -> Result<&'a str, RouteError> {
     let after_prefix = path
         .strip_prefix("/api/agent/session/")
@@ -680,7 +665,6 @@ fn route(method: &str, path: &str, body: &str) -> Result<ApiCommand, RouteError>
 }
 
 /// `POST /api/replay/order` 縺ｮ繝懊ョ繧｣繧偵ヱ繝ｼ繧ｹ縺励※ ApiCommand 繧定ｿ斐☆縲・
-
 fn parse_virtual_order_command(body: &str) -> Result<ApiCommand, RouteError> {
     let parsed: serde_json::Value =
         serde_json::from_str(body).map_err(|_| RouteError::BadRequest)?;
@@ -757,7 +741,6 @@ fn query_param(path: &str, key: &str) -> Option<String> {
 }
 
 /// `GET /api/pane/chart-snapshot?pane_id=<uuid>[&limit=N][&since_ts=<ms>]` 繧偵ヱ繝ｼ繧ｹ縺励※ ApiCommand 繧定ｿ斐☆縲・
-
 fn parse_chart_snapshot_command(path: &str) -> Result<ApiCommand, RouteError> {
     let id_str = query_param(path, "pane_id").ok_or(RouteError::BadRequest)?;
     let pane_id = uuid::Uuid::parse_str(&id_str).map_err(|_| RouteError::BadRequest)?;
@@ -782,7 +765,6 @@ fn parse_set_mode_command(body: &str) -> Result<ApiCommand, RouteError> {
 }
 
 /// `POST /api/pane/split` 縺ｮ繝懊ョ繧｣繧偵ヱ繝ｼ繧ｹ縺励※ ApiCommand 繧定ｿ斐☆縲・
-
 fn parse_split_command(body: &str) -> Result<ApiCommand, RouteError> {
     let pane_id = body_uuid_field(body, "pane_id")?;
     let axis = body_str_field(body, "axis")?;
@@ -794,7 +776,6 @@ fn parse_split_command(body: &str) -> Result<ApiCommand, RouteError> {
 }
 
 /// `POST /api/sidebar/open-order-pane` 縺ｮ繝懊ョ繧｣繧偵ヱ繝ｼ繧ｹ縺励※ ApiCommand 繧定ｿ斐☆縲・
-
 fn parse_open_order_pane(body: &str) -> Result<ApiCommand, RouteError> {
     let kind = body_str_field(body, "kind")?;
     match kind.as_str() {
@@ -805,7 +786,6 @@ fn parse_open_order_pane(body: &str) -> Result<ApiCommand, RouteError> {
 }
 
 /// `POST /api/tachibana/order` 縺ｮ繝懊ョ繧｣繧偵ヱ繝ｼ繧ｹ縺励※ ApiCommand 繧定ｿ斐☆縲・/// `second_password` 縺ｯ譛ｬ譁・ｸｭ縺ｮ繝輔ぅ繝ｼ繝ｫ繝峨° `DEV_SECOND_PASSWORD` 迺ｰ蠅・､画焚縺九ｉ蜿門ｾ励☆繧九・
-
 fn parse_tachibana_new_order(body: &str) -> Result<ApiCommand, RouteError> {
     let parsed: serde_json::Value =
         serde_json::from_str(body).map_err(|_| RouteError::BadRequest)?;
@@ -877,7 +857,6 @@ fn parse_tachibana_new_order(body: &str) -> Result<ApiCommand, RouteError> {
 }
 
 /// `GET /api/tachibana/order/{order_num}[?eig_day=YYYYMMDD]` 繧偵ヱ繝ｼ繧ｹ縺励※ ApiCommand 繧定ｿ斐☆縲・
-
 fn parse_tachibana_order_detail_command(path: &str) -> Result<ApiCommand, RouteError> {
     // 繝代せ驛ｨ蛻・→繧ｯ繧ｨ繝ｪ驛ｨ蛻・ｒ蛻・屬縺吶ｋ
     let (path_part, _) = path.split_once('?').unwrap_or((path, ""));
@@ -891,7 +870,6 @@ fn parse_tachibana_order_detail_command(path: &str) -> Result<ApiCommand, RouteE
 }
 
 /// `POST /api/tachibana/order/correct` 縺ｮ繝懊ョ繧｣繧偵ヱ繝ｼ繧ｹ縺励※ ApiCommand 繧定ｿ斐☆縲・/// `second_password` 縺ｯ譛ｬ譁・∪縺溘・ `DEV_SECOND_PASSWORD` 迺ｰ蠅・､画焚縺九ｉ蜿門ｾ励☆繧九・
-
 fn parse_tachibana_correct_order(body: &str) -> Result<ApiCommand, RouteError> {
     let parsed: serde_json::Value =
         serde_json::from_str(body).map_err(|_| RouteError::BadRequest)?;
@@ -949,7 +927,6 @@ fn parse_tachibana_correct_order(body: &str) -> Result<ApiCommand, RouteError> {
 }
 
 /// `POST /api/tachibana/order/cancel` 縺ｮ繝懊ョ繧｣繧偵ヱ繝ｼ繧ｹ縺励※ ApiCommand 繧定ｿ斐☆縲・/// `second_password` 縺ｯ譛ｬ譁・∪縺溘・ `DEV_SECOND_PASSWORD` 迺ｰ蠅・､画焚縺九ｉ蜿門ｾ励☆繧九・
-
 fn parse_tachibana_cancel_order(body: &str) -> Result<ApiCommand, RouteError> {
     let parsed: serde_json::Value =
         serde_json::from_str(body).map_err(|_| RouteError::BadRequest)?;
@@ -983,7 +960,6 @@ fn parse_tachibana_cancel_order(body: &str) -> Result<ApiCommand, RouteError> {
 }
 
 /// `POST /api/sidebar/select-ticker` 縺ｮ繝懊ョ繧｣繧偵ヱ繝ｼ繧ｹ縺励※ ApiCommand 繧定ｿ斐☆縲・
-
 fn parse_sidebar_select_ticker(body: &str) -> Result<ApiCommand, RouteError> {
     let pane_id = body_uuid_field(body, "pane_id")?;
     let ticker = body_str_field(body, "ticker")?;
@@ -996,7 +972,6 @@ fn parse_sidebar_select_ticker(body: &str) -> Result<ApiCommand, RouteError> {
 }
 
 /// `POST /api/agent/narrative` 縺ｮ繝懊ョ繧｣繧・`NarrativeCreateRequest` 縺ｫ繝代・繧ｹ縺吶ｋ縲・
-
 fn parse_narrative_create(body: &str) -> Result<ApiCommand, RouteError> {
     let parsed: serde_json::Value =
         serde_json::from_str(body).map_err(|_| RouteError::BadRequest)?;
@@ -1136,7 +1111,6 @@ fn parse_narrative_patch(path: &str, body: &str) -> Result<ApiCommand, RouteErro
 }
 
 /// body 縺九ｉ逵∫払蜿ｯ閭ｽ縺ｪ譁・ｭ怜・繝輔ぅ繝ｼ繝ｫ繝峨ｒ蜿悶ｊ蜃ｺ縺吶・/// 繝輔ぅ繝ｼ繝ｫ繝峨′蟄伜惠縺励↑縺・ｴ蜷医√∪縺溘・蛟､縺・JSON `null` 縺ｮ蝣ｴ蜷医・ `None` 繧定ｿ斐☆縲・/// ・亥ｿ・医ヵ繧｣繝ｼ繝ｫ繝臥畑縺ｮ `body_str_field` 縺ｯ null 繧・400 縺ｨ縺励※諡貞凄縺吶ｋ縲ゑｼ・
-
 fn body_opt_str_field(body: &str, key: &str) -> Result<Option<String>, RouteError> {
     let parsed: serde_json::Value =
         serde_json::from_str(body).map_err(|_| RouteError::BadRequest)?;
@@ -1180,7 +1154,6 @@ async fn write_response(
 }
 
 /// 繝・せ繧ｯ繝医ャ繝怜・菴薙・繧ｹ繧ｯ繝ｪ繝ｼ繝ｳ繧ｷ繝ｧ繝・ヨ繧・C:/tmp/screenshot.png 縺ｫ菫晏ｭ倥☆繧九・/// spawn_blocking 縺九ｉ蜻ｼ縺ｶ縺薙→・・ync API・峨・
-
 fn capture_screenshot() -> String {
     const PATH: &str = "C:/tmp/screenshot.png";
     if let Err(e) = std::fs::create_dir_all("C:/tmp") {
@@ -2161,7 +2134,6 @@ mod tests {
     }
 
     /// bare symbol 縺ｯ縺昴・縺ｾ縺ｾ騾壹☆・域里蟄・E2E 縺ｨ縺ｮ蠕梧婿莠呈鋤・峨・    
-
     #[test]
     fn place_order_accepts_bare_symbol() {
         let body = r#"{"ticker":"BTCUSDT","side":"sell","qty":0.01,"order_type":"market"}"#;
@@ -2180,7 +2152,6 @@ mod tests {
     }
 
     /// 繝励Ξ繝輔ぅ繝・け繧ｹ縺縺代・ "Exchange:" 縺ｯ遨ｺ譁・ｭ・ticker 縺ｨ縺励※ 400縲・    
-
     #[test]
     fn place_order_rejects_empty_symbol_after_prefix() {
         let body = r#"{"ticker":"BinanceLinear:","side":"buy","qty":0.005}"#;
@@ -2255,7 +2226,6 @@ mod tests {
     }
 
     /// GET /api/tachibana/order/12345678?eig_day=20260417 竊・eig_day 繧ｯ繧ｨ繝ｪ繝代Λ繝｡繝ｼ繧ｿ蜿門ｾ・    
-
     #[test]
     fn route_get_tachibana_order_detail_with_eig_day() {
         let cmd = route("GET", "/api/tachibana/order/12345678?eig_day=20260417", "").unwrap();

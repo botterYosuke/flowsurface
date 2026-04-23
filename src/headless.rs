@@ -21,7 +21,6 @@ use crate::replay_api::{ApiCommand, ApiMessage, VirtualExchangeCommand};
 // 笏笏 CLI 蠑墓焚 笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏
 
 /// `--headless` 襍ｷ蜍墓凾縺ｫ蠢・ｦ√↑ CLI 蠑墓焚縲・
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct HeadlessArgs {
     pub ticker: String,
@@ -59,7 +58,6 @@ pub fn parse_headless_args(args: &[String]) -> Result<HeadlessArgs, String> {
 // 笏笏 繝・ぅ繝・き繝ｼ / 繧ｿ繧､繝繝輔Ξ繝ｼ繝 笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏
 
 /// "BinanceLinear:BTCUSDT" 繧・"HyperliquidLinear:BTC" 繧・`Ticker` 縺ｫ繝代・繧ｹ縺吶ｋ縲・
-
 pub fn parse_ticker_str(s: &str) -> Result<Ticker, String> {
     let parts: Vec<&str> = s.splitn(2, ':').collect();
     if parts.len() != 2 {
@@ -85,7 +83,6 @@ pub fn parse_ticker_str(s: &str) -> Result<Ticker, String> {
 }
 
 /// "M1", "M5", "H1" 遲峨ｒ `Timeframe` 縺ｫ繝代・繧ｹ縺吶ｋ縲・
-
 pub fn parse_timeframe_str(s: &str) -> Result<Timeframe, String> {
     let tf = match s {
         "MS100" => Timeframe::MS100,
@@ -202,7 +199,6 @@ impl HeadlessEngine {
     }
 
     /// `POST /api/replay/play {"start":"...","end":"..."}` 繧貞・逅・☆繧九・    
-
     fn play(&mut self, start: &str, end: &str) -> Result<String, String> {
         use crate::replay::parse_replay_range;
 
@@ -321,7 +317,6 @@ impl HeadlessEngine {
     }
 
     /// `get_state_json` 縺ｮ繝ｭ繧ｸ繝・け繧呈ｧ矩蛹悶ョ繝ｼ繧ｿ縺ｨ縺励※霑斐☆・・gent API 逕ｨ・峨・    /// JSON 譁・ｭ怜・蛹悶○縺壹～StepObservation` 讒矩菴薙ｒ霑斐☆縲・    
-
     fn build_step_observation(
         &self,
         limit: usize,
@@ -1101,7 +1096,6 @@ impl HeadlessEngine {
     }
 
     /// 繧｢繧ｯ繝・ぅ繝悶そ繝・す繝ｧ繝ｳ縺ｮ譛譁ｰ close 萓｡譬ｼ繧定ｿ斐☆縲・    
-
     fn last_close_price(&self) -> Option<f64> {
         if let ReplaySession::Active {
             clock,
@@ -1123,7 +1117,6 @@ impl HeadlessEngine {
     }
 
     /// 蜈ｨ繝壹う繝ｳ縺ｮ譛蟆上ち繧､繝繝輔Ξ繝ｼ繝・・s・峨ｒ霑斐☆縲Ｔtep forward/backward 縺ｮ繧ｹ繝・ャ繝怜ｹ・↓菴ｿ縺・・    
-
     fn min_step_ms(&self) -> u64 {
         self.panes
             .iter()
@@ -1225,7 +1218,6 @@ impl HeadlessEngine {
     }
 
     /// `StepClock::now_ms()` 繧貞叙蠕励☆繧九よ悴髢句ｧ九↑繧・0縲・    
-
     fn now_ms(&self) -> i64 {
         use crate::replay::ReplaySession;
         match &self.state.session {
@@ -1237,7 +1229,6 @@ impl HeadlessEngine {
     }
 
     /// 繝翫Λ繝・ぅ繝悶さ繝槭Φ繝峨ｒ繧ｵ繝ｼ繝薙せ繝ｬ繧､繝､繝ｼ縺ｫ蟋碑ｭｲ縺吶ｋ縲・    
-
     async fn handle_narrative_command(
         &self,
         cmd: crate::replay_api::NarrativeCommand,
@@ -1276,7 +1267,6 @@ impl HeadlessEngine {
     }
 
     /// API 繧ｳ繝槭Φ繝峨ｒ蜃ｦ逅・＠縲ヽeplySender 縺ｧ繝ｬ繧ｹ繝昴Φ繧ｹ繧定ｿ斐☆縲・    
-
     async fn handle_command(&mut self, cmd: ApiCommand, reply: crate::replay_api::ReplySender) {
         use crate::replay::ReplayCommand;
 
@@ -1412,7 +1402,6 @@ impl HeadlessEngine {
 // 笏笏 繧ｨ繝ｳ繝医Μ繝ｼ繝昴う繝ｳ繝・笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏
 
 /// headless 繝｢繝ｼ繝峨・繝｡繧､繝ｳ繝ｫ繝ｼ繝励・/// `--headless` 繝輔Λ繧ｰ縺梧ｸ｡縺輔ｌ縺溘→縺・`main()` 縺九ｉ蜻ｼ縺ｰ繧後ｋ縲・
-
 pub async fn run(args: &[String]) {
     let headless_args = match parse_headless_args(args) {
         Ok(a) => a,

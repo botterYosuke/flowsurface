@@ -61,12 +61,6 @@ jobs:
           - name: S2 Persistence
             script: s2_persistence.py
             dev_is_demo: "true"
-          - name: S9 Speed & Step
-            script: s9_speed_step.py
-            dev_is_demo: "true"
-          - name: S27 CycleSpeed no side-effects
-            script: s27_cyclespeed_reset.py
-            dev_is_demo: "true"
           - name: S34 Virtual order basic
             script: s34_virtual_order_basic.py
             dev_is_demo: "true"
@@ -174,12 +168,6 @@ jobs:
         include:
           - name: S1 Basic lifecycle
             script: s1_basic_lifecycle.py
-          - name: S3 Auto-play
-            script: s3_autoplay.py
-          - name: S9 Speed & Step
-            script: s9_speed_step.py
-          - name: S27 CycleSpeed no side-effects
-            script: s27_cyclespeed_reset.py
           - name: S35 Virtual portfolio
             script: s35_virtual_portfolio.py
           - name: S40 Virtual order fill cycle
@@ -198,7 +186,7 @@ jobs:
             script: s11_bar_step_discrete.py
           - name: S12 Pre-start history
             script: s12_pre_start_history.py
-          - name: S13 Step backward quality
+          - name: S13 Rewind-to-start quality
             script: s13_step_backward_quality.py
           - name: S16 Replay resilience
             script: s16_replay_resilience.py
@@ -206,8 +194,6 @@ jobs:
             script: s18_endurance.py
           - name: S26 Ticker change after replay end
             script: s26_ticker_change_after_replay_end.py
-          - name: X2 Buttons
-            script: x2_buttons.py
           - name: S7 Mid-replay pane
             script: s7_mid_replay_pane.py
           - name: S17 Error boundary
@@ -294,9 +280,6 @@ jobs:
           - name: S49 Account info
             script: s49_account_info.py
             dev_is_demo: "true"
-          - name: S14 Autoplay event driven
-            script: s14_autoplay_event_driven.py
-            dev_is_demo: ""
           - name: S20 Tachibana replay resilience
             script: s20_tachibana_replay_resilience.py
             dev_is_demo: ""
