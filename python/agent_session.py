@@ -1,34 +1,24 @@
-﻿"""Agent 蟆ら畑 Replay API・・hase 4b-1・峨・ Python SDK 繝ｩ繝・ヱ繝ｼ縲・
-
-ADR-0001 / `docs/plan/phase4b_agent_replay_api.md` ﾂｧ4 縺ｫ蟇ｾ蠢懊・
-UI 繝ｪ繝｢繧ｳ繝ｳ API `/api/replay/*` 縺ｨ縺ｯ蛻･邨瑚ｷｯ縺ｧ縲∝梛螂醍ｴ・→豎ｺ螳夊ｫ匁ｧ繧呈球菫昴☆繧九・
+"""Agent session API helpers.
 
 Usage::
 
     import flowsurface as fs
 
-    # 繝ｪ繝励Ξ繧､繧ｻ繝・す繝ｧ繝ｳ繧定ｵｷ蜍包ｼ・I 繝ｪ繝｢繧ｳ繝ｳ API 邨檎罰縲￣hase 4b-1 縺ｧ縺ｯ蠢・茨ｼ峨・
-    fs._client.post("/api/replay/toggle", {"start": "2024-01-15 09:00", "end": "2024-01-15 15:30"})
+    fs.replay.toggle(start="2024-01-15 09:00", end="2024-01-15 15:30")
 
-    # agent API 繧貞娼縺上・
-    resp = fs.agent_session.step()
-    for fill in resp.fills:
-        print(fill.client_order_id, fill.fill_price)
-
-    fs.agent_session.place_order(
+    step = fs.agent_session.step()
+    order = fs.agent_session.place_order(
         client_order_id="cli_42",
         ticker={"exchange": "BinanceLinear", "symbol": "BTCUSDT"},
         side="buy",
         qty=0.1,
         order_type={"market": {}},
     )
-
-    # Headless 繝ｩ繝ｳ繧ｿ繧､繝髯仙ｮ・ 莉ｻ諢丞玄髢薙ｒ instant 螳溯｡後・
-    adv = fs.agent_session.advance(until_ms=1_706_659_200_000, stop_on=["fill"])
-
-蛯呵・
-- `session_id` 縺ｯ Phase 4b-1 縺ｧ縺ｯ `"default"` 蝗ｺ螳夲ｼ磯撼 default 縺ｯ 501・峨・
-- `advance` 縺ｯ GUI / headless 縺ｮ荳｡譁ｹ縺ｧ蛻・ｊ菴ｿ縺医ｋ縲・
+    advance = fs.agent_session.advance(
+        until_ms=1_706_659_200_000,
+        stop_on=["fill"],
+        include_fills=True,
+    )
 """
 from __future__ import annotations
 
@@ -68,7 +58,7 @@ class AgentFill:
 
 @dataclass
 class AgentStepResponse:
-    """`POST /api/agent/session/:id/step` 縺ｮ繝ｬ繧ｹ繝昴Φ繧ｹ縲・""
+    """Response from ``POST /api/agent/session/:id/step``."""
 
     clock_ms: int
     reached_end: bool
@@ -89,7 +79,7 @@ class AgentStepResponse:
 
 @dataclass
 class AgentAdvanceResponse:
-    """`POST /api/agent/session/:id/advance` 縺ｮ繝ｬ繧ｹ繝昴Φ繧ｹ縲・""
+    """Response from ``POST /api/agent/session/:id/advance``."""
 
     clock_ms: int
     stopped_reason: StoppedReason
@@ -120,11 +110,7 @@ class AgentAdvanceResponse:
 
 @dataclass
 class AgentOrderResponse:
-    """`POST /api/agent/session/:id/order` 縺ｮ繝ｬ繧ｹ繝昴Φ繧ｹ縲・
-
-    `idempotent_replay` 縺・True 縺ｪ繧牙酔荳繝ｪ繧ｯ繧ｨ繧ｹ繝医・蜀埼√→縺励※謇ｱ繧上ｌ縲∵里蟄・order_id
-    縺瑚ｿ斐＆繧後ｋ・・lan ﾂｧ3.3・峨・
-    """
+    """Response from ``POST /api/agent/session/:id/order``."""
 
     order_id: str
     client_order_id: str
@@ -140,12 +126,7 @@ class AgentOrderResponse:
 
 
 class AgentSessionApi:
-    """Agent 蟆ら畑 Replay API `/api/agent/session/:id/*` 縺ｮ繝ｩ繝・ヱ繝ｼ縲・
-
-    Errors:
-        - ``FlowsurfaceNotRunningError``: 繧｢繝励Μ縺瑚ｵｷ蜍輔＠縺ｦ縺・↑縺・・
-        - ``ApiError``: 髱・2xx 蠢懃ｭ費ｼ・00 / 404 / 409 / 501 / 503・峨・
-    """
+    """Thin wrapper around ``/api/agent/session/:id/*``."""
 
     def __init__(self, client: Client, session_id: str = DEFAULT_SESSION) -> None:
         self._client = client
@@ -156,7 +137,6 @@ class AgentSessionApi:
         return self._session_id
 
     def step(self) -> AgentStepResponse:
-        """`POST /api/agent/session/:id/step` 窶・1 繝舌・騾ｲ陦・+ 蜑ｯ菴懃畑蜷梧｢ｱ縲・""
         path = f"/api/agent/session/{self._session_id}/step"
         resp = self._post_raw(path, body=None)
         return AgentStepResponse.from_dict(resp)
@@ -168,10 +148,6 @@ class AgentSessionApi:
         stop_on: list[StopCondition] | None = None,
         include_fills: bool = False,
     ) -> AgentAdvanceResponse:
-        """`POST /api/agent/session/:id/advance` 窶・莉ｻ諢丞玄髢薙ｒ instant 螳溯｡後・
-
-        `stop_on` / `include_fills` 縺ｯ headless 縺ｧ繧医ｊ螳悟・縺ｪ蜿ｯ閭ｽ諤ｧ縺後≠繧九・
-        """
         path = f"/api/agent/session/{self._session_id}/advance"
         body: dict[str, Any] = {"until_ms": int(until_ms)}
         if stop_on is not None:
@@ -190,16 +166,6 @@ class AgentSessionApi:
         qty: float,
         order_type: dict[str, Any],
     ) -> AgentOrderResponse:
-        """`POST /api/agent/session/:id/order` 窶・莉ｮ諠ｳ豕ｨ譁・ｼ亥・遲画ｧ縺ゅｊ・峨・
-
-        Args:
-            client_order_id: `[A-Za-z0-9_-]{1,64}`縲ょ酔縺倥く繝ｼ縺ｧ蜷後§ body 繧貞・騾√☆繧九→
-                ``idempotent_replay=True`` 縺ｧ譌｢蟄・order_id 繧定ｿ斐☆縲Ｃody 縺檎焚縺ｪ繧九→ 409縲・
-            ticker: ``{"exchange": "...", "symbol": "..."}``縲よｧ矩菴灘ｿ・茨ｼ域枚蟄怜・邨仙粋縺ｯ 400・峨・
-            side: ``"buy"`` / ``"sell"``縲・
-            qty: 豁｣縺ｮ譛蛾剞蛟､縲・
-            order_type: ``{"market": {}}`` 縺ｾ縺溘・ ``{"limit": {"price": X}}``縲ら怐逡･縺ｯ 400縲・
-        """
         path = f"/api/agent/session/{self._session_id}/order"
         body: dict[str, Any] = {
             "client_order_id": client_order_id,
@@ -211,15 +177,12 @@ class AgentSessionApi:
         resp = self._post_raw(path, body=body)
         return AgentOrderResponse.from_dict(resp)
 
-    # 笏笏 菴弱Ξ繧､繝､: _client.post 縺ｯ遨ｺ霎樊嶌繧・None 蛹悶☆繧九◆繧√∥dvance 縺ｪ縺ｩ譏守､ｺ逧・↓
-    #    body 譛臥┌繧貞宛蠕｡縺励◆縺・ｮ・園縺ｯ逶ｴ謗･ httpx 繧貞娼縺上ゅお繝ｩ繝ｼ繝上Φ繝峨Μ繝ｳ繧ｰ縺縺大粋繧上○繧九や楳笏
-
     def _post_raw(self, path: str, *, body: dict[str, Any] | None) -> dict[str, Any]:
         url = f"{self._client.base_url}{path}"
         try:
-            r = httpx.post(url, json=body, timeout=self._client.timeout)
+            response = httpx.post(url, json=body, timeout=self._client.timeout)
         except (httpx.ConnectError, httpx.ConnectTimeout):
             raise FlowsurfaceNotRunningError(self._client.base_url)
-        if not (200 <= r.status_code < 300):
-            raise ApiError(r.status_code, r.text)
-        return r.json()
+        if not (200 <= response.status_code < 300):
+            raise ApiError(response.status_code, response.text)
+        return response.json()

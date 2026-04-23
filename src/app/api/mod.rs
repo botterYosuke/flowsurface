@@ -6,7 +6,9 @@ pub(crate) mod replay;
 
 use crate::{Flowsurface, Message};
 use crate::{connector, replay_api};
+use exchange::{Trade, adapter::StreamKind};
 use iced::Task;
+use std::collections::HashMap;
 
 /// virtual_engine 未初期化時用の空 PortfolioSnapshot を返す。
 fn empty_portfolio_snapshot() -> crate::replay::virtual_exchange::portfolio::PortfolioSnapshot {
@@ -24,6 +26,178 @@ fn serialize_advance_response(resp: &crate::api::advance_request::AdvanceRespons
     serde_json::to_string(resp).unwrap_or_else(|e| {
         log::error!("serialize AdvanceResponse failed: {e}");
         r#"{"error":"serialize failed"}"#.to_string()
+    })
+}
+
+fn dashboard_fill_task(fill: crate::replay::virtual_exchange::FillEvent) -> Task<Message> {
+    Task::done(Message::Dashboard {
+        layout_id: None,
+        event: crate::screen::dashboard::Message::VirtualOrderFilled(fill),
+    })
+}
+
+pub(crate) fn apply_trade_events_to_virtual_engine(
+    virtual_engine: Option<&mut crate::replay::virtual_exchange::VirtualExchangeEngine>,
+    trade_events: Vec<(StreamKind, Vec<Trade>)>,
+    current_time: u64,
+) -> Vec<crate::replay::virtual_exchange::FillEvent> {
+    let Some(virtual_engine) = virtual_engine else {
+        return Vec::new();
+    };
+
+    let mut grouped: Vec<(String, Vec<Trade>)> = Vec::new();
+    let mut grouped_index: HashMap<String, usize> = HashMap::new();
+
+    for (stream, trades) in trade_events {
+        if trades.is_empty() {
+            continue;
+        }
+
+        let ticker = stream.ticker_info().ticker.to_string();
+        if let Some(index) = grouped_index.get(&ticker).copied() {
+            grouped[index].1.extend(trades);
+        } else {
+            grouped_index.insert(ticker.clone(), grouped.len());
+            grouped.push((ticker, trades));
+        }
+    }
+
+    let mut fills = Vec::new();
+    for (ticker, trades) in grouped {
+        fills.extend(virtual_engine.on_tick(&ticker, &trades, current_time));
+    }
+    fills
+}
+
+fn sync_narrative_updates_for_fills(
+    narrative_store: std::sync::Arc<crate::narrative::store::NarrativeStore>,
+    fills: &[crate::replay::virtual_exchange::FillEvent],
+    context: &'static str,
+) -> Vec<String> {
+    if fills.is_empty() {
+        return Vec::new();
+    }
+
+    let fills = fills.to_vec();
+    let thread_name = format!("flowsurface-{context}-narrative-sync");
+    let join_handle = match std::thread::Builder::new()
+        .name(thread_name)
+        .spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(e) => {
+                    log::warn!("{context}: failed to build tokio runtime for narrative sync: {e}");
+                    return Vec::new();
+                }
+            };
+
+            runtime.block_on(async move {
+                let mut updated_narrative_ids = Vec::new();
+                for fill in fills {
+                    match crate::narrative::service::update_outcome_from_fill_returning_ids(
+                        &narrative_store,
+                        &fill.order_id,
+                        fill.fill_price,
+                        crate::api::contract::EpochMs::new(fill.fill_time_ms).saturating_to_i64(),
+                        None,
+                    )
+                    .await
+                    {
+                        Ok(ids) => {
+                            updated_narrative_ids.extend(ids.into_iter().map(|id| id.to_string()));
+                        }
+                        Err(e) => log::warn!(
+                            "{context}: failed to update narrative outcome for {}: {e}",
+                            fill.order_id
+                        ),
+                    }
+                }
+                updated_narrative_ids
+            })
+        }) {
+        Ok(join_handle) => join_handle,
+        Err(e) => {
+            log::warn!("{context}: failed to spawn narrative sync thread: {e}");
+            return Vec::new();
+        }
+    };
+
+    match join_handle.join() {
+        Ok(updated_narrative_ids) => updated_narrative_ids,
+        Err(_) => {
+            log::warn!("{context}: narrative sync thread panicked");
+            Vec::new()
+        }
+    }
+}
+
+fn step_fills_for_agent_state(
+    agent_session_state: &crate::api::agent_session_state::AgentSessionState,
+    fills: &[crate::replay::virtual_exchange::FillEvent],
+) -> Vec<crate::api::step_response::StepFill> {
+    fills
+        .iter()
+        .map(|fill| {
+            let client_order_id = agent_session_state
+                .client_order_id_for(&fill.order_id)
+                .map(|client_order_id| client_order_id.as_str().to_string());
+            crate::api::step_response::StepFill::from_event(fill, client_order_id)
+        })
+        .collect()
+}
+
+fn build_gui_step_observation(
+    replay: &crate::replay::controller::ReplayController,
+    virtual_engine: Option<&crate::replay::virtual_exchange::VirtualExchangeEngine>,
+    limit: usize,
+) -> Option<crate::api::step_response::StepObservation> {
+    let state = replay.get_api_state(limit)?;
+    let mut ohlcv = Vec::new();
+    for (stream, klines) in state.klines {
+        for kline in klines {
+            ohlcv.push(serde_json::json!({
+                "stream": stream,
+                "time": kline.time,
+                "open": kline.open.to_f64(),
+                "high": kline.high.to_f64(),
+                "low": kline.low.to_f64(),
+                "close": kline.close.to_f64(),
+                "volume": kline.volume.total().to_f64(),
+            }));
+        }
+    }
+
+    let recent_trades = state
+        .trades
+        .into_iter()
+        .map(|(stream, trades)| {
+            let items: Vec<serde_json::Value> = trades
+                .into_iter()
+                .map(|trade| {
+                    serde_json::json!({
+                        "time": trade.time,
+                        "price": trade.price.to_f64(),
+                        "qty": trade.qty.to_f64(),
+                        "is_sell": trade.is_sell,
+                    })
+                })
+                .collect();
+            serde_json::json!({ "stream": stream, "trades": items })
+        })
+        .collect();
+
+    let snapshot_price = replay.last_close_price().unwrap_or(0.0);
+    let portfolio = virtual_engine
+        .map(|engine| engine.portfolio_snapshot(snapshot_price))
+        .unwrap_or_else(empty_portfolio_snapshot);
+
+    Some(crate::api::step_response::StepObservation {
+        ohlcv,
+        recent_trades,
+        portfolio,
     })
 }
 
@@ -68,10 +242,7 @@ pub(crate) fn narrative_tasks_for_fill(
         |()| Message::Noop,
     );
 
-    let dashboard_task = Task::done(Message::Dashboard {
-        layout_id: None,
-        event: crate::screen::dashboard::Message::VirtualOrderFilled(fill),
-    });
+    let dashboard_task = dashboard_fill_task(fill);
 
     (narrative_task, dashboard_task)
 }
@@ -197,6 +368,205 @@ impl Flowsurface {
         Task::none()
     }
 
+    fn handle_agent_step_request(&mut self, reply_tx: replay_api::ReplySender) -> Task<Message> {
+        use crate::api::step_response::StepResponse;
+
+        if self.replay.is_loading() {
+            reply_tx.send_status(409, r#"{"error":"session loading"}"#.to_string());
+            return Task::none();
+        }
+
+        let Some(end_time) = self.replay.range_end_ms() else {
+            reply_tx.send_status(
+                404,
+                r#"{"error":"session not started","hint":"toggle to Replay mode and start a range first"}"#
+                    .to_string(),
+            );
+            return Task::none();
+        };
+
+        let Some(session_generation) = self
+            .virtual_engine
+            .as_ref()
+            .map(|ve| ve.session_generation())
+        else {
+            reply_tx.send_status(500, r#"{"error":"virtual engine unavailable"}"#.to_string());
+            return Task::none();
+        };
+        self.agent_session_state
+            .observe_generation(session_generation);
+
+        let main_window_id = self.main_window.id;
+        let Some(layout_id) = self.layout_manager.active_layout_id().map(|l| l.unique) else {
+            reply_tx.send_status(500, r#"{"error":"no active layout"}"#.to_string());
+            return Task::none();
+        };
+
+        let Some((current_time, trade_events)) = ({
+            let Some(dashboard) = self
+                .layout_manager
+                .get_mut(layout_id)
+                .map(|layout| &mut layout.dashboard)
+            else {
+                reply_tx.send_status(500, r#"{"error":"no active dashboard"}"#.to_string());
+                return Task::none();
+            };
+            self.replay.agent_step(dashboard, main_window_id)
+        }) else {
+            reply_tx.send_status(
+                404,
+                r#"{"error":"session not started","hint":"toggle to Replay mode and start a range first"}"#
+                    .to_string(),
+            );
+            return Task::none();
+        };
+
+        let fills = apply_trade_events_to_virtual_engine(
+            self.virtual_engine.as_mut(),
+            trade_events,
+            current_time,
+        );
+        let updated_narrative_ids =
+            sync_narrative_updates_for_fills(self.narrative_store.clone(), &fills, "step");
+        let Some(observation) =
+            build_gui_step_observation(&self.replay, self.virtual_engine.as_ref(), 200)
+        else {
+            reply_tx.send_status(
+                500,
+                r#"{"error":"observation build failed: session not active"}"#.to_string(),
+            );
+            return Task::none();
+        };
+
+        let response = StepResponse::new(
+            current_time,
+            current_time >= end_time,
+            observation,
+            step_fills_for_agent_state(&self.agent_session_state, &fills),
+        )
+        .with_updated_narrative_ids(updated_narrative_ids);
+
+        match response.to_json_string() {
+            Ok(json) => reply_tx.send(json),
+            Err(e) => {
+                reply_tx.send_status(
+                    500,
+                    serde_json::json!({ "error": format!("serialize failed: {e}") }).to_string(),
+                );
+                return Task::none();
+            }
+        }
+
+        let mut tasks = Vec::new();
+        if !fills.is_empty() {
+            tasks.push(self.refresh_narrative_markers_task());
+        }
+        tasks.extend(fills.into_iter().map(dashboard_fill_task));
+        Task::batch(tasks)
+    }
+
+    fn handle_agent_place_order_request(
+        &mut self,
+        request: crate::api::order_request::AgentOrderRequest,
+        reply_tx: replay_api::ReplySender,
+    ) -> Task<Message> {
+        use crate::api::agent_session_state::PlaceOrderOutcome;
+        use crate::api::order_request::{AgentOrderSide, AgentOrderType};
+        use crate::replay::virtual_exchange::{
+            PositionSide, VirtualOrder, VirtualOrderStatus, VirtualOrderType,
+        };
+
+        if self.replay.is_loading() {
+            reply_tx.send_status(409, r#"{"error":"session loading"}"#.to_string());
+            return Task::none();
+        }
+
+        let Some(current_time) = self.replay.current_time_ms() else {
+            reply_tx.send_status(
+                404,
+                r#"{"error":"session not started","hint":"toggle to Replay mode and start a range first"}"#
+                    .to_string(),
+            );
+            return Task::none();
+        };
+
+        let Some(session_generation) = self
+            .virtual_engine
+            .as_ref()
+            .map(|ve| ve.session_generation())
+        else {
+            reply_tx.send_status(500, r#"{"error":"virtual engine unavailable"}"#.to_string());
+            return Task::none();
+        };
+        self.agent_session_state
+            .observe_generation(session_generation);
+
+        let outcome = self.agent_session_state.place_or_replay(
+            request.client_order_id.clone(),
+            request.to_key(),
+            uuid::Uuid::new_v4().to_string(),
+        );
+
+        match outcome {
+            PlaceOrderOutcome::Created { order_id } => {
+                let side = match request.side {
+                    AgentOrderSide::Buy => PositionSide::Long,
+                    AgentOrderSide::Sell => PositionSide::Short,
+                };
+                let order_type = match request.order_type {
+                    AgentOrderType::Market {} => VirtualOrderType::Market,
+                    AgentOrderType::Limit { price } => VirtualOrderType::Limit { price },
+                };
+
+                let Some(virtual_engine) = &mut self.virtual_engine else {
+                    reply_tx
+                        .send_status(500, r#"{"error":"virtual engine unavailable"}"#.to_string());
+                    return Task::none();
+                };
+                virtual_engine.place_order(VirtualOrder {
+                    order_id: order_id.clone(),
+                    ticker: request.ticker.symbol.clone(),
+                    side,
+                    qty: request.qty,
+                    order_type,
+                    placed_time_ms: current_time,
+                    status: VirtualOrderStatus::Pending,
+                });
+
+                reply_tx.send(
+                    serde_json::json!({
+                        "order_id": order_id,
+                        "client_order_id": request.client_order_id.as_str(),
+                        "idempotent_replay": false,
+                    })
+                    .to_string(),
+                );
+            }
+            PlaceOrderOutcome::IdempotentReplay { order_id } => {
+                reply_tx.send(
+                    serde_json::json!({
+                        "order_id": order_id,
+                        "client_order_id": request.client_order_id.as_str(),
+                        "idempotent_replay": true,
+                    })
+                    .to_string(),
+                );
+            }
+            PlaceOrderOutcome::Conflict { existing_order_id } => {
+                reply_tx.send_status(
+                    409,
+                    serde_json::json!({
+                        "error": "client_order_id conflict with different request body",
+                        "existing_order_id": existing_order_id,
+                    })
+                    .to_string(),
+                );
+            }
+        }
+
+        Task::none()
+    }
+
     pub(crate) fn handle_replay_api(
         &mut self,
         command: replay_api::ApiCommand,
@@ -284,6 +654,15 @@ impl Flowsurface {
             }
             ApiCommand::AgentSession(cmd) => {
                 use replay_api::AgentSessionCommand;
+                match cmd.clone() {
+                    AgentSessionCommand::Step => {
+                        return self.handle_agent_step_request(reply_tx);
+                    }
+                    AgentSessionCommand::PlaceOrder { request } => {
+                        return self.handle_agent_place_order_request(*request, reply_tx);
+                    }
+                    _ => {}
+                }
                 match cmd {
                     AgentSessionCommand::Step | AgentSessionCommand::PlaceOrder { .. } => {
                         // Step / PlaceOrder は GUI で未実装。
@@ -317,6 +696,192 @@ impl Flowsurface {
         Task::none()
     }
 
+    fn handle_agent_advance_impl(
+        &mut self,
+        request: crate::api::advance_request::AgentAdvanceRequest,
+        reply_tx: replay_api::ReplySender,
+    ) -> Task<Message> {
+        use crate::api::advance_request::{
+            AdvanceResponse, AdvanceStopCondition, AdvanceStoppedReason,
+        };
+
+        if self.replay.is_loading() {
+            reply_tx.send_status(409, r#"{"error":"session loading"}"#.to_string());
+            return Task::none();
+        }
+
+        let (start_time, end_time) = match (
+            self.replay
+                .current_time_ms()
+                .filter(|_| self.replay.is_active()),
+            self.replay.range_end_ms(),
+        ) {
+            (Some(current), Some(end)) => (current, end),
+            _ => {
+                reply_tx.send_status(
+                    404,
+                    r#"{"error":"session not started","hint":"toggle to Replay mode and start a range first"}"#
+                        .to_string(),
+                );
+                return Task::none();
+            }
+        };
+
+        let Some(session_generation) = self
+            .virtual_engine
+            .as_ref()
+            .map(|ve| ve.session_generation())
+        else {
+            reply_tx.send_status(500, r#"{"error":"virtual engine unavailable"}"#.to_string());
+            return Task::none();
+        };
+        self.agent_session_state
+            .observe_generation(session_generation);
+
+        let until_ms = request.until_ms.as_u64();
+        if until_ms <= start_time {
+            let snapshot_price = self.replay.last_close_price().unwrap_or(0.0);
+            let final_portfolio = self
+                .virtual_engine
+                .as_ref()
+                .map(|ve| ve.portfolio_snapshot(snapshot_price))
+                .unwrap_or_else(empty_portfolio_snapshot);
+            let resp = AdvanceResponse {
+                clock_ms: crate::api::contract::EpochMs::from(start_time),
+                stopped_reason: AdvanceStoppedReason::UntilReached,
+                ticks_advanced: 0,
+                aggregate_fills: 0,
+                aggregate_updated_narratives: 0,
+                fills: request.include_fills.then(Vec::new),
+                final_portfolio,
+            };
+            reply_tx.send(serialize_advance_response(&resp));
+            return Task::none();
+        }
+
+        let main_window_id = self.main_window.id;
+        let Some(layout_id) = self.layout_manager.active_layout_id().map(|l| l.unique) else {
+            reply_tx.send_status(500, r#"{"error":"no active layout"}"#.to_string());
+            return Task::none();
+        };
+
+        let stop_on_fill = request.stop_on.contains(&AdvanceStopCondition::Fill);
+        let stop_on_narrative = request.stop_on.contains(&AdvanceStopCondition::Narrative);
+        let stopped_reason: AdvanceStoppedReason;
+        let mut ticks_advanced = 0_u64;
+        let mut aggregate_fills = 0_usize;
+        let mut aggregate_updated_narratives = 0_usize;
+        let mut collected_fills = Vec::new();
+        let mut dashboard_fill_tasks = Vec::new();
+        let mut needs_marker_refresh = false;
+
+        loop {
+            let before_time = self.replay.current_time_ms().unwrap_or(start_time);
+            if before_time >= end_time {
+                stopped_reason = AdvanceStoppedReason::End;
+                break;
+            }
+            if before_time >= until_ms {
+                stopped_reason = AdvanceStoppedReason::UntilReached;
+                break;
+            }
+
+            let Some((current_time, trade_events)) = ({
+                let Some(dashboard) = self
+                    .layout_manager
+                    .get_mut(layout_id)
+                    .map(|layout| &mut layout.dashboard)
+                else {
+                    reply_tx.send_status(500, r#"{"error":"no active dashboard"}"#.to_string());
+                    return Task::none();
+                };
+                self.replay
+                    .agent_advance_next(dashboard, main_window_id, until_ms)
+            }) else {
+                reply_tx.send_status(404, r#"{"error":"session not active"}"#.to_string());
+                return Task::none();
+            };
+
+            if current_time <= before_time {
+                stopped_reason = if current_time >= end_time {
+                    AdvanceStoppedReason::End
+                } else {
+                    AdvanceStoppedReason::UntilReached
+                };
+                break;
+            }
+
+            ticks_advanced += 1;
+
+            let fills = apply_trade_events_to_virtual_engine(
+                self.virtual_engine.as_mut(),
+                trade_events,
+                current_time,
+            );
+            let updated_narrative_ids =
+                sync_narrative_updates_for_fills(self.narrative_store.clone(), &fills, "advance");
+            let tick_updated_narratives = updated_narrative_ids.len();
+
+            aggregate_fills += fills.len();
+            aggregate_updated_narratives += tick_updated_narratives;
+
+            if !fills.is_empty() {
+                needs_marker_refresh = true;
+            }
+            if request.include_fills {
+                collected_fills.extend(step_fills_for_agent_state(
+                    &self.agent_session_state,
+                    &fills,
+                ));
+            }
+            let tick_had_fills = !fills.is_empty();
+            dashboard_fill_tasks.extend(fills.into_iter().map(dashboard_fill_task));
+
+            if stop_on_fill && tick_had_fills {
+                stopped_reason = AdvanceStoppedReason::Fill;
+                break;
+            }
+            if stop_on_narrative && tick_updated_narratives > 0 {
+                stopped_reason = AdvanceStoppedReason::Narrative;
+                break;
+            }
+            if current_time >= end_time {
+                stopped_reason = AdvanceStoppedReason::End;
+                break;
+            }
+            if current_time >= until_ms {
+                stopped_reason = AdvanceStoppedReason::UntilReached;
+                break;
+            }
+        }
+
+        let clock_ms = self.replay.current_time_ms().unwrap_or(start_time);
+        let snapshot_price = self.replay.last_close_price().unwrap_or(0.0);
+        let final_portfolio = self
+            .virtual_engine
+            .as_ref()
+            .map(|ve| ve.portfolio_snapshot(snapshot_price))
+            .unwrap_or_else(empty_portfolio_snapshot);
+
+        let resp = AdvanceResponse {
+            clock_ms: crate::api::contract::EpochMs::from(clock_ms),
+            stopped_reason,
+            ticks_advanced,
+            aggregate_fills,
+            aggregate_updated_narratives,
+            fills: request.include_fills.then_some(collected_fills),
+            final_portfolio,
+        };
+        reply_tx.send(serialize_advance_response(&resp));
+
+        let mut tasks = Vec::new();
+        if needs_marker_refresh {
+            tasks.push(self.refresh_narrative_markers_task());
+        }
+        tasks.extend(dashboard_fill_tasks);
+        Task::batch(tasks)
+    }
+
     /// `POST /api/agent/session/:id/advance` (GUI mode) の MVP ハンドラ。
     ///
     /// ADR-0001 §3 / §5 に基づく。UI ボタン経由の `AgentMessage::Advance` と同じ
@@ -332,11 +897,14 @@ impl Flowsurface {
     ///
     /// 完全な parity が必要な場合は `--headless` ランタイムを利用すること。
     /// 将来 shared helper を抽出した時点で制約を解消する。
+    #[allow(unreachable_code)]
     pub(crate) fn handle_agent_advance(
         &mut self,
         request: crate::api::advance_request::AgentAdvanceRequest,
         reply_tx: replay_api::ReplySender,
     ) -> Task<Message> {
+        return self.handle_agent_advance_impl(request.clone(), reply_tx.clone());
+
         use crate::api::advance_request::{AdvanceResponse, AdvanceStoppedReason};
 
         // session_id != "default" は routing 段階で 501 NotImplemented に変換済み

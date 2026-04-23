@@ -27,6 +27,7 @@ from .agent_session import (
 )
 from .env import FlowsurfaceEnv
 from .narrative import Narrative, NarrativeAction, NarrativeApi, NarrativeOutcome
+from .replay import ReplayApi
 
 __all__ = [
     "FlowsurfaceEnv",
@@ -36,6 +37,8 @@ __all__ = [
     "NarrativeAction",
     "NarrativeOutcome",
     "NarrativeApi",
+    "replay",
+    "ReplayApi",
     "agent_session",
     "AgentSessionApi",
     "AgentStepResponse",
@@ -49,6 +52,7 @@ __all__ = [
 _client = Client()
 
 narrative: NarrativeApi = NarrativeApi(_client)
+replay: ReplayApi = ReplayApi(_client)
 agent_session: AgentSessionApi = AgentSessionApi(_client)
 
 
@@ -62,7 +66,8 @@ def configure(
         base_url: Base URL of the flowsurface HTTP API.
         timeout:  Request timeout in seconds.
     """
-    global _client, narrative, agent_session
+    global _client, narrative, replay, agent_session
     _client = Client(base_url=base_url, timeout=timeout)
     narrative = NarrativeApi(_client)
+    replay = ReplayApi(_client)
     agent_session = AgentSessionApi(_client)

@@ -60,6 +60,31 @@ impl ReplayController {
         }
     }
 
+    /// Advance by at most one replay tick toward `target_ms`.
+    ///
+    /// Unlike `agent_advance`, this keeps virtual fills aligned with the actual tick time,
+    /// which lets GUI replay match headless fill timestamps and stop conditions.
+    pub fn agent_advance_next(
+        &mut self,
+        dashboard: &mut Dashboard,
+        main_window_id: iced::window::Id,
+        target_ms: u64,
+    ) -> Option<AgentStepOutcome> {
+        let (current, step, end) = match &self.state.session {
+            ReplaySession::Active { clock, .. } => {
+                (clock.now_ms(), clock.step_size_ms(), clock.full_range().end)
+            }
+            _ => return None,
+        };
+
+        let next_ms = cmp::min(current.saturating_add(step), target_ms).min(end);
+        if next_ms > current {
+            Some(self.step_with_dispatch(next_ms, dashboard, main_window_id))
+        } else {
+            Some((current, vec![]))
+        }
+    }
+
     /// `AgentMessage::RewindToStart`（UI の ⏮ ボタン）。clock を `range.start` に戻す。
     ///
     /// ADR-0001 §4 Reset 不変条件のうち本メソッドの責務は次のとおり:

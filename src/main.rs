@@ -54,6 +54,7 @@ struct Flowsurface {
     notifications: Notifications,
     replay: ReplayController,
     virtual_engine: Option<replay::virtual_exchange::VirtualExchangeEngine>,
+    agent_session_state: crate::api::agent_session_state::AgentSessionState,
     narrative_store: std::sync::Arc<narrative::store::NarrativeStore>,
     snapshot_store: narrative::snapshot_store::SnapshotStore,
     is_headless: bool,

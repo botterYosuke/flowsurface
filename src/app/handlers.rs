@@ -351,38 +351,63 @@ impl Flowsurface {
                 if let Some((current_time, trade_events)) =
                     self.replay.agent_step(dashboard, main_window_id)
                 {
-                    if let Some(ve) = &mut self.virtual_engine {
-                        for (stream, trades) in trade_events {
-                            let ticker_str = stream.ticker_info().ticker.to_string();
-                            let fills = ve.on_tick(&ticker_str, &trades, current_time);
-                            if !fills.is_empty() {
-                                needs_marker_refresh = true;
-                            }
-                            virtual_fills.extend(fills);
-                        }
+                    let fills = crate::app::api::apply_trade_events_to_virtual_engine(
+                        self.virtual_engine.as_mut(),
+                        trade_events,
+                        current_time,
+                    );
+                    if !fills.is_empty() {
+                        needs_marker_refresh = true;
                     }
+                    virtual_fills.extend(fills);
                 } else {
                     log::warn!("agent_step called but session is not Active.");
                 }
             }
             crate::replay::AgentMessage::Advance => {
-                if let Some((current_time, trade_events)) = self.replay.agent_advance(
-                    dashboard,
-                    main_window_id,
-                    crate::replay::controller::ReplayController::UI_ADVANCE_CAP_MS,
-                ) {
-                    if let Some(ve) = &mut self.virtual_engine {
-                        for (stream, trades) in trade_events {
-                            let ticker_str = stream.ticker_info().ticker.to_string();
-                            let fills = ve.on_tick(&ticker_str, &trades, current_time);
-                            if !fills.is_empty() {
-                                needs_marker_refresh = true;
-                            }
-                            virtual_fills.extend(fills);
-                        }
-                    }
-                } else {
+                let Some(start_time) = self.replay.current_time_ms() else {
                     log::warn!("agent_advance called but session is not Active.");
+                    return Task::none();
+                };
+                let target_time =
+                    self.replay
+                        .range_end_ms()
+                        .unwrap_or(u64::MAX)
+                        .min(start_time.saturating_add(
+                            crate::replay::controller::ReplayController::UI_ADVANCE_CAP_MS,
+                        ));
+
+                loop {
+                    let before_time = self.replay.current_time_ms().unwrap_or(start_time);
+                    if before_time >= target_time {
+                        break;
+                    }
+
+                    let Some((current_time, trade_events)) =
+                        self.replay
+                            .agent_advance_next(dashboard, main_window_id, target_time)
+                    else {
+                        log::warn!("agent_advance called but session is not Active.");
+                        break;
+                    };
+
+                    if current_time <= before_time {
+                        break;
+                    }
+
+                    let fills = crate::app::api::apply_trade_events_to_virtual_engine(
+                        self.virtual_engine.as_mut(),
+                        trade_events,
+                        current_time,
+                    );
+                    if !fills.is_empty() {
+                        needs_marker_refresh = true;
+                    }
+                    virtual_fills.extend(fills);
+
+                    if current_time >= target_time {
+                        break;
+                    }
                 }
             }
             crate::replay::AgentMessage::RewindToStart => {

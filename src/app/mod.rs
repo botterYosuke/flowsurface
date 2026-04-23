@@ -61,6 +61,7 @@ impl Flowsurface {
             } else {
                 None
             },
+            agent_session_state: crate::api::agent_session_state::AgentSessionState::new(),
             narrative_store: std::sync::Arc::new(
                 crate::narrative::store::NarrativeStore::open_default()
                     .expect("failed to open narrative store"),
