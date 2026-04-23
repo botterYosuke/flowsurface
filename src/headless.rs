@@ -3,7 +3,7 @@
 /// `flowsurface --headless --ticker HyperliquidLinear:BTC --timeframe M1` で起動する。
 /// iced::daemon を一切起動しないため、Python SDK のような外部プログラムから
 /// HTTP API (port 9876) 経由で高速に強化学習ループを回せる。
-use std::{collections::HashSet, time::Instant};
+use std::collections::HashSet;
 
 use exchange::{
     Ticker, TickerInfo, Timeframe,
@@ -260,7 +260,6 @@ impl HeadlessEngine {
                 let should_activate = if let ReplaySession::Loading {
                     pending_count,
                     store,
-                    clock,
                     ..
                 } = &mut self.state.session
                 {
@@ -273,11 +272,7 @@ impl HeadlessEngine {
                         },
                     );
                     *pending_count = pending_count.saturating_sub(1);
-                    if *pending_count == 0 {
-                        true
-                    } else {
-                        false
-                    }
+                    *pending_count == 0
                 } else {
                     false
                 };

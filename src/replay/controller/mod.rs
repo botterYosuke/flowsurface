@@ -6,7 +6,6 @@ use crate::widget::toast::Toast;
 
 use super::{
     ReplayMessage, ReplayMode, ReplayRangeInput, ReplaySession, ReplayState, ReplayStatus,
-    ReplayUserMessage,
 };
 
 pub mod api;
@@ -67,6 +66,11 @@ impl ReplayController {
     /// クロックが存在するかどうか（UI の有効化判定に使用）
     pub fn has_clock(&self) -> bool {
         !matches!(self.state.session, ReplaySession::Idle)
+    }
+
+    /// セッションがアクティブ（再生可能）かどうか
+    pub fn is_active(&self) -> bool {
+        matches!(self.state.session, ReplaySession::Active { .. })
     }
 
     /// 現在の仮想時刻がリプレイ終端に達しているかどうか
@@ -249,14 +253,9 @@ mod tests {
         ctrl
     }
 
-
-
     // ── P2: play_with_range removed ───────────────────────────────────────────
 
     // ── P1: seek_to ───────────────────────────────────────────────────────────
-
-
-
     #[test]
     fn seek_to_positions_clock_at_target() {
         let mut ctrl = make_playing_controller();

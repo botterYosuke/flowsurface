@@ -343,12 +343,30 @@ impl Flowsurface {
             None => return Task::none(),
         };
 
+        let mut virtual_fills = Vec::new();
+        let mut ui_task = Task::none();
+
         match msg {
             crate::replay::AgentMessage::Step => {
-                self.replay.agent_step(dashboard, main_window_id);
+                let (current_time, trade_events) = self.replay.agent_step(dashboard, main_window_id);
+                if let Some(ve) = &mut self.virtual_engine {
+                    for (stream, trades) in trade_events {
+                        let ticker_str = stream.ticker().to_string();
+                        let fills = ve.on_tick(&ticker_str, &trades, current_time);
+                        virtual_fills.extend(fills);
+                    }
+                }
             }
             crate::replay::AgentMessage::Advance => {
-                self.replay.agent_advance(dashboard, main_window_id);
+                const UI_ADVANCE_CAP_MS: u64 = 3_600_000;
+                let (current_time, trade_events) = self.replay.agent_advance(dashboard, main_window_id, UI_ADVANCE_CAP_MS);
+                if let Some(ve) = &mut self.virtual_engine {
+                    for (stream, trades) in trade_events {
+                        let ticker_str = stream.ticker().to_string();
+                        let fills = ve.on_tick(&ticker_str, &trades, current_time);
+                        virtual_fills.extend(fills);
+                    }
+                }
             }
             crate::replay::AgentMessage::RewindToStart => {
                 self.replay.agent_rewind(dashboard, main_window_id);
@@ -356,8 +374,18 @@ impl Flowsurface {
                 if let Some(ve) = &mut self.virtual_engine {
                     ve.reset();
                 }
+                // NOTE: ADR-0001 §4 (Reset 不変条件) の完全な実装（client_order_id map のクリアや
+                // NarrativeState Reset 発火等）はサブフェーズ Q に委譲する。
             }
         }
-        Task::none()
+
+        let fills_tasks = virtual_fills.into_iter().map(|fill| {
+            Task::done(Message::Dashboard {
+                layout_id: None,
+                event: crate::screen::dashboard::Message::VirtualOrderFilled(fill),
+            })
+        });
+
+        Task::batch([ui_task, Task::batch(fills_tasks)])
     }
 }

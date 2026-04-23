@@ -60,7 +60,7 @@ struct Flowsurface {
 }
 
 #[derive(Debug, Clone)]
-enum Message {
+pub(crate) enum Message {
     Login(login::Message),
     Sidebar(dashboard::sidebar::Message),
     MarketWsEvent(exchange::Event),

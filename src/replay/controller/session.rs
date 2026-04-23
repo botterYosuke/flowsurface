@@ -1,14 +1,11 @@
-use std::time::Instant;
-
 use iced::Task;
 
 use crate::screen::dashboard::Dashboard;
 use crate::widget::toast::Toast;
 
 use super::super::{
-    ReplayLoadEvent, ReplayMessage, ReplaySession, ReplayUserMessage, loader, min_timeframe_ms,
-    parse_replay_range,
-    store::{EventStore, LoadedData},
+    ReplayLoadEvent, ReplayMessage, ReplaySession, ReplayUserMessage,
+    store::LoadedData,
 };
 use super::ReplayController;
 
@@ -66,7 +63,6 @@ impl ReplayController {
                 let should_activate = if let ReplaySession::Loading {
                     pending_count,
                     store,
-                    clock,
                     ..
                 } = &mut self.state.session
                 {
@@ -79,11 +75,7 @@ impl ReplayController {
                         },
                     );
                     *pending_count = pending_count.saturating_sub(1);
-                    if *pending_count == 0 {
-                        true
-                    } else {
-                        false
-                    }
+                    *pending_count == 0
                 } else {
                     // Idle: DataLoadFailed 後の遅延 KlinesLoadCompleted → 無視
                     false

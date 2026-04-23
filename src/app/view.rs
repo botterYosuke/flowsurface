@@ -46,11 +46,14 @@ impl Flowsurface {
                     Message::Replay(ReplayMessage::User(ReplayUserMessage::EndTimeChanged(s)))
                 });
 
-            let mut btn_rewind = button(text("⏮").size(11)).padding(padding::all(2).left(6).right(6));
-            let mut btn_step = button(text("▶").size(11)).padding(padding::all(2).left(6).right(6));
-            let mut btn_advance = button(text("⏭").size(11)).padding(padding::all(2).left(6).right(6));
+            let mut btn_rewind = button(text("⏮").size(11))
+                .padding(padding::all(2).left(6).right(6));
+            let mut btn_step = button(text("▶").size(11))
+                .padding(padding::all(2).left(6).right(6));
+            let mut btn_advance = button(text("⏭").size(11))
+                .padding(padding::all(2).left(6).right(6));
 
-            if self.replay.has_clock() {
+            if self.replay.is_active() {
                 btn_rewind = btn_rewind.on_press(Message::Agent(crate::replay::AgentMessage::RewindToStart));
                 btn_step = btn_step.on_press(Message::Agent(crate::replay::AgentMessage::Step));
                 btn_advance = btn_advance.on_press(Message::Agent(crate::replay::AgentMessage::Advance));
