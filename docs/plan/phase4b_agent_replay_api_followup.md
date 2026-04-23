@@ -108,22 +108,22 @@
 
 > **ビルド順序の注意**: O 完遂の瞬間に P 未着手だと `src/app/view.rs` が `speed_label()` / `is_paused()` を参照してコンパイル不能になる。**O と P は 1 PR で束ねる**（先に P-a: UI 参照除去、次に O: StepClock 縮退、最後に P-b: 新 Message 配線）。
 
-- [ ] **P-a（先行）**: `src/app/view.rs` から `speed_label()` / `is_paused()` 参照および `⏸` / 速度ボタン生成ロジックを削除（新 Message 配線はまだしない）
-- [ ] `StepClock` から `speed` / `paused` / `status()` / `pause()` / `resume()` / `cycle_speed()` / `speed_label()` 削除
-- [ ] `now_ms()` と `tick_until(target_ms)` のみに縮退
-- [ ] `format_speed_label` / `cycle_speed_value` / `SPEEDS` 定数削除
-- [ ] `ReplayController::is_paused()` / `ReplayState::is_paused()` 削除
-- [ ] `src/replay/mod.rs` の `is_paused_returns_true_when_clock_is_paused` 等の関連テスト削除
+- [x] **P-a（先行）**: `src/app/view.rs` から `speed_label()` / `is_paused()` 参照および `⏸` / 速度ボタン生成ロジックを削除（新 Message 配線はまだしない）
+- [x] `StepClock` から `speed` / `paused` / `status()` / `pause()` / `resume()` / `cycle_speed()` / `speed_label()` 削除
+- [x] `now_ms()` と `tick_until(target_ms)` のみに縮退
+- [x] `format_speed_label` / `cycle_speed_value` / `SPEEDS` 定数削除
+- [x] `ReplayController::is_paused()` / `ReplayState::is_paused()` 削除
+- [x] `src/replay/mod.rs` の `is_paused_returns_true_when_clock_is_paused` 等の関連テスト削除
 
 ### サブフェーズ P: UI ボタン配線の繋ぎ替え
 
-- [ ] `src/app/view.rs` の `▶` / `⏭` / `⏮` ボタン生成ロジックを書き換え
+- [x] `src/app/view.rs` の `▶` / `⏭` / `⏮` ボタン生成ロジックを書き換え
   - `▶` → `Message::Agent(AgentMessage::Step)` 相当（新規 Message variant）
   - `⏭` → advance 発行。**UI 発火 advance は ADR-0001 §5 に従い `until_ms = min(range.end, now_ms + UI_ADVANCE_CAP_MS)` を渡す。`UI_ADVANCE_CAP_MS` は `3_600_000`（1 時間）で確定**
   - `⏮` → rewind-to-start 発行
-- [ ] `ReplayUserMessage::{Pause, Resume, StepForward, StepBackward, CycleSpeed}` を削除
-- [ ] `AgentMessage` 新設 or 既存 Message へ追加
-- [ ] Windows 実機で手動確認（ボタンクリックで HTTP 経由と同等の動作）→ 結果記録
+- [x] `ReplayUserMessage::{Pause, Resume, StepForward, StepBackward, CycleSpeed}` を削除
+- [x] `AgentMessage` 新設 or 既存 Message へ追加
+- [x] Windows 実機で手動確認（ボタンクリックで HTTP 経由と同等の動作）→ 結果記録
 
 ### サブフェーズ Q: `advance` の GUI ガード削除 + SessionLifecycleEvent 配線
 

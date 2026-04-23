@@ -12,7 +12,7 @@ use std::collections::HashSet;
 use exchange::Kline;
 use exchange::adapter::StreamKind;
 
-use clock::{ClockStatus, StepClock};
+use clock::StepClock;
 use store::EventStore;
 
 /// Replay Start 時刻より前に何本の kline を履歴として読み込むか。
@@ -153,12 +153,17 @@ pub enum ReplayUserMessage {
     ToggleMode,
     StartTimeChanged(String),
     EndTimeChanged(String),
-    Play,
-    Resume,
-    Pause,
-    StepForward,
-    StepBackward,
-    CycleSpeed,
+}
+
+/// Agent セッション操作（UI発火用）
+#[derive(Debug, Clone)]
+pub enum AgentMessage {
+    /// 1バー進める（UIの▶ボタン）
+    Step,
+    /// 任意区間を進める（UIの⏭ボタン）
+    Advance,
+    /// 最初に戻る（UIの⏮ボタン）
+    RewindToStart,
 }
 
 /// 非同期タスク応答（load_klines Task が発火）
@@ -217,22 +222,6 @@ impl ReplayState {
         self.mode == ReplayMode::Replay
     }
 
-    /// 再生中かどうか
-    pub fn is_playing(&self) -> bool {
-        matches!(
-            &self.session,
-            ReplaySession::Active { clock, .. } if clock.status() == ClockStatus::Playing
-        )
-    }
-
-    /// 一時停止中かどうか
-    pub fn is_paused(&self) -> bool {
-        matches!(
-            &self.session,
-            ReplaySession::Active { clock, .. } if clock.status() == ClockStatus::Paused
-        )
-    }
-
     /// ロード中（Waiting 状態）かどうか
     pub fn is_loading(&self) -> bool {
         matches!(self.session, ReplaySession::Loading { .. })
@@ -245,26 +234,6 @@ impl ReplayState {
                 clock.now_ms()
             }
             ReplaySession::Idle => 0,
-        }
-    }
-
-    /// 速度を次の段階にサイクルする (1x → 2x → 5x → 10x → 1x)。
-    pub fn cycle_speed(&mut self) {
-        let clock = match &mut self.session {
-            ReplaySession::Loading { clock, .. } | ReplaySession::Active { clock, .. } => clock,
-            ReplaySession::Idle => return,
-        };
-        let next = cycle_speed_value(clock.speed());
-        clock.set_speed(next);
-    }
-
-    /// 現在の速度ラベル（"1x", "2x", etc.）
-    pub fn speed_label(&self) -> String {
-        match &self.session {
-            ReplaySession::Loading { clock, .. } | ReplaySession::Active { clock, .. } => {
-                format_speed_label(clock.speed())
-            }
-            ReplaySession::Idle => "1x".to_string(),
         }
     }
 
@@ -287,15 +256,16 @@ impl ReplayState {
         match clock {
             Some(clock) => {
                 let range = clock.full_range();
+                let status_str = match &self.session {
+                    ReplaySession::Loading { .. } => "Loading",
+                    ReplaySession::Active { .. } => "Active",
+                    _ => "Idle",
+                };
                 ReplayStatus {
                     mode,
-                    status: Some(match clock.status() {
-                        ClockStatus::Playing => "Playing".to_string(),
-                        ClockStatus::Paused => "Paused".to_string(),
-                        ClockStatus::Waiting => "Loading".to_string(),
-                    }),
+                    status: Some(status_str.to_string()),
                     current_time: Some(clock.now_ms()),
-                    speed: Some(format_speed_label(clock.speed())),
+                    speed: None,
                     start_time: Some(range.start),
                     end_time: Some(range.end),
                     range_start,
@@ -318,26 +288,7 @@ impl ReplayState {
 
 // ── ユーティリティ ────────────────────────────────────────────────────────────
 
-/// 利用可能な再生速度一覧
-const SPEEDS: &[f32] = &[1.0, 2.0, 5.0, 10.0];
 
-/// 次の速度値を返す（1→2→5→10→1 のサイクル）
-pub fn cycle_speed_value(current: f32) -> f32 {
-    let idx = SPEEDS
-        .iter()
-        .position(|&s| (s - current).abs() < 0.01)
-        .unwrap_or(0);
-    SPEEDS[(idx + 1) % SPEEDS.len()]
-}
-
-/// 速度を表示用文字列に変換する
-pub fn format_speed_label(speed: f32) -> String {
-    if speed == speed.floor() {
-        format!("{}x", speed as u32)
-    } else {
-        format!("{:.1}x", speed)
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParseRangeError {
@@ -405,21 +356,7 @@ mod tests {
         base + Duration::from_millis(ms)
     }
 
-    fn make_active_state_playing() -> ReplayState {
-        let base = Instant::now();
-        let mut clock = StepClock::new(0, 100_000, 60_000);
-        clock.play(base);
-        ReplayState {
-            session: ReplaySession::Active {
-                clock,
-                store: EventStore::new(),
-                active_streams: HashSet::new(),
-            },
-            ..Default::default()
-        }
-    }
-
-    fn make_active_state_paused() -> ReplayState {
+    fn make_active_state() -> ReplayState {
         let clock = StepClock::new(0, 100_000, 60_000);
         ReplayState {
             session: ReplaySession::Active {
@@ -483,22 +420,10 @@ mod tests {
 
     // ── ReplaySession 状態表現 ─────────────────────────────────────────
 
-    #[test]
-    fn is_playing_returns_true_when_clock_is_playing() {
-        let state = make_active_state_playing();
-        assert!(state.is_playing());
-    }
-
-    #[test]
-    fn is_paused_returns_true_when_clock_is_paused() {
-        let state = make_active_state_paused();
-        assert!(state.is_paused());
-    }
 
     #[test]
     fn is_loading_returns_true_when_session_is_loading() {
-        let mut clock = StepClock::new(0, 100_000, 60_000);
-        clock.set_waiting();
+        let clock = StepClock::new(0, 100_000, 60_000);
         let state = ReplayState {
             session: ReplaySession::Loading {
                 clock,
@@ -519,11 +444,8 @@ mod tests {
 
     #[test]
     fn current_time_returns_clock_now_ms() {
-        let base = Instant::now();
-        // step_size=1000, step_delay=BASE_STEP_DELAY_MS(100ms) → tick at +100ms fires once → now_ms = 51_000
         let mut clock = StepClock::new(50_000, 100_000, 1_000);
-        clock.play(base);
-        clock.tick(make_instant_plus(base, 100));
+        clock.seek(51_000);
         let state = ReplayState {
             session: ReplaySession::Active {
                 clock,
@@ -535,42 +457,7 @@ mod tests {
         assert_eq!(state.current_time(), 51_000);
     }
 
-    // ── cycle_speed / speed_label ──────────────────────────────────────────
-
-    #[test]
-    fn cycle_speed_rotates_1x_2x_5x_10x_1x() {
-        let mut state = make_active_state_playing();
-
-        assert_eq!(state.speed_label(), "1x");
-        state.cycle_speed();
-        assert_eq!(state.speed_label(), "2x");
-        state.cycle_speed();
-        assert_eq!(state.speed_label(), "5x");
-        state.cycle_speed();
-        assert_eq!(state.speed_label(), "10x");
-        state.cycle_speed();
-        assert_eq!(state.speed_label(), "1x"); // wrap around
-    }
-
-    #[test]
-    fn speed_label_returns_1x_when_no_clock() {
-        let state = ReplayState::default();
-        assert_eq!(state.speed_label(), "1x");
-    }
-
-    // ── format_speed_label ────────────────────────────────────────────────
-
-    #[test]
-    fn format_speed_label_integer_speeds() {
-        assert_eq!(format_speed_label(1.0), "1x");
-        assert_eq!(format_speed_label(2.0), "2x");
-        assert_eq!(format_speed_label(10.0), "10x");
-    }
-
-    #[test]
-    fn format_speed_label_fractional_speed() {
-        assert_eq!(format_speed_label(1.5), "1.5x");
-    }
+    // speed related tests removed due to ADR-0001
 
     // ── to_status() ──────────────────────────────────────────────────────
 
@@ -589,12 +476,9 @@ mod tests {
     }
 
     #[test]
-    fn to_status_replay_playing() {
-        let base = Instant::now();
-        // step_size=500, step_delay=BASE_STEP_DELAY_MS(100ms) → 3 steps at +300ms → now_ms = 1500
+    fn to_status_replay_active() {
         let mut clock = StepClock::new(0, 5_000, 500);
-        clock.play(base);
-        clock.tick(make_instant_plus(base, 300)); // 3 steps: now_ms = 1500
+        clock.seek(1_500);
         let state = ReplayState {
             mode: ReplayMode::Replay,
             session: ReplaySession::Active {
@@ -607,17 +491,16 @@ mod tests {
 
         let status = state.to_status();
         assert_eq!(status.mode, "Replay");
-        assert_eq!(status.status.as_deref(), Some("Playing"));
+        assert_eq!(status.status.as_deref(), Some("Active"));
         assert_eq!(status.current_time, Some(1_500));
-        assert_eq!(status.speed.as_deref(), Some("1x"));
+        assert_eq!(status.speed, None);
         assert_eq!(status.start_time, Some(0));
         assert_eq!(status.end_time, Some(5_000));
     }
 
     #[test]
     fn to_status_replay_loading() {
-        let mut clock = StepClock::new(0, 1_000, 60_000);
-        clock.set_waiting();
+        let clock = StepClock::new(0, 1_000, 60_000);
         let state = ReplayState {
             mode: ReplayMode::Replay,
             session: ReplaySession::Loading {
@@ -631,24 +514,6 @@ mod tests {
 
         let status = state.to_status();
         assert_eq!(status.status.as_deref(), Some("Loading"));
-    }
-
-    #[test]
-    fn to_status_replay_paused() {
-        let clock = StepClock::new(0, 1_000, 60_000);
-        // clock starts Paused by default
-        let state = ReplayState {
-            mode: ReplayMode::Replay,
-            session: ReplaySession::Active {
-                clock,
-                store: EventStore::new(),
-                active_streams: HashSet::new(),
-            },
-            ..Default::default()
-        };
-
-        let status = state.to_status();
-        assert_eq!(status.status.as_deref(), Some("Paused"));
     }
 
     #[test]
@@ -681,11 +546,8 @@ mod tests {
 
     #[test]
     fn to_status_replay_serializes_all_fields() {
-        let base = Instant::now();
-        // step_size=500, step_delay=100ms → 3 steps at +300ms → now_ms=1500
         let mut clock = StepClock::new(0, 5_000, 500);
-        clock.play(base);
-        clock.tick(make_instant_plus(base, 300));
+        clock.seek(1_500);
         let state = ReplayState {
             mode: ReplayMode::Replay,
             session: ReplaySession::Active {
@@ -697,9 +559,9 @@ mod tests {
         };
         let json = serde_json::to_string(&state.to_status()).unwrap();
         assert!(json.contains(r#""mode":"Replay""#));
-        assert!(json.contains(r#""status":"Playing""#));
+        assert!(json.contains(r#""status":"Active""#));
         assert!(json.contains(r#""current_time":1500"#));
-        assert!(json.contains(r#""speed":"1x""#));
+        assert!(!json.contains(r#""speed""#));
     }
 
     // ── parse_replay_range ────────────────────────────────────────────────
@@ -786,22 +648,6 @@ mod tests {
         assert_eq!(result, "2025-04-01 06:00:00");
     }
 
-    // ── cycle_speed_value ─────────────────────────────────────────────────
-
-    #[test]
-    fn cycle_speed_value_1_to_2() {
-        assert!((cycle_speed_value(1.0) - 2.0).abs() < 0.01);
-    }
-
-    #[test]
-    fn cycle_speed_value_10_wraps_to_1() {
-        assert!((cycle_speed_value(10.0) - 1.0).abs() < 0.01);
-    }
-
-    // ── ReplaySession 遷移（P3 vacuous truth ガード） ─────────────────────
-
-    /// Loading セッションで pending_count が 1 のとき、active_streams が空でも
-    /// is_loading() は true であることを確認する（pending_count ベースの O(1) カウンタ）。
     #[test]
     fn loading_with_zero_pending_count_does_not_auto_activate_without_explicit_transition() {
         let clock = StepClock::new(0, 3_600_000, 60_000);
@@ -817,10 +663,6 @@ mod tests {
         assert!(
             state.is_loading(),
             "Loading variant → is_loading() must be true"
-        );
-        assert!(
-            !state.is_playing(),
-            "Loading variant → is_playing() must be false"
         );
     }
 

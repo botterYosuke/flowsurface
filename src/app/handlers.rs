@@ -329,4 +329,35 @@ impl Flowsurface {
         #[cfg(debug_assertions)]
         open_login_window.discard()
     }
+
+    pub(crate) fn handle_agent(&mut self, msg: crate::replay::AgentMessage) -> Task<Message> {
+        let main_window_id = self.main_window.id;
+        
+        let layout_id = match self.layout_manager.active_layout_id() {
+            Some(l) => l.unique,
+            None => return Task::none(),
+        };
+
+        let dashboard = match self.layout_manager.get_mut(layout_id) {
+            Some(l) => &mut l.dashboard,
+            None => return Task::none(),
+        };
+
+        match msg {
+            crate::replay::AgentMessage::Step => {
+                self.replay.agent_step(dashboard, main_window_id);
+            }
+            crate::replay::AgentMessage::Advance => {
+                self.replay.agent_advance(dashboard, main_window_id);
+            }
+            crate::replay::AgentMessage::RewindToStart => {
+                self.replay.agent_rewind(dashboard, main_window_id);
+                // AgentSessionLifecycle::Reset に相当する処理
+                if let Some(ve) = &mut self.virtual_engine {
+                    ve.reset();
+                }
+            }
+        }
+        Task::none()
+    }
 }

@@ -63,7 +63,7 @@ impl ReplayController {
                         return (Task::none(), None);
                     };
 
-                    clock.pause();
+
 
                     if let Some(old) = old_stream {
                         active_streams.remove(&old);

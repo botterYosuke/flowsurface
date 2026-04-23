@@ -17,11 +17,9 @@ impl Flowsurface {
             .size(12);
 
         let is_replay = self.replay.is_replay();
-        let is_playing = self.replay.is_playing();
-
-        let is_highlighted = if is_replay { is_playing } else { true };
+        let is_highlighted = true;
         let mode_label = if is_replay {
-            if is_playing { "● REPLAY" } else { "REPLAY" }
+            "REPLAY"
         } else {
             "● LIVE"
         };
@@ -48,60 +46,23 @@ impl Flowsurface {
                     Message::Replay(ReplayMessage::User(ReplayUserMessage::EndTimeChanged(s)))
                 });
 
-            let is_loading = self.replay.is_loading();
-            let is_playing = self.replay.is_playing();
-            let is_paused = self.replay.is_paused();
-            let has_clock = self.replay.has_clock();
-            let is_at_end = self.replay.is_at_end();
+            let mut btn_rewind = button(text("⏮").size(11)).padding(padding::all(2).left(6).right(6));
+            let mut btn_step = button(text("▶").size(11)).padding(padding::all(2).left(6).right(6));
+            let mut btn_advance = button(text("⏭").size(11)).padding(padding::all(2).left(6).right(6));
 
-            let play_pause_label = if is_playing { "\u{23F8}" } else { "\u{25B6}" };
-            let mut play_pause_btn =
-                button(text(play_pause_label).size(12)).padding(padding::all(2).left(4).right(4));
-            if !is_loading {
-                play_pause_btn = play_pause_btn.on_press(if is_playing {
-                    Message::Replay(ReplayMessage::User(ReplayUserMessage::Pause))
-                } else if is_paused && !is_at_end {
-                    Message::Replay(ReplayMessage::User(ReplayUserMessage::Resume))
-                } else {
-                    Message::Replay(ReplayMessage::User(ReplayUserMessage::Play))
-                });
+            if self.replay.has_clock() {
+                btn_rewind = btn_rewind.on_press(Message::Agent(crate::replay::AgentMessage::RewindToStart));
+                btn_step = btn_step.on_press(Message::Agent(crate::replay::AgentMessage::Step));
+                btn_advance = btn_advance.on_press(Message::Agent(crate::replay::AgentMessage::Advance));
             }
-
-            let mut step_back_btn =
-                button(text("\u{23EE}").size(12)).padding(padding::all(2).left(4).right(4));
-            if has_clock && !is_loading {
-                step_back_btn = step_back_btn.on_press(Message::Replay(ReplayMessage::User(
-                    ReplayUserMessage::StepBackward,
-                )));
-            }
-
-            let mut step_fwd_btn =
-                button(text("\u{23ED}").size(12)).padding(padding::all(2).left(4).right(4));
-            if !is_loading {
-                step_fwd_btn = step_fwd_btn.on_press(Message::Replay(ReplayMessage::User(
-                    ReplayUserMessage::StepForward,
-                )));
-            }
-
-            let speed_label = self.replay.speed_label();
-            let mut speed_btn =
-                button(text(speed_label).size(11)).padding(padding::all(2).left(4).right(4));
-            if has_clock && !is_loading {
-                speed_btn = speed_btn.on_press(Message::Replay(ReplayMessage::User(
-                    ReplayUserMessage::CycleSpeed,
-                )));
-            }
-            let controls = row![step_back_btn, play_pause_btn, step_fwd_btn, speed_btn].spacing(4);
 
             header = header
+                .push(btn_rewind)
+                .push(btn_step)
+                .push(btn_advance)
                 .push(start_input.width(140))
                 .push(text("~").size(11))
-                .push(end_input.width(140))
-                .push(controls);
-
-            if is_loading {
-                header = header.push(text("Loading...").size(11));
-            }
+                .push(end_input.width(140));
         }
 
         header

@@ -300,10 +300,7 @@ impl Flowsurface {
         };
         let was_replay = self.replay.is_replay();
         let time_before = self.replay.current_time_ms();
-        let is_step_forward = matches!(
-            msg,
-            replay::ReplayMessage::User(replay::ReplayUserMessage::StepForward)
-        );
+        let is_step_forward = false; // StepForward was removed in phase 4b
         let (task, toast) = self.replay.handle_message(msg, dashboard, main_window_id);
         let time_after = self.replay.current_time_ms();
         if let Some(t) = toast {

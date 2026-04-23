@@ -30,16 +30,7 @@ impl Flowsurface {
                 reply_tx.send(reply_replay_status(self));
             }
             replay::ReplayCommand::Toggle => {
-                // NOTE: 本サブフェーズ M の責務は `ReplayCommand` variant 整理のみ。
-                // ADR-0001 §3 の最終形（Live→Replay 切替 + body {start,end} で session
-                // 初期化）は後続サブフェーズで実装する。ここでは旧 play/pause 意味論を
-                // 維持し、`ReplayUserMessage::Pause/Resume` はサブフェーズ P で撤去する。
-                let msg = if self.replay.is_playing() {
-                    ReplayMessage::User(ReplayUserMessage::Pause)
-                } else {
-                    ReplayMessage::User(ReplayUserMessage::Resume)
-                };
-                let task = self.handle_replay(msg);
+                let task = self.handle_replay(ReplayMessage::User(ReplayUserMessage::ToggleMode));
                 reply_tx.send(reply_replay_status(self));
                 return task;
             }

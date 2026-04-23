@@ -129,6 +129,7 @@ enum Message {
     SetNarrativeMarkers(Vec<narrative::marker::NarrativeMarker>),
     Replay(ReplayMessage),
     ReplayApi(replay_api::ApiMessage),
+    Agent(replay::AgentMessage),
     /// 完了は気にしないファイア・アンド・フォーゲットの async 結果用。
     /// 例: ナラティブ outcome の非同期更新（失敗時はログで充分）。
     Noop,
@@ -237,6 +238,7 @@ impl Flowsurface {
             Message::ReplayApi((command, reply_tx)) => {
                 return self.handle_replay_api(command, reply_tx);
             }
+            Message::Agent(msg) => return self.handle_agent(msg),
         }
         Task::none()
     }

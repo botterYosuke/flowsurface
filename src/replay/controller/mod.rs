@@ -10,6 +10,7 @@ use super::{
 };
 
 pub mod api;
+mod agent;
 mod session;
 mod tick;
 
@@ -56,17 +57,9 @@ impl ReplayController {
         self.state.is_replay()
     }
 
-    /// 再生中かどうか
-    pub fn is_playing(&self) -> bool {
-        self.state.is_playing()
-    }
 
-    /// 一時停止中かどうか
-    pub fn is_paused(&self) -> bool {
-        self.state.is_paused()
-    }
 
-    /// ロード中（Waiting 状態）かどうか
+    /// ロード中かどうか
     pub fn is_loading(&self) -> bool {
         self.state.is_loading()
     }
@@ -86,10 +79,7 @@ impl ReplayController {
         self.state.mode
     }
 
-    /// 現在の速度ラベル（"1x", "2x", etc.）
-    pub fn speed_label(&self) -> String {
-        self.state.speed_label()
-    }
+
 
     /// 範囲入力の開始テキスト
     pub fn range_input_start(&self) -> &str {
@@ -116,22 +106,7 @@ impl ReplayController {
     /// ADR-0001 §3: `ReplayCommand::Play` variant は削除されたため直接の caller はないが、
     /// 後続サブフェーズで `POST /api/replay/toggle`（Live→Replay + body `{start, end}`）
     /// と `POST /api/agent/session/:id/rewind-to-start` の session 初期化経路に再利用する。
-    #[allow(dead_code)]
-    pub fn play_with_range(
-        &mut self,
-        start: String,
-        end: String,
-        dashboard: &mut Dashboard,
-        main_window_id: iced::window::Id,
-    ) -> (Task<ReplayMessage>, Option<Toast>) {
-        self.state.range_input.start = start;
-        self.state.range_input.end = end;
-        self.handle_message(
-            ReplayMessage::User(ReplayUserMessage::Play),
-            dashboard,
-            main_window_id,
-        )
-    }
+
 
     /// 現在の状態を API レスポンス用に変換
     pub fn to_status(&self) -> ReplayStatus {
@@ -168,12 +143,10 @@ impl ReplayController {
 
 impl ReplayController {
     /// Pause → Seek → ChartReset → KlineInject を一括実行する。
-    /// StepForward/StepBackward (Playing 時)、StepBackward (Paused 時)、
-    /// および handle_range_input_change から呼ぶ。
+    /// handle_range_input_change 等から呼ぶ。
     ///
     /// # 対象外
     /// - `ReloadKlineStream`: reset_charts → ロード → 注入の順序が異なる
-    /// - `StepForward` (Paused 時): pause も chart reset も不要（前進のみ）
     fn seek_to(
         &mut self,
         target_ms: u64,
@@ -182,7 +155,6 @@ impl ReplayController {
     ) {
         match &mut self.state.session {
             ReplaySession::Loading { clock, .. } | ReplaySession::Active { clock, .. } => {
-                clock.pause();
                 clock.seek(target_ms);
             }
             ReplaySession::Idle => {}
@@ -232,7 +204,7 @@ mod tests {
     use iced::window;
 
     use super::*;
-    use crate::replay::clock::{ClockStatus, StepClock};
+    use crate::replay::clock::StepClock;
     use crate::replay::{ReplayLoadEvent, ReplaySession, ReplayUserMessage};
     use crate::screen::dashboard::Dashboard;
 
@@ -242,8 +214,7 @@ mod tests {
 
     fn make_playing_controller() -> ReplayController {
         let mut ctrl = ReplayController::default();
-        let mut clock = StepClock::new(START_MS, END_MS, STEP_MS);
-        clock.play(Instant::now());
+        let clock = StepClock::new(START_MS, END_MS, STEP_MS);
         ctrl.state.session = ReplaySession::Active {
             clock,
             store: crate::replay::store::EventStore::new(),
@@ -278,350 +249,13 @@ mod tests {
         ctrl
     }
 
-    // ── B-3: Playing 中に ⏮ を押したときの挙動 ────────────────────────────────
 
-    #[test]
-    fn step_backward_while_playing_pauses_clock() {
-        let mut ctrl = make_playing_controller();
-        let mut dashboard = Dashboard::default();
-        let main_window = window::Id::unique();
 
-        let _ = ctrl.handle_message(
-            ReplayMessage::User(ReplayUserMessage::StepBackward),
-            &mut dashboard,
-            main_window,
-        );
-
-        assert_eq!(
-            get_active_clock(&ctrl).status(),
-            ClockStatus::Paused,
-            "StepBackward while Playing must pause the clock"
-        );
-    }
-
-    #[test]
-    fn step_backward_while_playing_seeks_to_range_start() {
-        let mut ctrl = make_playing_controller();
-
-        {
-            let clock = get_active_clock_mut(&mut ctrl);
-            let base = Instant::now();
-            clock.tick(base + Duration::from_millis(200));
-        }
-        assert_ne!(
-            ctrl.state.current_time(),
-            START_MS,
-            "pre-condition: clock must have advanced past start"
-        );
-
-        let mut dashboard = Dashboard::default();
-        let main_window = window::Id::unique();
-
-        let _ = ctrl.handle_message(
-            ReplayMessage::User(ReplayUserMessage::StepBackward),
-            &mut dashboard,
-            main_window,
-        );
-
-        assert_eq!(
-            ctrl.state.current_time(),
-            START_MS,
-            "StepBackward while Playing must seek current_time back to range.start"
-        );
-    }
-
-    #[test]
-    fn step_backward_while_playing_preserves_range_end() {
-        let mut ctrl = make_playing_controller();
-        let mut dashboard = Dashboard::default();
-        let main_window = window::Id::unique();
-
-        let _ = ctrl.handle_message(
-            ReplayMessage::User(ReplayUserMessage::StepBackward),
-            &mut dashboard,
-            main_window,
-        );
-
-        assert_eq!(
-            get_active_clock(&ctrl).full_range().end,
-            END_MS,
-            "StepBackward while Playing must not modify range.end"
-        );
-    }
-
-    // ── StepForward while Playing ──────────────────────────────────────────────
-
-    #[test]
-    fn step_forward_while_playing_pauses_clock() {
-        let mut ctrl = make_playing_controller();
-        let mut dashboard = Dashboard::default();
-        let main_window = window::Id::unique();
-
-        let _ = ctrl.handle_message(
-            ReplayMessage::User(ReplayUserMessage::StepForward),
-            &mut dashboard,
-            main_window,
-        );
-
-        assert_eq!(
-            get_active_clock(&ctrl).status(),
-            ClockStatus::Paused,
-            "StepForward while Playing must pause the clock"
-        );
-    }
-
-    #[test]
-    fn step_forward_while_playing_seeks_to_range_end() {
-        let mut ctrl = make_playing_controller();
-        let mut dashboard = Dashboard::default();
-        let main_window = window::Id::unique();
-
-        let _ = ctrl.handle_message(
-            ReplayMessage::User(ReplayUserMessage::StepForward),
-            &mut dashboard,
-            main_window,
-        );
-
-        assert_eq!(
-            ctrl.state.current_time(),
-            END_MS,
-            "StepForward while Playing must seek current_time to range.end"
-        );
-    }
-
-    #[test]
-    fn step_forward_while_playing_preserves_range_end() {
-        let mut ctrl = make_playing_controller();
-        let mut dashboard = Dashboard::default();
-        let main_window = window::Id::unique();
-
-        let _ = ctrl.handle_message(
-            ReplayMessage::User(ReplayUserMessage::StepForward),
-            &mut dashboard,
-            main_window,
-        );
-
-        assert_eq!(
-            get_active_clock(&ctrl).full_range().end,
-            END_MS,
-            "StepForward while Playing must not modify range.end"
-        );
-    }
-
-    // ── CycleSpeed ────────────────────────────────────────────────────────────
-
-    #[test]
-    fn cycle_speed_while_playing_keeps_status() {
-        let mut ctrl = make_playing_controller();
-        let mut dashboard = Dashboard::default();
-        let main_window = window::Id::unique();
-
-        let _ = ctrl.handle_message(
-            ReplayMessage::User(ReplayUserMessage::CycleSpeed),
-            &mut dashboard,
-            main_window,
-        );
-
-        assert_eq!(
-            get_active_clock(&ctrl).status(),
-            ClockStatus::Playing,
-            "CycleSpeed must not change ClockStatus — speed only"
-        );
-    }
-
-    #[test]
-    fn cycle_speed_while_playing_does_not_seek() {
-        let mut ctrl = make_playing_controller();
-
-        {
-            let clock = get_active_clock_mut(&mut ctrl);
-            let base = Instant::now();
-            clock.tick(base + Duration::from_millis(200));
-        }
-        let time_before = ctrl.state.current_time();
-
-        let mut dashboard = Dashboard::default();
-        let main_window = window::Id::unique();
-
-        let _ = ctrl.handle_message(
-            ReplayMessage::User(ReplayUserMessage::CycleSpeed),
-            &mut dashboard,
-            main_window,
-        );
-
-        assert_eq!(
-            ctrl.state.current_time(),
-            time_before,
-            "CycleSpeed must not seek — current_time unchanged"
-        );
-    }
-
-    #[test]
-    fn cycle_speed_while_paused_does_not_seek() {
-        let mut ctrl = make_mid_range_paused_controller();
-        let time_before = ctrl.state.current_time();
-
-        let mut dashboard = Dashboard::default();
-        let main_window = window::Id::unique();
-
-        let _ = ctrl.handle_message(
-            ReplayMessage::User(ReplayUserMessage::CycleSpeed),
-            &mut dashboard,
-            main_window,
-        );
-
-        assert_eq!(
-            ctrl.state.current_time(),
-            time_before,
-            "CycleSpeed while Paused must not seek"
-        );
-    }
-
-    // ── StartTimeChanged / EndTimeChanged while clock active ──────────────────
-
-    #[test]
-    fn start_time_changed_while_playing_pauses_clock() {
-        let mut ctrl = make_playing_controller();
-        let mut dashboard = Dashboard::default();
-        let main_window = window::Id::unique();
-
-        let _ = ctrl.handle_message(
-            ReplayMessage::User(ReplayUserMessage::StartTimeChanged(
-                "2025-01-01 00:00".to_string(),
-            )),
-            &mut dashboard,
-            main_window,
-        );
-
-        assert_eq!(
-            get_active_clock(&ctrl).status(),
-            ClockStatus::Paused,
-            "StartTimeChanged while Playing must pause the clock"
-        );
-    }
-
-    #[test]
-    fn start_time_changed_while_playing_seeks_to_range_start() {
-        let mut ctrl = make_playing_controller();
-
-        {
-            let clock = get_active_clock_mut(&mut ctrl);
-            let base = Instant::now();
-            clock.tick(base + Duration::from_millis(200));
-        }
-
-        let mut dashboard = Dashboard::default();
-        let main_window = window::Id::unique();
-
-        let _ = ctrl.handle_message(
-            ReplayMessage::User(ReplayUserMessage::StartTimeChanged(
-                "2025-01-01 00:00".to_string(),
-            )),
-            &mut dashboard,
-            main_window,
-        );
-
-        assert_eq!(
-            ctrl.state.current_time(),
-            START_MS,
-            "StartTimeChanged while Playing must seek current_time back to range.start"
-        );
-    }
-
-    #[test]
-    fn end_time_changed_while_playing_pauses_clock() {
-        let mut ctrl = make_playing_controller();
-        let mut dashboard = Dashboard::default();
-        let main_window = window::Id::unique();
-
-        let _ = ctrl.handle_message(
-            ReplayMessage::User(ReplayUserMessage::EndTimeChanged(
-                "2025-12-31 00:00".to_string(),
-            )),
-            &mut dashboard,
-            main_window,
-        );
-
-        assert_eq!(
-            get_active_clock(&ctrl).status(),
-            ClockStatus::Paused,
-            "EndTimeChanged while Playing must pause the clock"
-        );
-    }
-
-    // ── P2: play_with_range ───────────────────────────────────────────────────
-
-    #[test]
-    fn play_with_range_updates_range_input() {
-        let mut ctrl = ReplayController::default();
-        ctrl.state.mode = ReplayMode::Replay;
-        let mut dashboard = Dashboard::default();
-        let win = window::Id::unique();
-
-        let _ = ctrl.play_with_range(
-            "2025-01-01 00:00".to_string(),
-            "2025-01-02 00:00".to_string(),
-            &mut dashboard,
-            win,
-        );
-
-        assert_eq!(ctrl.state.range_input.start, "2025-01-01 00:00");
-        assert_eq!(ctrl.state.range_input.end, "2025-01-02 00:00");
-    }
-
-    #[test]
-    fn play_with_range_equivalent_to_set_then_play() {
-        let make = || {
-            let mut ctrl = ReplayController::default();
-            ctrl.state.mode = ReplayMode::Replay;
-            ctrl
-        };
-
-        let mut ctrl_combined = make();
-        let mut ctrl_separate = make();
-        let mut dash1 = Dashboard::default();
-        let mut dash2 = Dashboard::default();
-        let win = window::Id::unique();
-
-        let _ = ctrl_combined.play_with_range(
-            "2025-01-01 00:00".to_string(),
-            "2025-01-02 00:00".to_string(),
-            &mut dash1,
-            win,
-        );
-
-        ctrl_separate.set_range_start("2025-01-01 00:00".to_string());
-        ctrl_separate.set_range_end("2025-01-02 00:00".to_string());
-        let _ = ctrl_separate.handle_message(
-            ReplayMessage::User(ReplayUserMessage::Play),
-            &mut dash2,
-            win,
-        );
-
-        assert_eq!(
-            ctrl_combined.state.range_input.start,
-            ctrl_separate.state.range_input.start,
-        );
-        assert_eq!(
-            ctrl_combined.state.range_input.end,
-            ctrl_separate.state.range_input.end,
-        );
-    }
+    // ── P2: play_with_range removed ───────────────────────────────────────────
 
     // ── P1: seek_to ───────────────────────────────────────────────────────────
 
-    #[test]
-    fn seek_to_pauses_clock() {
-        let mut ctrl = make_playing_controller();
-        let mut dashboard = Dashboard::default();
-        let win = window::Id::unique();
-        ctrl.seek_to(END_MS, &mut dashboard, win);
-        assert_eq!(
-            get_active_clock(&ctrl).status(),
-            ClockStatus::Paused,
-            "seek_to must pause the clock"
-        );
-    }
+
 
     #[test]
     fn seek_to_positions_clock_at_target() {
@@ -646,26 +280,7 @@ mod tests {
 
     // ── P3: ReplaySession State Machine ──────────────────────────────────────
 
-    #[test]
-    fn session_is_active_after_play_with_no_klines() {
-        let mut ctrl = ReplayController::default();
-        ctrl.state.mode = ReplayMode::Replay;
-        ctrl.state.range_input.start = "2025-01-01 00:00".to_string();
-        ctrl.state.range_input.end = "2025-01-02 00:00".to_string();
-        let mut dashboard = Dashboard::default();
-        let win = window::Id::unique();
 
-        let _ = ctrl.handle_message(
-            ReplayMessage::User(ReplayUserMessage::Play),
-            &mut dashboard,
-            win,
-        );
-
-        assert!(
-            matches!(ctrl.state.session, ReplaySession::Active { .. }),
-            "kline なし → 即 Active に遷移するはず"
-        );
-    }
 
     #[test]
     fn session_transitions_to_idle_on_data_load_failed() {
@@ -726,8 +341,6 @@ mod tests {
     fn session_idle_all_status_false() {
         let ctrl = ReplayController::default();
         assert!(!ctrl.is_loading());
-        assert!(!ctrl.is_playing());
-        assert!(!ctrl.is_paused());
         assert!(!ctrl.has_clock());
     }
 
@@ -795,8 +408,7 @@ mod tests {
         use std::collections::HashSet;
 
         let mut ctrl = ReplayController::default();
-        let mut clock = StepClock::new(0, 100_000, 60_000);
-        clock.set_waiting();
+        let clock = StepClock::new(0, 100_000, 60_000);
         ctrl.state.session = ReplaySession::Loading {
             clock,
             pending_count: 1,
