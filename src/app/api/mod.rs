@@ -136,6 +136,12 @@ impl Flowsurface {
                         // 完全サポートは別サブフェーズで shared helper を抽出する際に追加。
                         return self.handle_agent_advance(session_id, *request, reply_tx);
                     }
+                    AgentSessionCommand::RewindToStart {
+                        session_id,
+                        init_range,
+                    } => {
+                        return self.handle_agent_rewind(session_id, init_range, reply_tx);
+                    }
                 }
             }
             #[cfg(debug_assertions)]
@@ -189,31 +195,36 @@ impl Flowsurface {
             return Task::none();
         }
 
-        // session 状態チェック（headless と同じルール）
-        let (start_time, end_time) = match self.replay.current_time_ms() {
-            Some(t) => {
-                let end = self.replay.range_end_ms().unwrap_or(t);
-                (t, end)
-            }
-            None => {
-                if self.replay.is_loading() {
-                    reply_tx.send_status(503, r#"{"error":"session loading"}"#.to_string());
-                } else {
-                    reply_tx.send_status(
-                        404,
-                        r#"{"error":"session not started","hint":"toggle to Replay mode and start a range first"}"#
-                            .to_string(),
-                    );
-                }
+        // session 状態チェック（headless と同じルール）。
+        // Loading は 503、Idle は 404、Active のみ進行する。
+        // `current_time_ms()` は Loading でも Some を返すため、is_loading を先に判定する。
+        if self.replay.is_loading() {
+            reply_tx.send_status(503, r#"{"error":"session loading"}"#.to_string());
+            return Task::none();
+        }
+        let (start_time, end_time) = match (
+            self.replay
+                .is_active()
+                .then(|| self.replay.current_time_ms())
+                .flatten(),
+            self.replay.range_end_ms(),
+        ) {
+            (Some(t), Some(end)) => (t, end),
+            _ => {
+                reply_tx.send_status(
+                    404,
+                    r#"{"error":"session not started","hint":"toggle to Replay mode and start a range first"}"#
+                        .to_string(),
+                );
                 return Task::none();
             }
         };
 
         let until_ms = request.until_ms.as_u64();
-        let snapshot_price = self.replay.last_close_price().unwrap_or(0.0);
 
         if until_ms <= start_time {
-            // 既に until_ms 到達済 — 進行 0 で成功を返す
+            // 既に until_ms 到達済 — 進行 0 で成功を返す（advance 前の価格で OK）。
+            let snapshot_price = self.replay.last_close_price().unwrap_or(0.0);
             let portfolio = self
                 .virtual_engine
                 .as_ref()
@@ -315,12 +326,17 @@ impl Flowsurface {
             }
         }
 
-        // ticks_advanced は「進行した bar 数」。step_size_ms を基準に算出する。
+        // ticks_advanced は「進行した bar 数」。
+        // `tick_until` は target が range.end の場合のみ非整列を許すため、末端 partial
+        // step を 1 bar としてカウントできるよう ceil 除算を使う。
         let ticks_advanced = self
             .replay
             .step_size_ms()
             .filter(|&s| s > 0)
-            .map(|s| (current_time.saturating_sub(start_time)) / s)
+            .map(|s| {
+                let delta = current_time.saturating_sub(start_time);
+                delta.saturating_add(s - 1) / s
+            })
             .unwrap_or(0);
 
         let stopped_reason = if current_time >= end_time {
@@ -329,6 +345,9 @@ impl Flowsurface {
             AdvanceStoppedReason::UntilReached
         };
 
+        // advance 後の最新 close 価格で portfolio を評価する。
+        // advance 前の snapshot_price を使うと unrealized_pnl / total_equity がズレる。
+        let snapshot_price = self.replay.last_close_price().unwrap_or(0.0);
         let final_portfolio = self
             .virtual_engine
             .as_ref()
@@ -353,6 +372,91 @@ impl Flowsurface {
         tasks.extend(narrative_tasks);
         tasks.extend(fill_msgs);
         Task::batch(tasks)
+    }
+
+    /// `POST /api/agent/session/:id/rewind-to-start` (GUI mode) の MVP ハンドラ。
+    ///
+    /// ADR-0001 §4 に基づく:
+    /// - 初期化済み (`Active`): 現 session を保持したまま clock を range.start に戻す。
+    ///   body `{start, end}` が付いていても無視する。
+    /// - Loading 中: 409 Conflict。
+    /// - 未初期化 (`Idle`) + body あり: 新 session 初期化は未実装で 501 を返す
+    ///   (shared helper 抽出時に実装予定)。UI 経由では toggle → モード切替で初期化できる。
+    /// - 未初期化 + body なし: 400 `body required for init`。
+    pub(crate) fn handle_agent_rewind(
+        &mut self,
+        session_id: String,
+        init_range: Option<(String, String)>,
+        reply_tx: replay_api::ReplySender,
+    ) -> Task<Message> {
+        if session_id != "default" {
+            reply_tx.send_status(
+                501,
+                r#"{"error":"multi-session not yet implemented; use 'default' until Phase 4c"}"#
+                    .to_string(),
+            );
+            return Task::none();
+        }
+
+        // Loading は 409（ADR-0001 §6 原則: 状態遷移系コマンドを Loading 中はキューイング
+        // せず拒否する）。
+        if self.replay.is_loading() {
+            reply_tx.send_status(409, r#"{"error":"session loading"}"#.to_string());
+            return Task::none();
+        }
+
+        if !self.replay.is_active() {
+            // Idle — 初期化経路は GUI で未実装。UI の toggle + mode 切替で対応すること。
+            if init_range.is_some() {
+                reply_tx.send_status(
+                    501,
+                    r#"{"error":"rewind-with-init not yet supported in GUI mode; use headless or toggle to Replay mode first"}"#
+                        .to_string(),
+                );
+            } else {
+                reply_tx.send_status(
+                    400,
+                    r#"{"error":"body required for init (session not initialized)"}"#.to_string(),
+                );
+            }
+            return Task::none();
+        }
+
+        // Active: clock 巻き戻し + SessionLifecycleEvent::Reset 発火
+        // (ADR-0001 §4 Reset 不変条件の 8 項目は handle_agent::RewindToStart と同じ手順で実装)。
+        let main_window_id = self.main_window.id;
+        let Some(layout_id) = self.layout_manager.active_layout_id().map(|l| l.unique) else {
+            reply_tx.send_status(500, r#"{"error":"no active layout"}"#.to_string());
+            return Task::none();
+        };
+        let Some(dashboard) = self
+            .layout_manager
+            .get_mut(layout_id)
+            .map(|l| &mut l.dashboard)
+        else {
+            reply_tx.send_status(500, r#"{"error":"no active dashboard"}"#.to_string());
+            return Task::none();
+        };
+        self.replay.agent_rewind(dashboard, main_window_id);
+        if let Some(ve) = &mut self.virtual_engine {
+            ve.reset();
+            ve.mark_session_reset();
+        }
+
+        let clock_ms = self.replay.current_time_ms().unwrap_or(0);
+        let snapshot_price = self.replay.last_close_price().unwrap_or(0.0);
+        let final_portfolio = self
+            .virtual_engine
+            .as_ref()
+            .map(|ve| ve.portfolio_snapshot(snapshot_price))
+            .unwrap_or_else(empty_portfolio_snapshot);
+        let body = serde_json::json!({
+            "ok": true,
+            "clock_ms": clock_ms,
+            "final_portfolio": final_portfolio,
+        });
+        reply_tx.send(body.to_string());
+        Task::none()
     }
 
     pub(crate) fn handle_auth_api(&self, cmd: replay_api::AuthCommand) -> String {

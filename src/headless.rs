@@ -607,6 +607,61 @@ impl HeadlessEngine {
         }
     }
 
+    /// `POST /api/agent/session/default/rewind-to-start` を処理する。
+    ///
+    /// ADR-0001 §4 / §6 に基づく:
+    /// - Active + body 有/無: clock を range.start に戻し、`VirtualExchange::reset()` +
+    ///   `mark_session_reset()` を発火する（body は無視される）。
+    /// - Loading: 409 Conflict。
+    /// - Idle + body: `play(start, end)` を呼び出して session を新規初期化する
+    ///   (ADR-0001 §4 「未初期化時の初期化経路」)。
+    /// - Idle + body なし: 400 Bad Request。
+    async fn agent_session_rewind(
+        &mut self,
+        init_range: Option<(String, String)>,
+    ) -> (u16, String) {
+        use crate::replay::ReplaySession;
+
+        match &self.state.session {
+            ReplaySession::Loading { .. } => {
+                return (409, r#"{"error":"session loading"}"#.to_string());
+            }
+            ReplaySession::Idle => {
+                // Idle + body → 初期化。body なし → 400。
+                let Some((start, end)) = init_range else {
+                    return (
+                        400,
+                        r#"{"error":"body required for init (session not initialized)"}"#
+                            .to_string(),
+                    );
+                };
+                return match self.play(&start, &end) {
+                    Ok(json) => (200, json),
+                    Err(e) => (400, serde_json::json!({"error": e}).to_string()),
+                };
+            }
+            ReplaySession::Active { .. } => {}
+        }
+
+        // Active: clock seek + SessionLifecycleEvent::Reset
+        if let ReplaySession::Active { clock, .. } = &mut self.state.session {
+            let start = clock.full_range().start;
+            clock.seek(start);
+        }
+        self.virtual_engine.reset();
+        self.virtual_engine.mark_session_reset();
+
+        let clock_ms = self.state.current_time();
+        let snapshot_price = self.last_close_price().unwrap_or(0.0);
+        let final_portfolio = self.virtual_engine.portfolio_snapshot(snapshot_price);
+        let body = serde_json::json!({
+            "ok": true,
+            "clock_ms": clock_ms,
+            "final_portfolio": final_portfolio,
+        });
+        (200, body.to_string())
+    }
+
     /// `POST /api/agent/session/default/order` を処理する（Phase 4b-1 サブフェーズ E）。
     ///
     /// ADR-0001 / phase4b_agent_replay_api.md §3.3, §4.4, §4.5 に基づく。
@@ -1287,6 +1342,13 @@ impl HeadlessEngine {
                 request,
             }) => {
                 let (status, body) = self.agent_session_advance(*request).await;
+                reply.send_status(status, body);
+            }
+            ApiCommand::AgentSession(crate::replay_api::AgentSessionCommand::RewindToStart {
+                session_id: _,
+                init_range,
+            }) => {
+                let (status, body) = self.agent_session_rewind(init_range).await;
                 reply.send_status(status, body);
             }
             // headless で未対応のコマンドは 501 を返す

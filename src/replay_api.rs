@@ -86,10 +86,18 @@ pub enum AgentSessionCommand {
         request: Box<crate::api::order_request::AgentOrderRequest>,
     },
     /// `POST /api/agent/session/:id/advance`: 任意区間を instant 実行。
-    /// Headless ランタイムのみ受理（GUI では 400 で拒否）。
+    /// ADR-0001 §3: GUI / Headless 両方で受理（旧 GUI 400 ガードは Q で撤廃済）。
     Advance {
         session_id: String,
         request: Box<crate::api::advance_request::AgentAdvanceRequest>,
+    },
+    /// `POST /api/agent/session/:id/rewind-to-start`: 先頭巻き戻し (ADR-0001 §4)。
+    /// body なし → 現 session の clock を range.start に戻す（未初期化時は 400）。
+    /// body `{start, end}` → 未初期化時のみ新 session 初期化（初期化済時は無視）。
+    RewindToStart {
+        session_id: String,
+        /// `{start, end}` ボディが渡された場合のみ値が入る（初期化経路）。
+        init_range: Option<(String, String)>,
     },
 }
 
@@ -551,6 +559,30 @@ fn parse_agent_session_advance(path: &str, body: &str) -> Result<ApiCommand, Rou
     }))
 }
 
+fn parse_agent_session_rewind(path: &str, body: &str) -> Result<ApiCommand, RouteError> {
+    let session_id = extract_agent_session_id(path, "rewind-to-start")?;
+    if session_id != "default" {
+        return Err(RouteError::NotImplemented);
+    }
+    // body は任意。空なら「初期化済 session の rewind」、`{start, end}` 付きなら
+    // 「未初期化時の初期化経路」を意図する（ADR-0001 §4）。
+    let init_range = if body.trim().is_empty() {
+        None
+    } else {
+        let start = body_str_field(body, "start")
+            .map_err(|_| RouteError::BadRequestWithMessage("start field required".to_string()))?;
+        let end = body_str_field(body, "end")
+            .map_err(|_| RouteError::BadRequestWithMessage("end field required".to_string()))?;
+        Some((start, end))
+    };
+    Ok(ApiCommand::AgentSession(
+        AgentSessionCommand::RewindToStart {
+            session_id: session_id.to_string(),
+            init_range,
+        },
+    ))
+}
+
 fn parse_agent_session_order(path: &str, body: &str) -> Result<ApiCommand, RouteError> {
     let session_id = extract_agent_session_id(path, "order")?;
     if session_id != "default" {
@@ -653,6 +685,9 @@ fn route(method: &str, path: &str, body: &str) -> Result<ApiCommand, RouteError>
         }
         ("POST", p) if p.starts_with("/api/agent/session/") && p.ends_with("/advance") => {
             parse_agent_session_advance(p, body)
+        }
+        ("POST", p) if p.starts_with("/api/agent/session/") && p.ends_with("/rewind-to-start") => {
+            parse_agent_session_rewind(p, body)
         }
 
         // ── 立花証券余力情報 ──────────────────────────────────────────────
@@ -2402,6 +2437,67 @@ mod tests {
         assert!(
             matches!(result, Err(RouteError::NotFound)),
             "POST /api/replay/step-backward must be deleted per ADR-0001 §3, got {result:?}"
+        );
+    }
+
+    // ── Sub-phase Q hotfix: rewind-to-start HTTP route ───────────────────────
+    #[test]
+    fn route_post_agent_rewind_default_empty_body() {
+        let cmd = route("POST", "/api/agent/session/default/rewind-to-start", "").unwrap();
+        match cmd {
+            ApiCommand::AgentSession(AgentSessionCommand::RewindToStart {
+                session_id,
+                init_range,
+            }) => {
+                assert_eq!(session_id, "default");
+                assert!(init_range.is_none(), "empty body → init_range None");
+            }
+            other => panic!("expected RewindToStart, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn route_post_agent_rewind_default_with_init_body() {
+        let body = r#"{"start":"2026-04-01 09:00","end":"2026-04-01 15:00"}"#;
+        let cmd = route("POST", "/api/agent/session/default/rewind-to-start", body).unwrap();
+        match cmd {
+            ApiCommand::AgentSession(AgentSessionCommand::RewindToStart {
+                init_range: Some((start, end)),
+                ..
+            }) => {
+                assert_eq!(start, "2026-04-01 09:00");
+                assert_eq!(end, "2026-04-01 15:00");
+            }
+            other => panic!("expected RewindToStart with init_range, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn route_post_agent_rewind_rejects_non_default_session() {
+        let result = route("POST", "/api/agent/session/other/rewind-to-start", "");
+        assert!(
+            matches!(result, Err(RouteError::NotImplemented)),
+            "got {result:?}"
+        );
+    }
+
+    #[test]
+    fn route_post_agent_rewind_rejects_get_method() {
+        let result = route("GET", "/api/agent/session/default/rewind-to-start", "");
+        assert!(
+            matches!(result, Err(RouteError::NotFound)),
+            "got {result:?}"
+        );
+    }
+
+    #[test]
+    fn route_post_agent_rewind_rejects_partial_body() {
+        // start のみ → BadRequest
+        let body = r#"{"start":"2026-04-01 09:00"}"#;
+        let result = route("POST", "/api/agent/session/default/rewind-to-start", body);
+        assert!(
+            matches!(result, Err(RouteError::BadRequestWithMessage(_))),
+            "got {result:?}"
         );
     }
 }
