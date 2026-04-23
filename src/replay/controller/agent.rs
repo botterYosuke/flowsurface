@@ -64,8 +64,11 @@ impl ReplayController {
     ///
     /// ADR-0001 §4 Reset 不変条件のうち本メソッドの責務は次のとおり:
     /// - `StepClock.now_ms` を `range.start` へ seek
-    /// - EventStore cursor を先頭へ巻き戻し
     /// - UI チャートの「新 session 扱い」再描画（`reset_charts_for_seek`）
+    ///   + `inject_klines_up_to` による pre-start history 再注入
+    ///
+    /// EventStore は stateless な binary search で読むためカーソルは持たない
+    /// （`klines_in` / `trades_in` は Range クエリのたびに再探索する）。
     ///
     /// `VirtualExchange::reset()` + `mark_session_reset()` の発火 (fills / orders /
     /// balance クリア + SessionLifecycleEvent::Reset + `client_order_id` UNIQUE map
@@ -108,6 +111,10 @@ impl ReplayController {
         }
         for (stream, trades) in &result.trade_events {
             if !trades.is_empty() {
+                // ingest_trades は unmatched stream 時に `refresh_streams` を
+                // 呼んで `UniqueStreams` を同期更新する副作用を持ち、戻り値の
+                // Task 自体は常に `Task::none()`（dashboard.rs:834-838）。
+                // よって drop しても非同期更新を失わない。
                 let _ = dashboard.ingest_trades(stream, trades, current_time, main_window_id);
             }
         }

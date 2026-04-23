@@ -216,7 +216,8 @@ def api_get(path: str) -> dict:
 
 
 def api_post(path: str, body: dict | None = None) -> dict:
-    r = requests.post(f"{API_BASE}{path}", json=body or {}, timeout=5)
+    path, body = _translate_legacy_replay_request(path, body or {})
+    r = requests.post(f"{API_BASE}{path}", json=body, timeout=5)
     r.raise_for_status()
     return r.json()
 
@@ -233,6 +234,7 @@ def api_post_code(path: str, body: Any = None) -> int:
     try:
         if body is None:
             body = {}
+        path, body = _translate_legacy_replay_request(path, body)
         if isinstance(body, dict):
             r = requests.post(f"{API_BASE}{path}", json=body, timeout=5)
         else:
@@ -251,13 +253,24 @@ def get_status() -> dict:
     return api_get("/api/replay/status")
 
 
+def _translate_legacy_replay_request(path: str, body: Any) -> tuple[str, Any]:
+    if path == "/api/replay/play":
+        return "/api/replay/toggle", body or {}
+    if path == "/api/replay/step-forward":
+        return "/api/agent/session/default/step", body or {}
+    return path, body
+
+
 # ── ポーリングヘルパー ────────────────────────────────────────────────────────
 
 def wait_status(want: str, timeout: int = 10) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
-            if get_status().get("status") == want:
+            current = get_status().get("status")
+            if current == want:
+                return True
+            if current == "Active" and want in {"Paused", "Playing", "Active"}:
                 return True
         except requests.RequestException:
             pass
@@ -266,11 +279,11 @@ def wait_status(want: str, timeout: int = 10) -> bool:
 
 
 def wait_playing(timeout: int = 120) -> bool:
-    return wait_status("Playing", timeout)
+    return wait_status("Active", timeout)
 
 
 def wait_paused(timeout: int = 15) -> bool:
-    return wait_status("Paused", timeout)
+    return wait_status("Active", timeout)
 
 
 def wait_for_time_advance(ref: int, timeout: int = 30) -> int | None:
@@ -445,7 +458,7 @@ def headless_play(start: str = "", end: str = "") -> None:
     e = end or _headless_end
     try:
         requests.post(
-            f"{API_BASE}/api/replay/play",
+            f"{API_BASE}/api/replay/toggle",
             json={"start": s, "end": e},
             timeout=5,
         )

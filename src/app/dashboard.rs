@@ -299,8 +299,8 @@ impl Flowsurface {
             return Task::none();
         };
         let was_replay = self.replay.is_replay();
+        let had_session = self.replay.has_clock();
         let time_before = self.replay.current_time_ms();
-        let is_step_forward = false; // StepForward was removed in phase 4b
         let (task, toast) = self.replay.handle_message(msg, dashboard, main_window_id);
         let time_after = self.replay.current_time_ms();
         if let Some(t) = toast {
@@ -312,7 +312,7 @@ impl Flowsurface {
             d.sync_virtual_mode(main_window_id);
         }
 
-        // 仮想エンジンのライフサイクル管理
+        // 仮想エンジンのライフサイクル管理 (ADR-0001 §Q SessionLifecycleEvent 配線)
         if !was_replay && is_replay_now {
             if self.virtual_engine.is_none() {
                 self.virtual_engine = Some(replay::virtual_exchange::VirtualExchangeEngine::new(
@@ -323,18 +323,29 @@ impl Flowsurface {
                 engine.reset();
                 log::info!("VirtualExchangeEngine をリセットしました（再プレイ）");
             }
+            // Live→Replay 切替完了時に SessionLifecycleEvent::Started を発火
+            // (ADR-0001 §4 / §Q: start_replay_session 経路と同一の不変条件)。
+            if let Some(engine) = &mut self.virtual_engine {
+                engine.mark_session_started();
+            }
         } else if was_replay && !is_replay_now {
             if self.virtual_engine.is_some() {
+                if had_session && let Some(engine) = &mut self.virtual_engine {
+                    engine.mark_session_terminated();
+                }
                 self.virtual_engine = None;
                 log::info!("VirtualExchangeEngine を破棄しました（Live へ切替）");
             }
         } else if is_replay_now
             && time_before != time_after
-            && !is_step_forward
             && let Some(engine) = &mut self.virtual_engine
         {
-            // StepBackward / range 変更 → 時刻が変化したためリセット
+            // range 変更に伴う時刻変動 → リセット + SessionLifecycleEvent::Reset 発火。
+            // ADR-0001 §4 Reset 不変条件のうち `client_order_id` UNIQUE map クリアは
+            // `mark_session_reset()` が進める session_generation を購読側が
+            // `observe_generation` で検知して実施する。
             engine.reset();
+            engine.mark_session_reset();
             log::info!(
                 "VirtualExchangeEngine をリセットしました（seek: {:?} → {:?}）",
                 time_before,
@@ -342,64 +353,7 @@ impl Flowsurface {
             );
         }
 
-        // StepForward: kline close から合成 Trade を生成して on_tick() を呼ぶ
-        if is_replay_now && is_step_forward {
-            let mut fill_tasks = Vec::new();
-            if let Some(engine) = &mut self.virtual_engine {
-                let clock_ms = self.replay.current_time_ms().unwrap_or(0);
-                for (stream, trades) in self.replay.synthetic_trades_at_current_time() {
-                    let ticker = stream.ticker_info().ticker.to_string();
-                    let fills = engine.on_tick(&ticker, &trades, clock_ms);
-                    for fill in fills {
-                        // ナラティブ outcome 自動更新（Phase 4a C-1）
-                        let narrative_store = self.narrative_store.clone();
-                        let order_id = fill.order_id.clone();
-                        let fill_price = fill.fill_price;
-                        let fill_time_ms = crate::api::contract::EpochMs::new(fill.fill_time_ms)
-                            .saturating_to_i64();
-                        let side_hint = match fill.side {
-                            crate::replay::virtual_exchange::PositionSide::Long => {
-                                Some(crate::narrative::model::NarrativeSide::Buy)
-                            }
-                            crate::replay::virtual_exchange::PositionSide::Short => {
-                                Some(crate::narrative::model::NarrativeSide::Sell)
-                            }
-                        };
-                        fill_tasks.push(Task::perform(
-                            async move {
-                                if let Err(e) =
-                                    crate::narrative::service::update_outcome_from_fill(
-                                        &narrative_store,
-                                        &order_id,
-                                        fill_price,
-                                        fill_time_ms,
-                                        side_hint,
-                                    )
-                                    .await
-                                {
-                                    log::warn!(
-                                        "failed to update narrative outcome for order {order_id}: {e}"
-                                    );
-                                }
-                            },
-                            |()| Message::Noop,
-                        ));
-
-                        let fill_msg = crate::screen::dashboard::Message::VirtualOrderFilled(fill);
-                        fill_tasks.push(Task::done(Message::Dashboard {
-                            layout_id: None,
-                            event: fill_msg,
-                        }));
-                    }
-                }
-            }
-            if fill_tasks.is_empty() {
-                return task.map(Message::Replay);
-            }
-            fill_tasks.push(task.map(Message::Replay));
-            return Task::batch(fill_tasks);
-        }
-
+        // StepForward は ADR-0001 §2 で削除済み。進行は AgentMessage 経由。
         task.map(Message::Replay)
     }
 }

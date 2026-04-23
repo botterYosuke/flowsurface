@@ -48,20 +48,6 @@ pub fn pre_start_history(klines: &[Kline], start_ms: u64) -> Vec<Kline> {
         .collect()
 }
 
-/// StepBackward で clock を戻す先の時刻を計算する。
-/// history 範囲 (< start_ms) のバーが EventStore に存在しても
-/// start_ms 未満には seek しないようにクランプする。
-/// klines が見つからない場合（prev_time = None）は step_ms 分後退するフォールバックを使う。
-pub fn compute_step_backward_target(
-    prev_time: Option<u64>,
-    current_time: u64,
-    start_ms: u64,
-    step_ms: u64,
-) -> u64 {
-    let target = prev_time.unwrap_or_else(|| current_time.saturating_sub(step_ms));
-    target.max(start_ms)
-}
-
 // ── 公開 API ────────────────────────────────────────────────────────────────
 
 /// API から iced app へ送るコマンド
@@ -72,7 +58,12 @@ pub fn compute_step_backward_target(
 #[derive(Debug, Clone)]
 pub enum ReplayCommand {
     GetStatus,
-    Toggle,
+    /// `POST /api/replay/toggle`
+    /// - body なし: Live/Replay モードを切り替える
+    /// - body `{start, end}`: Replay session を初期化する
+    Toggle {
+        init_range: Option<(String, String)>,
+    },
     /// 状態をディスクに保存（E2E テスト用）
     SaveState,
     /// Live / Replay モードを指定して切り替える（POST /api/app/set-mode）
@@ -89,8 +80,6 @@ pub struct ReplayStatus {
     pub status: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub current_time: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub speed: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub start_time: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -130,9 +119,6 @@ pub struct ReplayState {
     pub(crate) range_input: ReplayRangeInput,
     /// リプレイセッション状態（クロック・データストア・アクティブストリームを集約）
     pub(crate) session: ReplaySession,
-    /// Loading 中に Resume が呼ばれたとき true にセットし、Active 遷移時に自動再開する。
-    /// ticker/timeframe 変更後にユーザーが Resume を呼んだが、まだデータロード中の場合に使う。
-    pub(crate) resume_pending: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -196,7 +182,6 @@ impl Default for ReplayState {
             mode: ReplayMode::Live,
             range_input: ReplayRangeInput::default(),
             session: ReplaySession::Idle,
-            resume_pending: false,
         }
     }
 }
@@ -212,7 +197,6 @@ impl ReplayState {
             ReplayMode::Replay => {
                 self.mode = ReplayMode::Live;
                 self.session = ReplaySession::Idle;
-                self.resume_pending = false;
             }
         }
     }
@@ -265,7 +249,6 @@ impl ReplayState {
                     mode,
                     status: Some(status_str.to_string()),
                     current_time: Some(clock.now_ms()),
-                    speed: None,
                     start_time: Some(range.start),
                     end_time: Some(range.end),
                     range_start,
@@ -276,7 +259,6 @@ impl ReplayState {
                 mode,
                 status: None,
                 current_time: None,
-                speed: None,
                 start_time: None,
                 end_time: None,
                 range_start,
@@ -465,7 +447,6 @@ mod tests {
         assert_eq!(status.mode, "Live");
         assert!(status.status.is_none());
         assert!(status.current_time.is_none());
-        assert!(status.speed.is_none());
         assert!(status.start_time.is_none());
         assert!(status.end_time.is_none());
         assert!(status.range_start.is_empty());
@@ -490,7 +471,6 @@ mod tests {
         assert_eq!(status.mode, "Replay");
         assert_eq!(status.status.as_deref(), Some("Active"));
         assert_eq!(status.current_time, Some(1_500));
-        assert_eq!(status.speed, None);
         assert_eq!(status.start_time, Some(0));
         assert_eq!(status.end_time, Some(5_000));
     }
@@ -770,48 +750,6 @@ mod tests {
             result.is_empty(),
             "expected empty vec but got {} klines",
             result.len()
-        );
-    }
-
-    // ── compute_step_backward_target ─────────────────────────────────────────
-
-    #[test]
-    fn step_backward_target_clamps_to_start_ms_when_prev_is_below() {
-        // prev=900, current=1000, start_ms=1000 → history bar below start, must clamp
-        let target = compute_step_backward_target(Some(900), 1000, 1000, 60_000);
-        assert_eq!(
-            target, 1000,
-            "seeking to a pre-start history bar (t=900) must be clamped to start_ms=1000"
-        );
-    }
-
-    #[test]
-    fn step_backward_target_allows_seek_within_replay_range() {
-        // prev=1000 (exactly start_ms), current=2000, start_ms=1000 → valid seek
-        let target = compute_step_backward_target(Some(1000), 2000, 1000, 60_000);
-        assert_eq!(
-            target, 1000,
-            "seeking from t=2000 to t=1000 (exactly start_ms) must be allowed"
-        );
-    }
-
-    #[test]
-    fn step_backward_target_falls_back_by_step_when_no_prev() {
-        // prev=None, current=1500, start_ms=1000, step_ms=500 → fallback: 1500-500=1000
-        let target = compute_step_backward_target(None, 1500, 1000, 500);
-        assert_eq!(
-            target, 1000,
-            "when no previous bar exists, target must fall back to current_time - step_ms"
-        );
-    }
-
-    #[test]
-    fn step_backward_target_no_prev_clamps_to_start_ms() {
-        // prev=None, current=1200, start_ms=1000, step_ms=500 → 1200-500=700 → clamped to 1000
-        let target = compute_step_backward_target(None, 1200, 1000, 500);
-        assert_eq!(
-            target, 1000,
-            "fallback target below start_ms must be clamped to start_ms"
         );
     }
 }

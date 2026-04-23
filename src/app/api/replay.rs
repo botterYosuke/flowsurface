@@ -29,7 +29,20 @@ impl Flowsurface {
                 // からの明示的 step / advance / rewind-to-start に限定される。
                 reply_tx.send(reply_replay_status(self));
             }
-            replay::ReplayCommand::Toggle => {
+            replay::ReplayCommand::Toggle { init_range } => {
+                if let Some((start, end)) = init_range {
+                    return match self.start_replay_session(&start, &end) {
+                        Ok((body, task)) => {
+                            reply_tx.send(body);
+                            task
+                        }
+                        Err((status, body)) => {
+                            reply_tx.send_status(status, body);
+                            Task::none()
+                        }
+                    };
+                }
+
                 let task = self.handle_replay(ReplayMessage::User(ReplayUserMessage::ToggleMode));
                 reply_tx.send(reply_replay_status(self));
                 return task;
@@ -116,7 +129,14 @@ impl Flowsurface {
                 }
             }
             VirtualExchangeCommand::GetPortfolio => {
-                if let Some(engine) = &self.virtual_engine {
+                // Loading 中は last_close_price が未確定のため 503 を返す
+                // (unwrap_or(0.0) で評価すると unrealized_pnl が誤る)。
+                if self.replay.is_loading() {
+                    reply_tx.send_status(
+                        503,
+                        r#"{"error":"replay is loading, try again shortly"}"#.to_string(),
+                    );
+                } else if let Some(engine) = &self.virtual_engine {
                     let current_price = self.replay.last_close_price().unwrap_or(0.0);
                     let snap = engine.portfolio_snapshot(current_price);
                     reply_tx.send(
@@ -181,7 +201,12 @@ impl Flowsurface {
                 }
             }
             VirtualExchangeCommand::GetOrders => {
-                if let Some(engine) = &self.virtual_engine {
+                if self.replay.is_loading() {
+                    reply_tx.send_status(
+                        503,
+                        r#"{"error":"replay is loading, try again shortly"}"#.to_string(),
+                    );
+                } else if let Some(engine) = &self.virtual_engine {
                     let orders = engine.get_orders();
                     reply_tx.send(serde_json::json!({ "orders": orders }).to_string());
                 } else {

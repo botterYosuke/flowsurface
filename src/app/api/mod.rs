@@ -28,6 +28,132 @@ fn serialize_advance_response(resp: &crate::api::advance_request::AdvanceRespons
 }
 
 impl Flowsurface {
+    fn start_replay_session(
+        &mut self,
+        start: &str,
+        end: &str,
+    ) -> Result<(String, Task<Message>), (u16, String)> {
+        let main_window_id = self.main_window.id;
+        let Some(layout_id) = self.layout_manager.active_layout_id().map(|l| l.unique) else {
+            return Err((500, r#"{"error":"no active layout"}"#.to_string()));
+        };
+
+        let replay_task = {
+            let Some(dashboard) = self
+                .layout_manager
+                .get_mut(layout_id)
+                .map(|layout| &mut layout.dashboard)
+            else {
+                return Err((500, r#"{"error":"no active dashboard"}"#.to_string()));
+            };
+
+            let task = self
+                .replay
+                .initialize_session(start, end, dashboard, main_window_id)
+                .map_err(|err| (400, serde_json::json!({ "error": err }).to_string()))?;
+            dashboard.is_replay = true;
+            dashboard.sync_virtual_mode(main_window_id);
+            task
+        };
+
+        if self.virtual_engine.is_none() {
+            self.virtual_engine = Some(
+                crate::replay::virtual_exchange::VirtualExchangeEngine::new(1_000_000.0),
+            );
+        } else if let Some(engine) = &mut self.virtual_engine {
+            engine.reset();
+        }
+
+        if let Some(engine) = &mut self.virtual_engine {
+            engine.mark_session_started();
+        }
+
+        let body = serde_json::json!({
+            "ok": true,
+            "status": "loading",
+            "start": start,
+            "end": end,
+        })
+        .to_string();
+        Ok((body, replay_task.map(Message::Replay)))
+    }
+
+    fn handle_agent_rewind_request(
+        &mut self,
+        session_id: String,
+        init_range: Option<(String, String)>,
+        reply_tx: replay_api::ReplySender,
+    ) -> Task<Message> {
+        if session_id != "default" {
+            reply_tx.send_status(
+                501,
+                r#"{"error":"multi-session not yet implemented; use 'default' until Phase 4c"}"#
+                    .to_string(),
+            );
+            return Task::none();
+        }
+
+        if self.replay.is_loading() {
+            reply_tx.send_status(409, r#"{"error":"session loading"}"#.to_string());
+            return Task::none();
+        }
+
+        if !self.replay.is_active() {
+            let Some((start, end)) = init_range else {
+                reply_tx.send_status(
+                    400,
+                    r#"{"error":"body required for init (session not initialized)"}"#.to_string(),
+                );
+                return Task::none();
+            };
+
+            return match self.start_replay_session(&start, &end) {
+                Ok((body, task)) => {
+                    reply_tx.send(body);
+                    task
+                }
+                Err((status, body)) => {
+                    reply_tx.send_status(status, body);
+                    Task::none()
+                }
+            };
+        }
+
+        let main_window_id = self.main_window.id;
+        let Some(layout_id) = self.layout_manager.active_layout_id().map(|l| l.unique) else {
+            reply_tx.send_status(500, r#"{"error":"no active layout"}"#.to_string());
+            return Task::none();
+        };
+        let Some(dashboard) = self
+            .layout_manager
+            .get_mut(layout_id)
+            .map(|l| &mut l.dashboard)
+        else {
+            reply_tx.send_status(500, r#"{"error":"no active dashboard"}"#.to_string());
+            return Task::none();
+        };
+        self.replay.agent_rewind(dashboard, main_window_id);
+        if let Some(ve) = &mut self.virtual_engine {
+            ve.reset();
+            ve.mark_session_reset();
+        }
+
+        let clock_ms = self.replay.current_time_ms().unwrap_or(0);
+        let snapshot_price = self.replay.last_close_price().unwrap_or(0.0);
+        let final_portfolio = self
+            .virtual_engine
+            .as_ref()
+            .map(|ve| ve.portfolio_snapshot(snapshot_price))
+            .unwrap_or_else(empty_portfolio_snapshot);
+        let body = serde_json::json!({
+            "ok": true,
+            "clock_ms": clock_ms,
+            "final_portfolio": final_portfolio,
+        });
+        reply_tx.send(body.to_string());
+        Task::none()
+    }
+
     pub(crate) fn handle_replay_api(
         &mut self,
         command: replay_api::ApiCommand,
@@ -140,7 +266,7 @@ impl Flowsurface {
                         session_id,
                         init_range,
                     } => {
-                        return self.handle_agent_rewind(session_id, init_range, reply_tx);
+                        return self.handle_agent_rewind_request(session_id, init_range, reply_tx);
                     }
                 }
             }
@@ -372,91 +498,6 @@ impl Flowsurface {
         tasks.extend(narrative_tasks);
         tasks.extend(fill_msgs);
         Task::batch(tasks)
-    }
-
-    /// `POST /api/agent/session/:id/rewind-to-start` (GUI mode) の MVP ハンドラ。
-    ///
-    /// ADR-0001 §4 に基づく:
-    /// - 初期化済み (`Active`): 現 session を保持したまま clock を range.start に戻す。
-    ///   body `{start, end}` が付いていても無視する。
-    /// - Loading 中: 409 Conflict。
-    /// - 未初期化 (`Idle`) + body あり: 新 session 初期化は未実装で 501 を返す
-    ///   (shared helper 抽出時に実装予定)。UI 経由では toggle → モード切替で初期化できる。
-    /// - 未初期化 + body なし: 400 `body required for init`。
-    pub(crate) fn handle_agent_rewind(
-        &mut self,
-        session_id: String,
-        init_range: Option<(String, String)>,
-        reply_tx: replay_api::ReplySender,
-    ) -> Task<Message> {
-        if session_id != "default" {
-            reply_tx.send_status(
-                501,
-                r#"{"error":"multi-session not yet implemented; use 'default' until Phase 4c"}"#
-                    .to_string(),
-            );
-            return Task::none();
-        }
-
-        // Loading は 409（ADR-0001 §6 原則: 状態遷移系コマンドを Loading 中はキューイング
-        // せず拒否する）。
-        if self.replay.is_loading() {
-            reply_tx.send_status(409, r#"{"error":"session loading"}"#.to_string());
-            return Task::none();
-        }
-
-        if !self.replay.is_active() {
-            // Idle — 初期化経路は GUI で未実装。UI の toggle + mode 切替で対応すること。
-            if init_range.is_some() {
-                reply_tx.send_status(
-                    501,
-                    r#"{"error":"rewind-with-init not yet supported in GUI mode; use headless or toggle to Replay mode first"}"#
-                        .to_string(),
-                );
-            } else {
-                reply_tx.send_status(
-                    400,
-                    r#"{"error":"body required for init (session not initialized)"}"#.to_string(),
-                );
-            }
-            return Task::none();
-        }
-
-        // Active: clock 巻き戻し + SessionLifecycleEvent::Reset 発火
-        // (ADR-0001 §4 Reset 不変条件の 8 項目は handle_agent::RewindToStart と同じ手順で実装)。
-        let main_window_id = self.main_window.id;
-        let Some(layout_id) = self.layout_manager.active_layout_id().map(|l| l.unique) else {
-            reply_tx.send_status(500, r#"{"error":"no active layout"}"#.to_string());
-            return Task::none();
-        };
-        let Some(dashboard) = self
-            .layout_manager
-            .get_mut(layout_id)
-            .map(|l| &mut l.dashboard)
-        else {
-            reply_tx.send_status(500, r#"{"error":"no active dashboard"}"#.to_string());
-            return Task::none();
-        };
-        self.replay.agent_rewind(dashboard, main_window_id);
-        if let Some(ve) = &mut self.virtual_engine {
-            ve.reset();
-            ve.mark_session_reset();
-        }
-
-        let clock_ms = self.replay.current_time_ms().unwrap_or(0);
-        let snapshot_price = self.replay.last_close_price().unwrap_or(0.0);
-        let final_portfolio = self
-            .virtual_engine
-            .as_ref()
-            .map(|ve| ve.portfolio_snapshot(snapshot_price))
-            .unwrap_or_else(empty_portfolio_snapshot);
-        let body = serde_json::json!({
-            "ok": true,
-            "clock_ms": clock_ms,
-            "final_portfolio": final_portfolio,
-        });
-        reply_tx.send(body.to_string());
-        Task::none()
     }
 
     pub(crate) fn handle_auth_api(&self, cmd: replay_api::AuthCommand) -> String {

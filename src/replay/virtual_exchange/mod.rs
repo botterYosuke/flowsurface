@@ -218,4 +218,89 @@ mod tests {
         engine.place_order(make_order("BTCUSDT"));
         assert_eq!(engine.session_generation(), before);
     }
+
+    // ── ADR-0001 §4 Reset 不変条件 (サブフェーズ Q) ──────────────────────────
+
+    #[test]
+    fn reset_restores_cash_to_initial() {
+        // 発注 → 約定で cash が変動した後 reset すると initial_cash に戻る。
+        use exchange::Trade;
+        use exchange::unit::price::Price;
+        use exchange::unit::qty::Qty;
+        let mut engine = VirtualExchangeEngine::new(1_000_000.0);
+        engine.place_order(make_order("BTCUSDT"));
+        let trades = [Trade {
+            time: 1,
+            is_sell: false,
+            price: Price::from_f32(50_000.0),
+            qty: Qty::from_f32(0.1),
+        }];
+        let fills = engine.on_tick("BTCUSDT", &trades, 1);
+        assert!(!fills.is_empty(), "約定が発生すること");
+        let snap_before = engine.portfolio_snapshot(50_000.0);
+        assert!(
+            (snap_before.cash - 1_000_000.0).abs() > f64::EPSILON,
+            "約定後は cash が変動していること"
+        );
+
+        engine.reset();
+        let snap_after = engine.portfolio_snapshot(50_000.0);
+        assert!(
+            (snap_after.cash - 1_000_000.0).abs() < f64::EPSILON,
+            "reset 後 cash は initial_cash に戻る: got {}",
+            snap_after.cash
+        );
+    }
+
+    #[test]
+    fn reset_clears_all_positions() {
+        use exchange::Trade;
+        use exchange::unit::price::Price;
+        use exchange::unit::qty::Qty;
+        let mut engine = VirtualExchangeEngine::new(1_000_000.0);
+        engine.place_order(make_order("BTCUSDT"));
+        let trades = [Trade {
+            time: 1,
+            is_sell: false,
+            price: Price::from_f32(50_000.0),
+            qty: Qty::from_f32(0.1),
+        }];
+        engine.on_tick("BTCUSDT", &trades, 1);
+
+        let snap_before = engine.portfolio_snapshot(50_000.0);
+        assert!(
+            !snap_before.open_positions.is_empty() || !snap_before.closed_positions.is_empty(),
+            "約定により position が作られていること"
+        );
+
+        engine.reset();
+        let snap_after = engine.portfolio_snapshot(50_000.0);
+        assert!(
+            snap_after.open_positions.is_empty(),
+            "reset 後 open_positions は空"
+        );
+        assert!(
+            snap_after.closed_positions.is_empty(),
+            "reset 後 closed_positions は空"
+        );
+    }
+
+    #[test]
+    fn reset_then_mark_session_reset_clears_orders_and_bumps_generation() {
+        // ADR-0001 §4: rewind-to-start 完了時の不変条件。
+        // reset() で orders / fills / balance クリア + mark_session_reset() で世代 bump。
+        let mut engine = VirtualExchangeEngine::new(1_000_000.0);
+        engine.place_order(make_order("BTCUSDT"));
+        let gen_before = engine.session_generation();
+
+        engine.reset();
+        engine.mark_session_reset();
+
+        assert_eq!(engine.get_orders().len(), 0, "reset 後 pending orders は空");
+        assert_eq!(
+            engine.session_generation(),
+            gen_before + 1,
+            "mark_session_reset で generation が進む → AgentSessionState::observe_generation が client_order_id map をクリアできる"
+        );
+    }
 }

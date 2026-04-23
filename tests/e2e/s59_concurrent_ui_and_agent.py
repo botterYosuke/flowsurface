@@ -82,11 +82,11 @@ def run_s59() -> None:
 
     requests.post(f"{API_BASE}/api/app/set-mode", json={"mode": "replay"}, timeout=5)
     r = requests.post(
-        f"{API_BASE}/api/replay/play",
+        f"{API_BASE}/api/replay/toggle",
         json={"start": utc_offset(-3), "end": utc_offset(-1)},
         timeout=10,
     )
-    if not wait_status("Paused", 30) and not wait_status("Playing", 30):
+    if not wait_status("Active", 30):
         fail("TC-S59-setup", "replay session did not reach Active")
         return
 
@@ -126,14 +126,14 @@ def run_s59() -> None:
 
     # UI 経由で session を再起動 → SessionLifecycleEvent::Started 発火
     r = requests.post(
-        f"{API_BASE}/api/replay/play",
+        f"{API_BASE}/api/replay/toggle",
         json={"start": utc_offset(-3), "end": utc_offset(-1)},
         timeout=10,
     )
     if r.status_code != 200:
         fail("TC-S59-02-setup", f"replay play failed: {r.status_code}")
         return
-    if not wait_status("Paused", 30) and not wait_status("Playing", 30):
+    if not wait_status("Active", 30):
         fail("TC-S59-02-setup", "session did not re-activate")
         return
 

@@ -42,7 +42,6 @@ impl ReplayController {
                     end: range_end,
                 },
                 session: ReplaySession::Idle,
-                resume_pending: false,
             },
         }
     }

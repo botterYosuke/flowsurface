@@ -98,11 +98,11 @@ def run_s55() -> None:
     # セッション起動（過去 2h 分）
     requests.post(f"{API_BASE}/api/app/set-mode", json={"mode": "replay"}, timeout=5)
     requests.post(
-        f"{API_BASE}/api/replay/play",
+        f"{API_BASE}/api/replay/toggle",
         json={"start": utc_offset(-3), "end": utc_offset(-1)},
         timeout=10,
     )
-    if not wait_status("Paused", 30) and not wait_status("Playing", 30):
+    if not wait_status("Active", 30):
         fail("TC-S55-setup", "replay session did not reach Active")
         return
 

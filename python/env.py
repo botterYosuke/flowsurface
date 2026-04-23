@@ -108,11 +108,9 @@ class FlowsurfaceEnv(gym.Env):
         if self._proc is None or self._proc.poll() is not None:
             self._start_process()
 
-        # POST /api/replay/play
-        resp = self._post("/api/replay/play", {"start": start, "end": end})
+        resp = self._post("/api/replay/toggle", {"start": start, "end": end})
         resp.raise_for_status()
 
-        # Poll until status transitions from "loading" to "Paused"
         self._wait_until_active()
 
         self._prev_total_equity = self.initial_cash
@@ -149,13 +147,12 @@ class FlowsurfaceEnv(gym.Env):
             )
             resp_order.raise_for_status()
 
-        # Advance clock one step
-        resp = self._post("/api/replay/step-forward", {})
+        resp = self._post("/api/agent/session/default/step", {})
         resp.raise_for_status()
+        step_result = resp.json()
 
-        # Check if replay ended
         status = self._get_status()
-        done = status.get("status") == "Paused" and self._at_end(status)
+        done = bool(step_result.get("reached_end")) or self._at_end(status)
         truncated = False
 
         # Reward = change in total equity
@@ -245,7 +242,7 @@ class FlowsurfaceEnv(gym.Env):
         while time.monotonic() < deadline:
             status = self._get_status()
             s = status.get("status")
-            if s in ("Paused", "Playing"):
+            if s == "Active":
                 return
             time.sleep(_LOAD_POLL_INTERVAL_S)
         raise TimeoutError(

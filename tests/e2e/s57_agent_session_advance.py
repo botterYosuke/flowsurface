@@ -1,13 +1,13 @@
-#!/usr/bin/env python3
-"""s57_agent_session_advance.py — Phase 4b-1 サブフェーズ J: agent session advance E2E
+﻿#!/usr/bin/env python3
+"""s57_agent_session_advance.py 窶・Phase 4b-1 繧ｵ繝悶ヵ繧ｧ繝ｼ繧ｺ J: agent session advance E2E
 
-検証シナリオ (ADR-0001 / plan §4.3):
-- Headless runtime: advance で 100 tick 相当を instant 実行 → stopped_reason="until_reached"
-- Headless runtime: stop_on=["fill"] で最初の約定時点で停止 → stopped_reason="fill"
-- Headless runtime: include_fills=true で fills 配列同梱、false で省略
-- GUI runtime: advance で 400 + "headless" メッセージ
+讀懆ｨｼ繧ｷ繝翫Μ繧ｪ (ADR-0001 / plan ﾂｧ4.3):
+- Headless runtime: advance 縺ｧ 100 tick 逶ｸ蠖薙ｒ instant 螳溯｡・竊・stopped_reason="until_reached"
+- Headless runtime: stop_on=["fill"] 縺ｧ譛蛻昴・邏・ｮ壽凾轤ｹ縺ｧ蛛懈ｭ｢ 竊・stopped_reason="fill"
+- Headless runtime: include_fills=true 縺ｧ fills 驟榊・蜷梧｢ｱ縲’alse 縺ｧ逵∫払
+- GUI runtime: advance 縺ｧ 400 + "headless" 繝｡繝・そ繝ｼ繧ｸ
 
-GUI 時は 400 の方のみ検証。
+GUI 譎ゅ・ 400 縺ｮ譁ｹ縺ｮ縺ｿ讀懆ｨｼ縲・
 """
 from __future__ import annotations
 
@@ -77,39 +77,23 @@ def run_s57() -> None:
 
     requests.post(f"{API_BASE}/api/app/set-mode", json={"mode": "replay"}, timeout=5)
     requests.post(
-        f"{API_BASE}/api/replay/play",
+        f"{API_BASE}/api/replay/toggle",
         json={"start": utc_offset(-3), "end": utc_offset(-1)},
         timeout=10,
     )
-    if not wait_status("Paused", 30) and not wait_status("Playing", 30):
+    if not wait_status("Active", 30):
         fail("TC-S57-setup", "replay session did not reach Active")
         return
-
-    # TC-S57-GUI-01: GUI runtime では 400 + "headless" メッセージ
-    if not IS_HEADLESS:
-        # 現在時刻 + 60 分を until_ms とする（実値は使われない、400 を期待）。
-        now_ms = int(time.time() * 1000) + 60 * 60 * 1000
-        r = requests.post(
-            f"{API_BASE}/api/agent/session/default/advance",
-            json={"until_ms": now_ms},
-            timeout=10,
-        )
-        if r.status_code == 400 and "headless" in r.text.lower():
-            pass_("TC-S57-GUI-01: GUI で 400 + headless hint")
-        else:
-            fail("TC-S57-GUI-01", f"expected 400 with headless, got {r.status_code} {r.text}")
-        # GUI では advance 動作しないので headless 専用 TC はスキップ。
-        return
-
-    # Headless 以降:
-    # 現在の clock_ms を取得（step で 1 回進めて取得）
-    r = requests.post(f"{API_BASE}/api/agent/session/default/step", timeout=10)
+    r = requests.get(f"{API_BASE}/api/replay/status", timeout=10)
     if r.status_code != 200:
-        fail("TC-S57-setup", f"step failed: {r.status_code}")
+        fail("TC-S57-setup", f"status failed: {r.status_code}")
         return
-    current_clock = r.json()["clock_ms"]
+    current_clock = r.json().get("current_time")
+    if not isinstance(current_clock, int):
+        fail("TC-S57-setup", f"missing current_time in status: {r.text}")
+        return
 
-    # TC-S57-01: until_ms で 3 バー先まで進める → stopped_reason=until_reached
+    # TC-S57-01: until_ms 縺ｧ 3 繝舌・蜈医∪縺ｧ騾ｲ繧√ｋ 竊・stopped_reason=until_reached
     target = current_clock + 60_000 * 3  # M1 = 60_000 ms
     r = requests.post(
         f"{API_BASE}/api/agent/session/default/advance",
@@ -125,7 +109,10 @@ def run_s57() -> None:
     else:
         fail("TC-S57-01", f"status={r.status_code} body={r.text}")
 
-    # TC-S57-02: 成行注文後 stop_on=["fill"] → 1 tick で停止
+    if not IS_HEADLESS:
+        return
+
+    # TC-S57-02: 謌占｡梧ｳｨ譁・ｾ・stop_on=["fill"] 竊・1 tick 縺ｧ蛛懈ｭ｢
     cli = f"s57_cli_{int(time.time() * 1000)}"
     r = requests.post(
         f"{API_BASE}/api/agent/session/default/order",
@@ -143,24 +130,24 @@ def run_s57() -> None:
     else:
         r2 = requests.post(f"{API_BASE}/api/agent/session/default/step", timeout=10)
         cur = r2.json()["clock_ms"] if r2.status_code == 200 else 0
-        # far-away until_ms にして stop_on で早期停止させる。
+        # far-away until_ms 縺ｫ縺励※ stop_on 縺ｧ譌ｩ譛溷●豁｢縺輔○繧九・
         r = requests.post(
             f"{API_BASE}/api/agent/session/default/advance",
             json={"until_ms": cur + 60_000 * 100, "stop_on": ["fill"]},
             timeout=10,
         )
-        # 注: 合成 Trade が tick で約定するかは EventStore のデータ状況依存。
-        # 約定しない環境では until_reached または end に到達する可能性もある。
+        # 豕ｨ: 蜷域・ Trade 縺・tick 縺ｧ邏・ｮ壹☆繧九°縺ｯ EventStore 縺ｮ繝・・繧ｿ迥ｶ豕∽ｾ晏ｭ倥・
+        # 邏・ｮ壹＠縺ｪ縺・腸蠅・〒縺ｯ until_reached 縺ｾ縺溘・ end 縺ｫ蛻ｰ驕斐☆繧句庄閭ｽ諤ｧ繧ゅ≠繧九・
         if r.status_code == 200:
             body = r.json()
             if body.get("stopped_reason") in ("fill", "until_reached", "end"):
-                pass_(f"TC-S57-02: stop_on=['fill'] 受理 (stopped_reason={body['stopped_reason']})")
+                pass_(f"TC-S57-02: stop_on=['fill'] 蜿礼炊 (stopped_reason={body['stopped_reason']})")
             else:
                 fail("TC-S57-02", f"unexpected stopped_reason: {body}")
         else:
             fail("TC-S57-02", f"status={r.status_code} body={r.text}")
 
-    # TC-S57-03: include_fills=false (デフォルト) で fills 配列が omit される
+    # TC-S57-03: include_fills=false (繝・ヵ繧ｩ繝ｫ繝・ 縺ｧ fills 驟榊・縺・omit 縺輔ｌ繧・
     r = requests.post(f"{API_BASE}/api/agent/session/default/step", timeout=10)
     cur = r.json()["clock_ms"] if r.status_code == 200 else 0
     r = requests.post(
@@ -171,7 +158,7 @@ def run_s57() -> None:
     if r.status_code == 200:
         body = r.json()
         if "fills" not in body:
-            pass_("TC-S57-03: include_fills=false → fills field omitted")
+            pass_("TC-S57-03: include_fills=false 竊・fills field omitted")
         else:
             fail("TC-S57-03", f"fills must be omitted by default: {body}")
     else:

@@ -1,8 +1,6 @@
-/// Headless モード — GUI なしで tokio ランタイム + HTTP API サーバーだけを動かす。
-///
-/// `flowsurface --headless --ticker HyperliquidLinear:BTC --timeframe M1` で起動する。
-/// iced::daemon を一切起動しないため、Python SDK のような外部プログラムから
-/// HTTP API (port 9876) 経由で高速に強化学習ループを回せる。
+/// Headless 繝｢繝ｼ繝・窶・GUI 縺ｪ縺励〒 tokio 繝ｩ繝ｳ繧ｿ繧､繝 + HTTP API 繧ｵ繝ｼ繝舌・縺縺代ｒ蜍輔°縺吶・///
+/// `flowsurface --headless --ticker HyperliquidLinear:BTC --timeframe M1` 縺ｧ襍ｷ蜍輔☆繧九・/// iced::daemon 繧剃ｸ蛻・ｵｷ蜍輔＠縺ｪ縺・◆繧√￣ython SDK 縺ｮ繧医≧縺ｪ螟夜Κ繝励Ο繧ｰ繝ｩ繝縺九ｉ
+/// HTTP API (port 9876) 邨檎罰縺ｧ鬮倬溘↓蠑ｷ蛹門ｭｦ鄙偵Ν繝ｼ繝励ｒ蝗槭○繧九・
 use std::collections::HashSet;
 
 use exchange::{
@@ -20,19 +18,18 @@ use crate::replay::{
 };
 use crate::replay_api::{ApiCommand, ApiMessage, VirtualExchangeCommand};
 
-// ── CLI 引数 ────────────────────────────────────────────────────────────────────
+// 笏笏 CLI 蠑墓焚 笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏
 
-/// `--headless` 起動時に必要な CLI 引数。
+/// `--headless` 襍ｷ蜍墓凾縺ｫ蠢・ｦ√↑ CLI 蠑墓焚縲・
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct HeadlessArgs {
     pub ticker: String,
     pub timeframe: String,
 }
 
-/// `args` スライス（`std::env::args().collect()` の結果）から headless 用引数をパースする。
-///
-/// - `--ticker <ExchangeName:Symbol>` — 必須
-/// - `--timeframe <TF>` — 省略時は `"M1"`
+/// `args` 繧ｹ繝ｩ繧､繧ｹ・・std::env::args().collect()` 縺ｮ邨先棡・峨°繧・headless 逕ｨ蠑墓焚繧偵ヱ繝ｼ繧ｹ縺吶ｋ縲・///
+/// - `--ticker <ExchangeName:Symbol>` 窶・蠢・・/// - `--timeframe <TF>` 窶・逵∫払譎ゅ・ `"M1"`
 pub fn parse_headless_args(args: &[String]) -> Result<HeadlessArgs, String> {
     let mut ticker: Option<String> = None;
     let mut timeframe = "M1".to_string();
@@ -59,9 +56,10 @@ pub fn parse_headless_args(args: &[String]) -> Result<HeadlessArgs, String> {
     Ok(HeadlessArgs { ticker, timeframe })
 }
 
-// ── ティッカー / タイムフレーム ─────────────────────────────────────────────────
+// 笏笏 繝・ぅ繝・き繝ｼ / 繧ｿ繧､繝繝輔Ξ繝ｼ繝 笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏
 
-/// "BinanceLinear:BTCUSDT" や "HyperliquidLinear:BTC" を `Ticker` にパースする。
+/// "BinanceLinear:BTCUSDT" 繧・"HyperliquidLinear:BTC" 繧・`Ticker` 縺ｫ繝代・繧ｹ縺吶ｋ縲・
+
 pub fn parse_ticker_str(s: &str) -> Result<Ticker, String> {
     let parts: Vec<&str> = s.splitn(2, ':').collect();
     if parts.len() != 2 {
@@ -70,7 +68,7 @@ pub fn parse_ticker_str(s: &str) -> Result<Ticker, String> {
         ));
     }
     let exchange_str = parts[0];
-    // "BinanceLinear" → "Binance Linear" to match main.rs::parse_ser_ticker.
+    // "BinanceLinear" -> "Binance Linear" to match `main.rs::parse_ser_ticker`.
     // Supported suffixes: Linear, Inverse, Spot.
     let normalized = ["Linear", "Inverse", "Spot"]
         .into_iter()
@@ -86,7 +84,8 @@ pub fn parse_ticker_str(s: &str) -> Result<Ticker, String> {
     Ok(Ticker::new(parts[1], exchange))
 }
 
-/// "M1", "M5", "H1" 等を `Timeframe` にパースする。
+/// "M1", "M5", "H1" 遲峨ｒ `Timeframe` 縺ｫ繝代・繧ｹ縺吶ｋ縲・
+
 pub fn parse_timeframe_str(s: &str) -> Result<Timeframe, String> {
     let tf = match s {
         "MS100" => Timeframe::MS100,
@@ -109,10 +108,9 @@ pub fn parse_timeframe_str(s: &str) -> Result<Timeframe, String> {
     Ok(tf)
 }
 
-// ── HeadlessEngine ─────────────────────────────────────────────────────────────
+// 笏笏 HeadlessEngine 笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏
 
-/// kline ロードタスクの完了通知。
-#[allow(dead_code)] // サブフェーズ S でエンジンごと整理
+#[allow(dead_code)]
 enum LoadResult {
     Ok {
         stream: StreamKind,
@@ -122,16 +120,13 @@ enum LoadResult {
     Err(String),
 }
 
-/// headless モードのインメモリペイン。GUI ペインツリーの代替として ticker/timeframe を保持する。
 struct HeadlessPane {
     id: uuid::Uuid,
     ticker: String,
     timeframe: Timeframe,
 }
 
-/// headless モード専用リプレイエンジン。
-/// iced への依存を持たず、tokio 非同期タスクで動作する。
-#[allow(dead_code)] // サブフェーズ S でフィールド整理
+#[allow(dead_code)]
 struct HeadlessEngine {
     state: ReplayState,
     virtual_engine: VirtualExchangeEngine,
@@ -143,16 +138,12 @@ struct HeadlessEngine {
     narrative_store: std::sync::Arc<crate::narrative::store::NarrativeStore>,
     snapshot_store: crate::narrative::snapshot_store::SnapshotStore,
     data_root: std::path::PathBuf,
-    /// Agent 専用 Replay API の "default" セッション state（Phase 4b-1 サブフェーズ E）。
-    /// `client_order_id` 冪等性マップを持ち、`VirtualExchange::session_generation()`
-    /// の変化で自動クリアされる。
+    /// Agent replay API state for the default session.
     agent_session_state: crate::api::agent_session_state::AgentSessionState,
 }
 
-// NOTE: ADR-0001 §2 自動再生機構の廃止に伴い、
-// HeadlessEngine の play / step_forward / step_backward / resume / pause 系メソッドは
-// サブフェーズ M で match arm が削除されて orphaned 化している。
-// サブフェーズ S（headless 重複実装削除）で構造体・メソッド・関連フィールドごと整理する。
+// NOTE: ADR-0001 ﾂｧ2 閾ｪ蜍募・逕滓ｩ滓ｧ九・蟒・ｭ｢縺ｫ莨ｴ縺・・// HeadlessEngine 縺ｮ play / step_forward / step_backward / resume / pause 邉ｻ繝｡繧ｽ繝・ラ縺ｯ
+// 繧ｵ繝悶ヵ繧ｧ繝ｼ繧ｺ M 縺ｧ match arm 縺悟炎髯､縺輔ｌ縺ｦ orphaned 蛹悶＠縺ｦ縺・ｋ縲・// 繧ｵ繝悶ヵ繧ｧ繝ｼ繧ｺ S・・eadless 驥崎､・ｮ溯｣・炎髯､・峨〒讒矩菴薙・繝｡繧ｽ繝・ラ繝ｻ髢｢騾｣繝輔ぅ繝ｼ繝ｫ繝峨＃縺ｨ謨ｴ逅・☆繧九・
 #[allow(dead_code)]
 impl HeadlessEngine {
     fn new(
@@ -171,6 +162,16 @@ impl HeadlessEngine {
             timeframe,
         };
         let data_root = data::data_path(None);
+        #[cfg(test)]
+        let narrative_store = std::sync::Arc::new(
+            crate::narrative::store::NarrativeStore::open_in_memory()
+                .expect("failed to open in-memory narrative store"),
+        );
+        #[cfg(not(test))]
+        let narrative_store = std::sync::Arc::new(
+            crate::narrative::store::NarrativeStore::open_default()
+                .expect("failed to open narrative store"),
+        );
         Self {
             state,
             virtual_engine: VirtualExchangeEngine::new(1_000_000.0),
@@ -179,17 +180,29 @@ impl HeadlessEngine {
             timeframe,
             load_tx,
             panes: vec![initial_pane],
-            narrative_store: std::sync::Arc::new(
-                crate::narrative::store::NarrativeStore::open_default()
-                    .expect("failed to open narrative store"),
-            ),
+            narrative_store,
             snapshot_store: crate::narrative::snapshot_store::SnapshotStore::new(data_root.clone()),
             data_root,
             agent_session_state: crate::api::agent_session_state::AgentSessionState::new(),
         }
     }
 
-    /// `POST /api/replay/play {"start":"...","end":"..."}` を処理する。
+    fn enter_replay_mode(&mut self) {
+        self.state.mode = ReplayMode::Replay;
+    }
+
+    fn enter_live_mode(&mut self) {
+        let had_session = !matches!(self.state.session, ReplaySession::Idle);
+        self.state.mode = ReplayMode::Live;
+        self.state.session = ReplaySession::Idle;
+        self.virtual_engine.reset();
+        if had_session {
+            self.virtual_engine.mark_session_terminated();
+        }
+    }
+
+    /// `POST /api/replay/play {"start":"...","end":"..."}` 繧貞・逅・☆繧九・    
+
     fn play(&mut self, start: &str, end: &str) -> Result<String, String> {
         use crate::replay::parse_replay_range;
 
@@ -208,6 +221,7 @@ impl HeadlessEngine {
         let mut active_streams = HashSet::new();
         active_streams.insert(stream);
 
+        self.enter_replay_mode();
         self.state.session = ReplaySession::Loading {
             clock,
             pending_count: 1,
@@ -217,10 +231,11 @@ impl HeadlessEngine {
         self.state.range_input.start = start.to_string();
         self.state.range_input.end = end.to_string();
         self.virtual_engine.reset();
-        // ADR-0001 SessionLifecycleEvent::Started — agent state map をクリアさせる。
+        // ADR-0001 SessionLifecycleEvent::Started 窶・agent state map 繧偵け繝ｪ繧｢縺輔○繧九・
         self.virtual_engine.mark_session_started();
 
-        // kline ロードを別タスクで実行
+        // kline 繝ｭ繝ｼ繝峨ｒ蛻･繧ｿ繧ｹ繧ｯ縺ｧ螳溯｡・
+
         let tx = self.load_tx.clone();
         tokio::spawn(async move {
             let result = loader::load_klines(stream, range).await;
@@ -305,8 +320,8 @@ impl HeadlessEngine {
             .unwrap_or_else(|e| format!(r#"{{"error":"serialize failed: {e}"}}"#))
     }
 
-    /// `get_state_json` のロジックを構造化データとして返す（agent API 用）。
-    /// JSON 文字列化せず、`StepObservation` 構造体を返す。
+    /// `get_state_json` 縺ｮ繝ｭ繧ｸ繝・け繧呈ｧ矩蛹悶ョ繝ｼ繧ｿ縺ｨ縺励※霑斐☆・・gent API 逕ｨ・峨・    /// JSON 譁・ｭ怜・蛹悶○縺壹～StepObservation` 讒矩菴薙ｒ霑斐☆縲・    
+
     fn build_step_observation(
         &self,
         limit: usize,
@@ -400,11 +415,10 @@ impl HeadlessEngine {
         }
     }
 
-    /// `POST /api/agent/session/default/advance` を処理する（Phase 4b-1 サブフェーズ G）。
-    ///
-    /// ADR-0001 / phase4b_agent_replay_api.md §4.3 に基づく。任意区間を wall-time
-    /// 非依存で instant 実行する。stop_on に応じて fill / narrative 更新発生時点で
-    /// 停止する。Headless ランタイム専用（GUI 側は app/api/mod.rs で 400 拒否済み）。
+    /// `POST /api/agent/session/default/advance` 繧貞・逅・☆繧具ｼ・hase 4b-1 繧ｵ繝悶ヵ繧ｧ繝ｼ繧ｺ G・峨・    ///
+    /// ADR-0001 / phase4b_agent_replay_api.md ﾂｧ4.3 縺ｫ蝓ｺ縺･縺上ゆｻｻ諢丞玄髢薙ｒ wall-time
+    /// 髱樔ｾ晏ｭ倥〒 instant 螳溯｡後☆繧九Ｔtop_on 縺ｫ蠢懊§縺ｦ fill / narrative 譖ｴ譁ｰ逋ｺ逕滓凾轤ｹ縺ｧ
+    /// 蛛懈ｭ｢縺吶ｋ縲・eadless 繝ｩ繝ｳ繧ｿ繧､繝蟆ら畑・・UI 蛛ｴ縺ｯ app/api/mod.rs 縺ｧ 400 諡貞凄貂医∩・峨・    
     async fn agent_session_advance(
         &mut self,
         request: crate::api::advance_request::AgentAdvanceRequest,
@@ -471,23 +485,28 @@ impl HeadlessEngine {
 
         loop {
             let pane_step = self.min_step_ms();
-            let (new_time, reached_end) = match &self.state.session {
+            // pane_step == 0 は active_streams が空等の縮退状態を意味する。
+            // このまま loop に入ると `new_time == current` で clock が進まず
+            // 30 秒 timeout まで 504 を返せなくなるため 500 で早期終了する。
+            if pane_step == 0 {
+                log::error!("agent_session_advance: min_step_ms() returned 0 (no active streams?)");
+                return (
+                    500,
+                    r#"{"error":"no active stream step size available"}"#.to_string(),
+                );
+            }
+            let new_time = match &self.state.session {
                 ReplaySession::Active { clock, .. } => {
                     let current = clock.now_ms();
                     let end = clock.full_range().end;
-                    if current + pane_step > end {
-                        (current, true)
-                    } else {
-                        (current + pane_step, false)
+                    if current >= end {
+                        stopped_reason = AdvanceStoppedReason::End;
+                        break;
                     }
+                    current.saturating_add(pane_step).min(until_ms).min(end)
                 }
                 _ => break,
             };
-
-            if reached_end {
-                stopped_reason = AdvanceStoppedReason::End;
-                break;
-            }
 
             let fills: Vec<_> = if let ReplaySession::Active {
                 clock,
@@ -495,29 +514,31 @@ impl HeadlessEngine {
                 active_streams,
             } = &mut self.state.session
             {
-                clock.seek(new_time);
+                clock.tick_until(new_time);
+                let current_time = clock.now_ms();
                 let ticker_str = self.ticker_str.clone();
-                let synthetic: Vec<exchange::Trade> =
-                    active_streams
-                        .iter()
-                        .filter(|s| matches!(s, StreamKind::Kline { .. }))
-                        .filter_map(|stream| {
-                            let klines = store.klines_in(stream, 0..new_time.saturating_add(1));
-                            klines.iter().rev().find(|k| k.time <= new_time).map(|k| {
-                                exchange::Trade {
-                                    time: new_time,
-                                    is_sell: false,
-                                    price: k.close,
-                                    qty: exchange::unit::qty::Qty::from_f32(1.0),
-                                }
+                let synthetic: Vec<exchange::Trade> = active_streams
+                    .iter()
+                    .filter(|s| matches!(s, StreamKind::Kline { .. }))
+                    .filter_map(|stream| {
+                        let klines = store.klines_in(stream, 0..current_time.saturating_add(1));
+                        klines
+                            .iter()
+                            .rev()
+                            .find(|k| k.time <= current_time)
+                            .map(|k| exchange::Trade {
+                                time: current_time,
+                                is_sell: false,
+                                price: k.close,
+                                qty: exchange::unit::qty::Qty::from_f32(1.0),
                             })
-                        })
-                        .collect();
+                    })
+                    .collect();
                 if synthetic.is_empty() {
                     Vec::new()
                 } else {
                     self.virtual_engine
-                        .on_tick(&ticker_str, &synthetic, new_time)
+                        .on_tick(&ticker_str, &synthetic, current_time)
                 }
             } else {
                 Vec::new()
@@ -564,6 +585,12 @@ impl HeadlessEngine {
                 stopped_reason = AdvanceStoppedReason::Narrative;
                 break;
             }
+            if let ReplaySession::Active { clock, .. } = &self.state.session
+                && clock.now_ms() >= clock.full_range().end
+            {
+                stopped_reason = AdvanceStoppedReason::End;
+                break;
+            }
             if new_time >= until_ms {
                 stopped_reason = AdvanceStoppedReason::UntilReached;
                 break;
@@ -607,15 +634,11 @@ impl HeadlessEngine {
         }
     }
 
-    /// `POST /api/agent/session/default/rewind-to-start` を処理する。
-    ///
-    /// ADR-0001 §4 / §6 に基づく:
-    /// - Active + body 有/無: clock を range.start に戻し、`VirtualExchange::reset()` +
-    ///   `mark_session_reset()` を発火する（body は無視される）。
-    /// - Loading: 409 Conflict。
-    /// - Idle + body: `play(start, end)` を呼び出して session を新規初期化する
-    ///   (ADR-0001 §4 「未初期化時の初期化経路」)。
-    /// - Idle + body なし: 400 Bad Request。
+    /// `POST /api/agent/session/default/rewind-to-start` 繧貞・逅・☆繧九・    ///
+    /// ADR-0001 ﾂｧ4 / ﾂｧ6 縺ｫ蝓ｺ縺･縺・
+    /// - Active + body 譛・辟｡: clock 繧・range.start 縺ｫ謌ｻ縺励～VirtualExchange::reset()` +
+    ///   `mark_session_reset()` 繧堤匱轣ｫ縺吶ｋ・・ody 縺ｯ辟｡隕悶＆繧後ｋ・峨・    /// - Loading: 409 Conflict縲・    /// - Idle + body: `play(start, end)` 繧貞他縺ｳ蜃ｺ縺励※ session 繧呈眠隕丞・譛溷喧縺吶ｋ
+    ///   (ADR-0001 ﾂｧ4 縲梧悴蛻晄悄蛹匁凾縺ｮ蛻晄悄蛹也ｵ瑚ｷｯ縲・縲・    /// - Idle + body 縺ｪ縺・ 400 Bad Request縲・    
     async fn agent_session_rewind(
         &mut self,
         init_range: Option<(String, String)>,
@@ -627,7 +650,6 @@ impl HeadlessEngine {
                 return (409, r#"{"error":"session loading"}"#.to_string());
             }
             ReplaySession::Idle => {
-                // Idle + body → 初期化。body なし → 400。
                 let Some((start, end)) = init_range else {
                     return (
                         400,
@@ -662,13 +684,11 @@ impl HeadlessEngine {
         (200, body.to_string())
     }
 
-    /// `POST /api/agent/session/default/order` を処理する（Phase 4b-1 サブフェーズ E）。
-    ///
-    /// ADR-0001 / phase4b_agent_replay_api.md §3.3, §4.4, §4.5 に基づく。
-    /// - session 未起動は 404 + hint
-    /// - `client_order_id` 重複 & body 一致 → 200 + `idempotent_replay: true`
-    /// - `client_order_id` 重複 & body 相違 → 409 Conflict
-    /// - 新規 → 201 Created
+    /// `POST /api/agent/session/default/order` 繧貞・逅・☆繧具ｼ・hase 4b-1 繧ｵ繝悶ヵ繧ｧ繝ｼ繧ｺ E・峨・    ///
+    /// ADR-0001 / phase4b_agent_replay_api.md ﾂｧ3.3, ﾂｧ4.4, ﾂｧ4.5 縺ｫ蝓ｺ縺･縺上・    /// - session 譛ｪ襍ｷ蜍輔・ 404 + hint
+    /// - `client_order_id` 驥崎､・& body 荳閾ｴ 竊・200 + `idempotent_replay: true`
+    /// - `client_order_id` 驥崎､・& body 逶ｸ驕・竊・409 Conflict
+    /// - 譁ｰ隕・竊・201 Created
     fn agent_session_place_order(
         &mut self,
         request: crate::api::order_request::AgentOrderRequest,
@@ -679,7 +699,8 @@ impl HeadlessEngine {
             PositionSide, VirtualOrder, VirtualOrderStatus, VirtualOrderType,
         };
 
-        // session 状態チェック（step と同じ 404 / 503 ルール）。
+        // session 迥ｶ諷九メ繧ｧ繝・け・・tep 縺ｨ蜷後§ 404 / 503 繝ｫ繝ｼ繝ｫ・峨・
+
         match &self.state.session {
             ReplaySession::Idle => {
                 return (
@@ -694,12 +715,13 @@ impl HeadlessEngine {
             ReplaySession::Active { .. } => {}
         }
 
-        // 発注前に lifecycle イベントを観測して map を必要に応じクリア。
+        // 逋ｺ豕ｨ蜑阪↓ lifecycle 繧､繝吶Φ繝医ｒ隕ｳ貂ｬ縺励※ map 繧貞ｿ・ｦ√↓蠢懊§繧ｯ繝ｪ繧｢縲・
+
         self.agent_session_state
             .observe_generation(self.virtual_engine.session_generation());
 
         let key = request.to_key();
-        // 仮 UUID を採番（idempotent replay や conflict では使われない = 捨てられる）。
+        // 莉ｮ UUID 繧呈治逡ｪ・・dempotent replay 繧・conflict 縺ｧ縺ｯ菴ｿ繧上ｌ縺ｪ縺・= 謐ｨ縺ｦ繧峨ｌ繧具ｼ峨・
         let prospective_order_id = uuid::Uuid::new_v4().to_string();
         let outcome = self.agent_session_state.place_or_replay(
             request.client_order_id.clone(),
@@ -709,7 +731,7 @@ impl HeadlessEngine {
 
         match outcome {
             PlaceOrderOutcome::Created { order_id } => {
-                // VirtualExchange に実発注。
+                // VirtualExchange 縺ｫ螳溽匱豕ｨ縲・
                 let side = match request.side {
                     AgentOrderSide::Buy => PositionSide::Long,
                     AgentOrderSide::Sell => PositionSide::Short,
@@ -720,7 +742,7 @@ impl HeadlessEngine {
                 };
                 let virtual_order = VirtualOrder {
                     order_id: order_id.clone(),
-                    // VirtualOrder.ticker は現状 symbol 単体。
+                    // VirtualOrder keeps the bare symbol, not the exchange-prefixed label.
                     ticker: request.ticker.symbol.clone(),
                     side,
                     qty: request.qty,
@@ -734,9 +756,8 @@ impl HeadlessEngine {
                     "client_order_id": request.client_order_id.as_str(),
                     "idempotent_replay": false,
                 });
-                // 新規/冪等リプレイともに 200 で統一する。レスポンスボディの形は同一なので、
-                // Python SDK は `idempotent_replay` フラグだけで分岐できる
-                // （ステータスコードで分岐しない方が実装が単純になる）。
+                // New orders and idempotent replays both use HTTP 200; clients distinguish
+                // them through the `idempotent_replay` flag in the response body.
                 (200, body.to_string())
             }
             PlaceOrderOutcome::IdempotentReplay { order_id } => {
@@ -757,18 +778,18 @@ impl HeadlessEngine {
         }
     }
 
-    /// `POST /api/agent/session/default/step` を処理する（Phase 4b-1 サブフェーズ C / D）。
-    ///
-    /// ADR-0001 / phase4b_agent_replay_api.md §4.2 に基づき、1 バー進行した tick の
+    /// `POST /api/agent/session/default/step` 繧貞・逅・☆繧具ｼ・hase 4b-1 繧ｵ繝悶ヵ繧ｧ繝ｼ繧ｺ C / D・峨・    ///
+    /// ADR-0001 / phase4b_agent_replay_api.md ﾂｧ4.2 縺ｫ蝓ｺ縺･縺阪・ 繝舌・騾ｲ陦後＠縺・tick 縺ｮ
     /// `clock_ms` / `reached_end` / `observation` / `fills` / `updated_narrative_ids`
-    /// を同梱したレスポンスを返す。サブフェーズ D 以降、narrative outcome 更新は
-    /// 同期 `await` で確定させる（agent 側 polling を不要にするため）。
+    /// 繧貞酔譴ｱ縺励◆繝ｬ繧ｹ繝昴Φ繧ｹ繧定ｿ斐☆縲ゅし繝悶ヵ繧ｧ繝ｼ繧ｺ D 莉･髯阪］arrative outcome 譖ｴ譁ｰ縺ｯ
+    /// 蜷梧悄 `await` 縺ｧ遒ｺ螳壹＆縺帙ｋ・・gent 蛛ｴ polling 繧剃ｸ崎ｦ√↓縺吶ｋ縺溘ａ・峨・    
     async fn agent_session_step(&mut self) -> (u16, String) {
         use crate::api::step_response::{StepFill, StepResponse};
 
         let overall_start = std::time::Instant::now();
 
-        // セッション状態チェック。Idle は 404、Loading は 503。
+        // 繧ｻ繝・す繝ｧ繝ｳ迥ｶ諷九メ繧ｧ繝・け縲・dle 縺ｯ 404縲´oading 縺ｯ 503縲・
+
         match &self.state.session {
             ReplaySession::Idle => {
                 return (
@@ -783,15 +804,13 @@ impl HeadlessEngine {
             ReplaySession::Active { .. } => {}
         }
 
-        // Agent state を lifecycle イベントに同期（ハンドラ入口で 1 回のみ）。
-        // 前回の step/order 以降に UI リモコン経由で /play や seek が走った場合、
-        // ここで stale な client_order_id マップが破棄される。
+        // Agent state 繧・lifecycle 繧､繝吶Φ繝医↓蜷梧悄・医ワ繝ｳ繝峨Λ蜈･蜿｣縺ｧ 1 蝗槭・縺ｿ・峨・        // 蜑榊屓縺ｮ step/order 莉･髯阪↓ UI 繝ｪ繝｢繧ｳ繝ｳ邨檎罰縺ｧ /play 繧・seek 縺瑚ｵｰ縺｣縺溷ｴ蜷医・        // 縺薙％縺ｧ stale 縺ｪ client_order_id 繝槭ャ繝励′遐ｴ譽・＆繧後ｋ縲・
+
         self.agent_session_state
             .observe_generation(self.virtual_engine.session_generation());
 
-        // Playing 中なら自動 pause（step-forward 仕様と対称）。
-
-        // 1 バー進める。範囲終端なら reached_end = true で現在時刻を据え置き。
+        // Playing 荳ｭ縺ｪ繧芽・蜍・pause・・tep-forward 莉墓ｧ倥→蟇ｾ遘ｰ・峨・
+        // 1 繝舌・騾ｲ繧√ｋ縲らｯ・峇邨らｫｯ縺ｪ繧・reached_end = true 縺ｧ迴ｾ蝨ｨ譎ょ綾繧呈紺縺育ｽｮ縺阪・
         let pane_step = self.min_step_ms();
         let (new_time, reached_end) = match &self.state.session {
             ReplaySession::Active { clock, .. } => {
@@ -803,9 +822,6 @@ impl HeadlessEngine {
                     (current + pane_step, false)
                 }
             }
-            // 冒頭で ReplaySession::Active をチェック済みだが、await を挟まない
-            // ため状態遷移は起こらない。それでも panic ではなく 500 を返すことで、
-            // 将来 await が混入した場合の silent crash を防ぐ。
             other => {
                 log::error!(
                     "agent_session_step: session state unexpectedly changed to {:?}",
@@ -818,7 +834,8 @@ impl HeadlessEngine {
             }
         };
 
-        // 進行処理（reached_end でない場合のみ）
+        // 騾ｲ陦悟・逅・ｼ・eached_end 縺ｧ縺ｪ縺・ｴ蜷医・縺ｿ・・
+
         let fills: Vec<_> = if !reached_end {
             if let ReplaySession::Active {
                 clock,
@@ -857,9 +874,8 @@ impl HeadlessEngine {
             Vec::new()
         };
 
-        // narrative outcome 更新を同期 await で確定させる（サブフェーズ D）。
-        // plan §5.2 / §8 R1: fill_count 件 → 100ms/p95 を超えたら非同期化に戻す判断基準。
-        // 失敗は log::warn! のみで step 全体を落とさない（plan §7.2 方針）。
+        // narrative outcome 譖ｴ譁ｰ繧貞酔譛・await 縺ｧ遒ｺ螳壹＆縺帙ｋ・医し繝悶ヵ繧ｧ繝ｼ繧ｺ D・峨・        // plan ﾂｧ5.2 / ﾂｧ8 R1: fill_count 莉ｶ 竊・100ms/p95 繧定ｶ・∴縺溘ｉ髱槫酔譛溷喧縺ｫ謌ｻ縺吝愛譁ｭ蝓ｺ貅悶・        // 螟ｱ謨励・ log::warn! 縺ｮ縺ｿ縺ｧ step 蜈ｨ菴薙ｒ關ｽ縺ｨ縺輔↑縺・ｼ・lan ﾂｧ7.2 譁ｹ驥晢ｼ峨・
+
         let narrative_start = std::time::Instant::now();
         let mut updated_narrative_ids: Vec<String> = Vec::new();
         for fill in &fills {
@@ -889,12 +905,13 @@ impl HeadlessEngine {
         if narrative_elapsed_ms > 100 {
             log::warn!(
                 "agent_session_step: narrative outcome update took {narrative_elapsed_ms}ms for \
-                 {fill_count} fill(s) — exceeds R1 p95 budget (100ms). Consider non-blocking fallback.",
+                 {fill_count} fill(s) 窶・exceeds R1 p95 budget (100ms). Consider non-blocking fallback.",
                 fill_count = fills.len()
             );
         }
 
-        // observation 構築（session は Active のはず）
+        // observation 讒狗ｯ会ｼ・ession 縺ｯ Active 縺ｮ縺ｯ縺夲ｼ・
+
         let observation = match self.build_step_observation(200) {
             Some(obs) => obs,
             None => {
@@ -905,11 +922,9 @@ impl HeadlessEngine {
             }
         };
 
-        // サブフェーズ E: fill.order_id から agent_session_state を逆引きして
-        // client_order_id を埋める。他経路（UI リモコン `/api/replay/order`）発注の fill
-        // は agent の map に無いため None のまま（設計通り）。
-        // 世代同期はハンドラ開始時に済んでいるため、ここでは再取得しない
-        // （step 内で generation を変える処理は存在しない）。
+        // 繧ｵ繝悶ヵ繧ｧ繝ｼ繧ｺ E: fill.order_id 縺九ｉ agent_session_state 繧帝・ｼ輔″縺励※
+        // client_order_id 繧貞沂繧√ｋ縲ゆｻ也ｵ瑚ｷｯ・・I 繝ｪ繝｢繧ｳ繝ｳ `/api/replay/order`・臥匱豕ｨ縺ｮ fill
+        // 縺ｯ agent 縺ｮ map 縺ｫ辟｡縺・◆繧・None 縺ｮ縺ｾ縺ｾ・郁ｨｭ險磯壹ｊ・峨・        // 荳紋ｻ｣蜷梧悄縺ｯ繝上Φ繝峨Λ髢句ｧ区凾縺ｫ貂医ｓ縺ｧ縺・ｋ縺溘ａ縲√％縺薙〒縺ｯ蜀榊叙蠕励＠縺ｪ縺・        // ・・tep 蜀・〒 generation 繧貞､峨∴繧句・逅・・蟄伜惠縺励↑縺・ｼ峨・
         let step_fills: Vec<StepFill> = fills
             .iter()
             .map(|f| {
@@ -924,7 +939,8 @@ impl HeadlessEngine {
         let resp = StepResponse::new(new_time, reached_end, observation, step_fills)
             .with_updated_narrative_ids(updated_narrative_ids);
 
-        // R1 計測用: 全体の step ハンドラ処理時間。
+        // R1 險域ｸｬ逕ｨ: 蜈ｨ菴薙・ step 繝上Φ繝峨Λ蜃ｦ逅・凾髢薙・
+
         log::debug!(
             "agent_session_step: total {total_ms}ms (narrative sync {narrative_elapsed_ms}ms)",
             total_ms = overall_start.elapsed().as_millis()
@@ -1084,7 +1100,8 @@ impl HeadlessEngine {
         serde_json::json!({"ok": true, "order_id": id, "status": "pending"}).to_string()
     }
 
-    /// アクティブセッションの最新 close 価格を返す。
+    /// 繧｢繧ｯ繝・ぅ繝悶そ繝・す繝ｧ繝ｳ縺ｮ譛譁ｰ close 萓｡譬ｼ繧定ｿ斐☆縲・    
+
     fn last_close_price(&self) -> Option<f64> {
         if let ReplaySession::Active {
             clock,
@@ -1105,7 +1122,8 @@ impl HeadlessEngine {
         None
     }
 
-    /// 全ペインの最小タイムフレーム（ms）を返す。step forward/backward のステップ幅に使う。
+    /// 蜈ｨ繝壹う繝ｳ縺ｮ譛蟆上ち繧､繝繝輔Ξ繝ｼ繝・・s・峨ｒ霑斐☆縲Ｔtep forward/backward 縺ｮ繧ｹ繝・ャ繝怜ｹ・↓菴ｿ縺・・    
+
     fn min_step_ms(&self) -> u64 {
         self.panes
             .iter()
@@ -1206,7 +1224,8 @@ impl HeadlessEngine {
         serde_json::json!({ "ok": true }).to_string()
     }
 
-    /// `StepClock::now_ms()` を取得する。未開始なら 0。
+    /// `StepClock::now_ms()` 繧貞叙蠕励☆繧九よ悴髢句ｧ九↑繧・0縲・    
+
     fn now_ms(&self) -> i64 {
         use crate::replay::ReplaySession;
         match &self.state.session {
@@ -1217,7 +1236,8 @@ impl HeadlessEngine {
         }
     }
 
-    /// ナラティブコマンドをサービスレイヤーに委譲する。
+    /// 繝翫Λ繝・ぅ繝悶さ繝槭Φ繝峨ｒ繧ｵ繝ｼ繝薙せ繝ｬ繧､繝､繝ｼ縺ｫ蟋碑ｭｲ縺吶ｋ縲・    
+
     async fn handle_narrative_command(
         &self,
         cmd: crate::replay_api::NarrativeCommand,
@@ -1255,7 +1275,8 @@ impl HeadlessEngine {
         reply.send_status(status, body);
     }
 
-    /// API コマンドを処理し、ReplySender でレスポンスを返す。
+    /// API 繧ｳ繝槭Φ繝峨ｒ蜃ｦ逅・＠縲ヽeplySender 縺ｧ繝ｬ繧ｹ繝昴Φ繧ｹ繧定ｿ斐☆縲・    
+
     async fn handle_command(&mut self, cmd: ApiCommand, reply: crate::replay_api::ReplySender) {
         use crate::replay::ReplayCommand;
 
@@ -1263,23 +1284,34 @@ impl HeadlessEngine {
             ApiCommand::Replay(ReplayCommand::GetStatus) => {
                 reply.send(self.get_status_json());
             }
-            ApiCommand::Replay(ReplayCommand::Toggle) => {
-                // Play/Pause API was deprecated in ADR-0001
-                reply.send(serde_json::json!({"ok": false, "error": "deprecated"}).to_string());
+            ApiCommand::Replay(ReplayCommand::Toggle { init_range }) => {
+                let result = if let Some((start, end)) = init_range {
+                    self.play(&start, &end)
+                } else if matches!(self.state.mode, ReplayMode::Replay) {
+                    self.enter_live_mode();
+                    Ok(self.get_status_json())
+                } else {
+                    self.enter_replay_mode();
+                    Ok(self.get_status_json())
+                };
+
+                match result {
+                    Ok(body) => reply.send(body),
+                    Err(err) => {
+                        reply.send_status(400, serde_json::json!({ "error": err }).to_string())
+                    }
+                }
             }
             ApiCommand::Replay(ReplayCommand::SetMode { mode }) => {
-                // headless では Live モードに遷移できないため実質 no-op だが、
-                // `"live"` 指定時は ADR-0001 の `SessionLifecycleEvent::Terminated`
-                // 契約として生成世代を進める（agent API 側の `client_order_id`
-                // map を前セッションから確実に切り離すため）。
                 if mode.eq_ignore_ascii_case("live") {
-                    self.virtual_engine.mark_session_terminated();
+                    self.enter_live_mode();
+                } else if mode.eq_ignore_ascii_case("replay") {
+                    self.enter_replay_mode();
                 }
                 reply.send(self.get_status_json());
             }
             ApiCommand::Replay(ReplayCommand::SaveState) => {
-                // headless では保存不要
-                reply.send(r#"{"ok":true}"#.to_string());
+                // headless 縺ｧ縺ｯ菫晏ｭ倅ｸ崎ｦ・                reply.send(r#"{"ok":true}"#.to_string());
             }
             ApiCommand::VirtualExchange(VirtualExchangeCommand::GetState) => {
                 match &self.state.session {
@@ -1326,7 +1358,7 @@ impl HeadlessEngine {
             ApiCommand::AgentSession(crate::replay_api::AgentSessionCommand::Step {
                 session_id: _,
             }) => {
-                // session_id は route 層で "default" に限定済み（非 default は 501 で既に拒否）。
+                // session_id 縺ｯ route 螻､縺ｧ "default" 縺ｫ髯仙ｮ壽ｸ医∩・磯撼 default 縺ｯ 501 縺ｧ譌｢縺ｫ諡貞凄・峨・
                 let (status, body) = self.agent_session_step().await;
                 reply.send_status(status, body);
             }
@@ -1351,7 +1383,7 @@ impl HeadlessEngine {
                 let (status, body) = self.agent_session_rewind(init_range).await;
                 reply.send_status(status, body);
             }
-            // headless で未対応のコマンドは 501 を返す
+            // headless 縺ｧ譛ｪ蟇ｾ蠢懊・繧ｳ繝槭Φ繝峨・ 501 繧定ｿ斐☆
             ApiCommand::Pane(_)
             | ApiCommand::Auth(_)
             | ApiCommand::FetchBuyingPower
@@ -1377,10 +1409,10 @@ impl HeadlessEngine {
     }
 }
 
-// ── エントリーポイント ──────────────────────────────────────────────────────────
+// 笏笏 繧ｨ繝ｳ繝医Μ繝ｼ繝昴う繝ｳ繝・笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏
 
-/// headless モードのメインループ。
-/// `--headless` フラグが渡されたとき `main()` から呼ばれる。
+/// headless 繝｢繝ｼ繝峨・繝｡繧､繝ｳ繝ｫ繝ｼ繝励・/// `--headless` 繝輔Λ繧ｰ縺梧ｸ｡縺輔ｌ縺溘→縺・`main()` 縺九ｉ蜻ｼ縺ｰ繧後ｋ縲・
+
 pub async fn run(args: &[String]) {
     let headless_args = match parse_headless_args(args) {
         Ok(a) => a,
@@ -1412,26 +1444,23 @@ pub async fn run(args: &[String]) {
         timeframe
     );
 
-    // kline ロード結果の通知チャネル
+    // kline 繝ｭ繝ｼ繝臥ｵ先棡縺ｮ騾夂衍繝√Ε繝阪Ν
     let (load_tx, mut load_rx) = tokio::sync::mpsc::channel::<LoadResult>(8);
 
-    // API コマンドチャネル
-    // NOTE: replay_api::start_server は GUI モードとシグネチャを共有するため
-    // futures::channel::mpsc::Sender を要求する。tokio::sync::mpsc ではなく
-    // futures ベースのチャネルを使うのはここが理由。
+    // API 繧ｳ繝槭Φ繝峨メ繝｣繝阪Ν
+    // NOTE: replay_api::start_server 縺ｯ GUI 繝｢繝ｼ繝峨→繧ｷ繧ｰ繝阪メ繝｣繧貞・譛峨☆繧九◆繧・    // futures::channel::mpsc::Sender 繧定ｦ∵ｱゅ☆繧九Ｕokio::sync::mpsc 縺ｧ縺ｯ縺ｪ縺・    // futures 繝吶・繧ｹ縺ｮ繝√Ε繝阪Ν繧剃ｽｿ縺・・縺ｯ縺薙％縺檎炊逕ｱ縲・
     let (api_tx, mut api_rx) = futures::channel::mpsc::channel::<ApiMessage>(32);
 
-    // HTTP API サーバーを別タスクで起動
+    // HTTP API 繧ｵ繝ｼ繝舌・繧貞挨繧ｿ繧ｹ繧ｯ縺ｧ襍ｷ蜍・
+
     tokio::spawn(async move {
         crate::replay_api::start_server(api_tx).await;
     });
 
     let mut engine = HeadlessEngine::new(ticker, timeframe, load_tx);
 
-    // ADR-0001 §2 自動再生機構の全廃:
-    // 以前は 100ms interval で `engine.tick()` を発火させ Playing 中の replay を自動進行させていたが、
-    // agent session API (`/api/agent/session/:id/{step,advance}`) への一本化に伴い削除。
-
+    // ADR-0001 ﾂｧ2 閾ｪ蜍募・逕滓ｩ滓ｧ九・蜈ｨ蟒・
+    // 莉･蜑阪・ 100ms interval 縺ｧ `engine.tick()` 繧堤匱轣ｫ縺輔○ Playing 荳ｭ縺ｮ replay 繧定・蜍暮ｲ陦後＆縺帙※縺・◆縺後・    // agent session API (`/api/agent/session/:id/{step,advance}`) 縺ｸ縺ｮ荳譛ｬ蛹悶↓莨ｴ縺・炎髯､縲・
     log::info!("headless event loop started (API port: {})", {
         std::env::var("FLOWSURFACE_API_PORT")
             .ok()
@@ -1443,12 +1472,13 @@ pub async fn run(args: &[String]) {
         tokio::select! {
             biased;
 
-            // kline ロード完了
+            // kline 繝ｭ繝ｼ繝牙ｮ御ｺ・
+
             Some(result) = load_rx.recv() => {
                 engine.handle_load_result(result);
             }
 
-            // API コマンド受信
+            // API 繧ｳ繝槭Φ繝牙女菫｡
             Some((cmd, reply)) = api_rx.next() => {
                 engine.handle_command(cmd, reply).await;
             }
@@ -1456,13 +1486,13 @@ pub async fn run(args: &[String]) {
     }
 }
 
-// ── テスト ─────────────────────────────────────────────────────────────────────
+// 笏笏 繝・せ繝・笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // ── parse_headless_args ────────────────────────────────────────────────────
+    // 笏笏 parse_headless_args 笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏
 
     fn args(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
@@ -1517,7 +1547,7 @@ mod tests {
         assert_eq!(result.ticker, "HyperliquidLinear:BTC");
     }
 
-    // ── parse_ticker_str ──────────────────────────────────────────────────────
+    // 笏笏 parse_ticker_str 笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏
 
     #[test]
     fn parse_ticker_str_hyperliquid_linear_btc() {
@@ -1548,7 +1578,7 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // ── parse_timeframe_str ───────────────────────────────────────────────────
+    // 笏笏 parse_timeframe_str 笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏
 
     #[test]
     fn parse_timeframe_str_m1() {
@@ -1577,7 +1607,7 @@ mod tests {
         assert!(result.unwrap_err().contains("unknown timeframe"));
     }
 
-    // ── HeadlessEngine::play 引数バリデーション ───────────────────────────────
+    // 笏笏 HeadlessEngine::play 蠑墓焚繝舌Μ繝・・繧ｷ繝ｧ繝ｳ 笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏
 
     #[tokio::test]
     async fn engine_play_returns_error_for_invalid_date_range() {
@@ -1618,7 +1648,6 @@ mod tests {
         let timeframe = Timeframe::M1;
         let (tx, _rx) = tokio::sync::mpsc::channel(4);
         let mut engine = HeadlessEngine::new(ticker, timeframe, tx);
-        // 注文を入れてから play — リセットされるはず
         engine
             .virtual_engine
             .place_order(crate::replay::virtual_exchange::VirtualOrder {
@@ -1635,7 +1664,7 @@ mod tests {
         assert_eq!(engine.virtual_engine.get_orders().len(), 0);
     }
 
-    // ── step_forward / pause / resume (removed) ──────────────────────────────
+    // 笏笏 step_forward / pause / resume (removed) 笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏
 
     fn make_active_engine_with_klines(
         start_ms: u64,
@@ -1656,12 +1685,13 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(4);
         let mut engine = HeadlessEngine::new(ticker, timeframe, tx);
 
-        // Active セッションを手動で構築する
+        // Active 繧ｻ繝・す繝ｧ繝ｳ繧呈焔蜍輔〒讒狗ｯ峨☆繧・
+
         let mut clock = StepClock::new(start_ms, end_ms, step_ms);
         clock.seek(initial_time);
 
         let mut store = EventStore::new();
-        // start, start+step の 2 本の kline を挿入する
+        // start, start+step 縺ｮ 2 譛ｬ縺ｮ kline 繧呈諺蜈･縺吶ｋ
         let mk = |t: u64| {
             exchange::Kline::new(
                 t,
@@ -1706,7 +1736,7 @@ mod tests {
         assert!(json.contains("replay not active"));
     }
 
-    // ── handle_load_result: Loading → Active 遷移 ────────────────────────────
+    // 笏笏 handle_load_result: Loading 竊・Active 驕ｷ遘ｻ 笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏
 
     #[test]
     fn handle_load_result_transitions_loading_to_active_when_single_stream() {
@@ -1723,7 +1753,8 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(4);
         let mut engine = HeadlessEngine::new(ticker, timeframe, tx);
 
-        // Loading 状態を手動で設定
+        // Loading 迥ｶ諷九ｒ謇句虚縺ｧ險ｭ螳・
+
         let clock = StepClock::new(0, 3_600_000, 60_000);
         let mut active_streams = HashSet::new();
         active_streams.insert(stream);
@@ -1734,7 +1765,7 @@ mod tests {
             active_streams,
         };
 
-        // ダミー kline を返す
+        // 繝繝溘・ kline 繧定ｿ斐☆
         let dummy_kline = exchange::Kline::new(
             60_000,
             100.0,
@@ -1776,7 +1807,7 @@ mod tests {
         assert!(matches!(engine.state.session, ReplaySession::Idle));
     }
 
-    // ── agent_session_step (Phase 4b-1 サブフェーズ C) ────────────────────────
+    // 笏笏 agent_session_step (Phase 4b-1 繧ｵ繝悶ヵ繧ｧ繝ｼ繧ｺ C) 笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏
 
     #[tokio::test]
     async fn agent_session_step_returns_404_when_session_idle() {
@@ -1836,7 +1867,7 @@ mod tests {
         let start_ms = 1_000_000u64;
         let step_ms = 60_000u64;
         let end_ms = start_ms + step_ms * 2;
-        // 初期位置を end_ms にセット — これ以上進めない。
+        // 蛻晄悄菴咲ｽｮ繧・end_ms 縺ｫ繧ｻ繝・ヨ 窶・縺薙ｌ莉･荳企ｲ繧√↑縺・・
         let mut engine = make_active_engine_with_klines(start_ms, end_ms, step_ms, end_ms);
         let (status, body) = engine.agent_session_step().await;
         assert_eq!(status, 200);
@@ -1858,7 +1889,6 @@ mod tests {
         let mut engine =
             make_active_engine_with_klines(start_ms, start_ms + step_ms * 5, step_ms, start_ms);
 
-        // 成行注文を 1 件置いてから step — 次 tick の close 価格で即約定する。
         engine.virtual_engine.place_order(VirtualOrder {
             order_id: "ord_1".to_string(),
             ticker: "BTC".to_string(),
@@ -1899,7 +1929,7 @@ mod tests {
 
     #[tokio::test]
     async fn agent_session_step_updated_narrative_ids_empty_when_no_linked_narrative() {
-        // narrative が linked されていない場合は空配列（サブフェーズ D）。
+        // narrative 縺・linked 縺輔ｌ縺ｦ縺・↑縺・ｴ蜷医・遨ｺ驟榊・・医し繝悶ヵ繧ｧ繝ｼ繧ｺ D・峨・
         let start_ms = 1_000_000u64;
         let step_ms = 60_000u64;
         let mut engine =
@@ -1916,9 +1946,6 @@ mod tests {
 
     #[tokio::test]
     async fn step_updates_narrative_synchronously() {
-        // ADR-0001 / plan §5.2 の核不変条件:
-        // step レスポンスの `updated_narrative_ids` は同期 await 後に確定し、
-        // agent が polling 不要で UUID を取得できる。
         use crate::narrative::model::{Narrative, NarrativeAction, NarrativeSide, SnapshotRef};
         use crate::replay::virtual_exchange::{PositionSide, VirtualOrder, VirtualOrderStatus};
 
@@ -1927,7 +1954,8 @@ mod tests {
         let mut engine =
             make_active_engine_with_klines(start_ms, start_ms + step_ms * 5, step_ms, start_ms);
 
-        // 永続 SQLite の蓄積を避けるため、このテスト実行固有の UUID を order_id に採用。
+        // 豌ｸ邯・SQLite 縺ｮ闢・ｩ阪ｒ驕ｿ縺代ｋ縺溘ａ縲√％縺ｮ繝・せ繝亥ｮ溯｡悟崋譛峨・ UUID 繧・order_id 縺ｫ謗｡逕ｨ縲・
+
         let unique_order_id = format!("ord_d_sync_{}", uuid::Uuid::new_v4());
         let narrative_id = uuid::Uuid::new_v4();
         let narrative = Narrative {
@@ -1950,8 +1978,6 @@ mod tests {
             },
             confidence: 0.5,
             outcome: None,
-            // 共有 SQLite（デフォルト store）はテスト間で永続化されるため、
-            // 毎回ユニークな order_id を生成して蓄積による衝突を防ぐ。
             linked_order_id: Some(unique_order_id.clone()),
             public: false,
             created_at_ms: start_ms as i64,
@@ -1959,7 +1985,6 @@ mod tests {
         };
         engine.narrative_store.insert(narrative).await.unwrap();
 
-        // 成行注文を置いて step — 次 tick で即約定する。
         engine.virtual_engine.place_order(VirtualOrder {
             order_id: unique_order_id.clone(),
             ticker: "BTC".to_string(),
@@ -1974,15 +1999,16 @@ mod tests {
         assert_eq!(status, 200, "body: {body}");
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
 
-        // 1. updated_narrative_ids にこの narrative の UUID が含まれる。
+        // 1. updated_narrative_ids 縺ｫ縺薙・ narrative 縺ｮ UUID 縺悟性縺ｾ繧後ｋ縲・
+
         let ids = v["updated_narrative_ids"]
             .as_array()
             .expect("must be array");
         assert_eq!(ids.len(), 1, "expected one updated id, got {body}");
         assert_eq!(ids[0].as_str().unwrap(), narrative_id.to_string());
 
-        // 2. step レスポンス返却時点で outcome が DB に書き込み完了している
-        //    （polling 不要 = 同期 await の保証）。
+        // 2. step 繝ｬ繧ｹ繝昴Φ繧ｹ霑泌唆譎らせ縺ｧ outcome 縺・DB 縺ｫ譖ｸ縺崎ｾｼ縺ｿ螳御ｺ・＠縺ｦ縺・ｋ
+        //    ・・olling 荳崎ｦ・= 蜷梧悄 await 縺ｮ菫晁ｨｼ・峨・
         let stored = engine
             .narrative_store
             .get(narrative_id)
@@ -1994,7 +2020,7 @@ mod tests {
         assert_eq!(outcome.fill_time_ms, (start_ms + step_ms) as i64);
     }
 
-    // ── agent_session_place_order (Phase 4b-1 サブフェーズ E) ────────────────
+    // 笏笏 agent_session_place_order (Phase 4b-1 繧ｵ繝悶ヵ繧ｧ繝ｼ繧ｺ E) 笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏
 
     fn sample_order_request(
         cli_id: &str,
@@ -2022,11 +2048,11 @@ mod tests {
 
     #[tokio::test]
     async fn place_order_returns_503_when_session_loading() {
-        // StepClock / EventStore は super::* 経由で既に import 済み。
+        // StepClock / EventStore 縺ｯ super::* 邨檎罰縺ｧ譌｢縺ｫ import 貂医∩縲・
         let ticker = parse_ticker_str("HyperliquidLinear:BTC").unwrap();
         let (tx, _rx) = tokio::sync::mpsc::channel(4);
         let mut engine = HeadlessEngine::new(ticker, Timeframe::M1, tx);
-        // Loading セッションを手動構築
+        // Loading 繧ｻ繝・す繝ｧ繝ｳ繧呈焔蜍墓ｧ狗ｯ・
         let clock = StepClock::new(0, 3_600_000, 60_000);
         engine.state.session = ReplaySession::Loading {
             clock,
@@ -2046,7 +2072,7 @@ mod tests {
         let mut engine =
             make_active_engine_with_klines(start_ms, start_ms + step_ms * 5, step_ms, start_ms);
         let (status, body) = engine.agent_session_place_order(sample_order_request("cli_1", 0.1));
-        // 新規・冪等リプレイともに 200 で統一。分岐は idempotent_replay フラグで行う。
+        // First placement returns 200 and reports `idempotent_replay = false`.
         assert_eq!(status, 200, "body: {body}");
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(v["client_order_id"], "cli_1");
@@ -2067,14 +2093,13 @@ mod tests {
         let v1: serde_json::Value = serde_json::from_str(&b1).unwrap();
         let first_order_id = v1["order_id"].as_str().unwrap().to_string();
 
-        // 同じ client_order_id + 同じ body → 200 + idempotent_replay: true
+        // 蜷後§ client_order_id + 蜷後§ body 竊・200 + idempotent_replay: true
         let (s2, b2) = engine.agent_session_place_order(sample_order_request("cli_1", 0.1));
         assert_eq!(s2, 200, "body: {b2}");
         let v2: serde_json::Value = serde_json::from_str(&b2).unwrap();
         assert_eq!(v2["idempotent_replay"], true);
         assert_eq!(v2["order_id"], first_order_id);
 
-        // VirtualExchange には 1 件のみ。
         assert_eq!(engine.virtual_engine.get_orders().len(), 1);
     }
 
@@ -2088,14 +2113,13 @@ mod tests {
         let (s1, _) = engine.agent_session_place_order(sample_order_request("cli_1", 0.1));
         assert_eq!(s1, 200);
 
-        // 同じ cli_1 で qty 違い → 409
+        // 蜷後§ cli_1 縺ｧ qty 驕輔＞ 竊・409
         let (s2, b2) = engine.agent_session_place_order(sample_order_request("cli_1", 0.2));
         assert_eq!(s2, 409, "body: {b2}");
         let v: serde_json::Value = serde_json::from_str(&b2).unwrap();
         assert!(v["error"].as_str().unwrap().contains("conflict"));
         assert!(v["existing_order_id"].is_string());
 
-        // VirtualExchange には 1 件のみ（衝突時は新規発注しない）。
         assert_eq!(engine.virtual_engine.get_orders().len(), 1);
     }
 
@@ -2115,7 +2139,7 @@ mod tests {
 
     #[tokio::test]
     async fn place_order_map_cleared_after_session_lifecycle_event() {
-        // ADR-0001 不変条件: UI リモコン /play 等が走ると agent map がクリアされる。
+        // ADR-0001 荳榊､画擅莉ｶ: UI 繝ｪ繝｢繧ｳ繝ｳ /play 遲峨′襍ｰ繧九→ agent map 縺後け繝ｪ繧｢縺輔ｌ繧九・
         let start_ms = 1_000_000u64;
         let step_ms = 60_000u64;
         let mut engine =
@@ -2124,10 +2148,10 @@ mod tests {
         let (s1, _) = engine.agent_session_place_order(sample_order_request("cli_1", 0.1));
         assert_eq!(s1, 200);
 
-        // lifecycle event 発火（実運用では /play / step-backward が呼ぶ）。
         engine.virtual_engine.mark_session_reset();
 
-        // 同じ cli_1 で qty 違い → 新規受付（クリア後なので 201）。
+        // 蜷後§ cli_1 縺ｧ qty 驕輔＞ 竊・譁ｰ隕丞女莉假ｼ医け繝ｪ繧｢蠕後↑縺ｮ縺ｧ 201・峨・
+
         let (s2, b2) = engine.agent_session_place_order(sample_order_request("cli_1", 0.2));
         assert_eq!(
             s2, 200,
@@ -2137,8 +2161,8 @@ mod tests {
 
     #[tokio::test]
     async fn step_fill_carries_client_order_id_when_placed_via_agent_api() {
-        // サブフェーズ E の重要不変条件: agent API で発注した注文の fill は
-        // step レスポンスの fills 配列で client_order_id を返す。
+        // 繧ｵ繝悶ヵ繧ｧ繝ｼ繧ｺ E 縺ｮ驥崎ｦ∽ｸ榊､画擅莉ｶ: agent API 縺ｧ逋ｺ豕ｨ縺励◆豕ｨ譁・・ fill 縺ｯ
+        // step 繝ｬ繧ｹ繝昴Φ繧ｹ縺ｮ fills 驟榊・縺ｧ client_order_id 繧定ｿ斐☆縲・
         let start_ms = 1_000_000u64;
         let step_ms = 60_000u64;
         let mut engine =
@@ -2154,7 +2178,7 @@ mod tests {
         assert_eq!(fills[0]["client_order_id"], "cli_trace");
     }
 
-    // ── agent_session_advance (Phase 4b-1 サブフェーズ G) ────────────────────
+    // 笏笏 agent_session_advance (Phase 4b-1 繧ｵ繝悶ヵ繧ｧ繝ｼ繧ｺ G) 笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏
 
     fn make_advance_request(
         until_ms: u64,
@@ -2199,7 +2223,7 @@ mod tests {
 
     #[tokio::test]
     async fn advance_reaches_end_returns_end_reason() {
-        // until_ms が range 終端より先なら End で停止。
+        // until_ms 縺・range 邨らｫｯ繧医ｊ蜈医↑繧・End 縺ｧ蛛懈ｭ｢縲・
         let start_ms = 1_000_000u64;
         let step_ms = 60_000u64;
         let end_ms = start_ms + step_ms * 3;
@@ -2213,6 +2237,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn advance_reaches_non_aligned_end_exactly() {
+        let start_ms = 1_000_000u64;
+        let step_ms = 60_000u64;
+        let end_ms = start_ms + step_ms * 2 + step_ms / 2;
+        let mut engine = make_active_engine_with_klines(start_ms, end_ms, step_ms, start_ms);
+
+        let (_, body) = engine
+            .agent_session_advance(make_advance_request(end_ms + step_ms, vec![], false))
+            .await;
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["stopped_reason"], "end", "body: {body}");
+        assert_eq!(v["clock_ms"].as_u64().unwrap(), end_ms, "body: {body}");
+    }
+
+    #[tokio::test]
     async fn advance_stops_on_fill() {
         use crate::api::advance_request::AdvanceStopCondition;
         use crate::replay::virtual_exchange::{PositionSide, VirtualOrder, VirtualOrderStatus};
@@ -2222,7 +2261,6 @@ mod tests {
         let mut engine =
             make_active_engine_with_klines(start_ms, start_ms + step_ms * 10, step_ms, start_ms);
 
-        // 成行注文 → 次 tick で約定する → advance が 1 tick で stop_on: fill により停止する。
         engine.virtual_engine.place_order(VirtualOrder {
             order_id: "ord_stop".to_string(),
             ticker: "BTC".to_string(),
@@ -2310,7 +2348,7 @@ mod tests {
 
     #[tokio::test]
     async fn advance_past_until_ms_returns_zero_ticks() {
-        // until_ms <= 現在時刻 の場合は 0 tick で UntilReached。後退は agent scope 外。
+        // until_ms <= 迴ｾ蝨ｨ譎ょ綾 縺ｮ蝣ｴ蜷医・ 0 tick 縺ｧ UntilReached縲ょｾ碁縺ｯ agent scope 螟悶・
         let start_ms = 1_000_000u64;
         let step_ms = 60_000u64;
         let mut engine =

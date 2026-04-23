@@ -4,12 +4,12 @@ use crate::screen::dashboard::Dashboard;
 use crate::widget::toast::Toast;
 
 use super::super::{
-    ReplayLoadEvent, ReplayMessage, ReplaySession, ReplayUserMessage, store::LoadedData,
+    ReplayLoadEvent, ReplayMessage, ReplayMode, ReplaySession, ReplayUserMessage, clock::StepClock,
+    loader, min_timeframe_ms, store::EventStore, store::LoadedData,
 };
 use super::ReplayController;
 
 impl ReplayController {
-    /// UI 操作を処理する。非同期タスクを起動する可能性がある（Play 時に kline ロードタスクを発行）。
     pub fn handle_user_message(
         &mut self,
         msg: ReplayUserMessage,
@@ -21,10 +21,8 @@ impl ReplayController {
                 let was_replay = self.state.is_replay();
                 self.state.toggle_mode();
                 if was_replay && !self.state.is_replay() {
-                    // Replay → Live: ペイン content を再構築して WS を自動復帰させる
                     dashboard.rebuild_for_live(main_window_id);
                 } else if !was_replay && self.state.is_replay() {
-                    // Live → Replay: replay_mode=true で再構築してフェッチループを抑制する
                     dashboard.clear_chart_for_replay(main_window_id);
                 }
                 (Task::none(), None)
@@ -42,9 +40,59 @@ impl ReplayController {
         }
     }
 
-    /// 非同期ロードイベントを処理する。
-    /// KlinesLoadCompleted も DataLoadFailed もタスクを起動しないため、
-    /// Task を返す必要がない。これを型で表現する。
+    pub fn initialize_session(
+        &mut self,
+        start: &str,
+        end: &str,
+        dashboard: &mut Dashboard,
+        main_window_id: iced::window::Id,
+    ) -> Result<Task<ReplayMessage>, String> {
+        use std::collections::HashSet;
+
+        let (start_ms, end_ms) =
+            super::super::parse_replay_range(start, end).map_err(|err| err.to_string())?;
+        let kline_targets = dashboard.prepare_replay(main_window_id);
+        if kline_targets.is_empty() {
+            return Err("no ready kline streams; configure at least one chart first".to_string());
+        }
+
+        let active_streams: HashSet<_> = kline_targets
+            .into_iter()
+            .map(|(_, stream)| stream)
+            .collect();
+        let step_size_ms = min_timeframe_ms(&active_streams);
+        let clock = StepClock::new(start_ms, end_ms, step_size_ms);
+
+        self.state.mode = ReplayMode::Replay;
+        self.state.range_input.start = start.to_string();
+        self.state.range_input.end = end.to_string();
+        self.state.session = ReplaySession::Loading {
+            clock,
+            pending_count: active_streams.len(),
+            store: EventStore::new(),
+            active_streams: active_streams.clone(),
+        };
+
+        let tasks = active_streams
+            .into_iter()
+            .map(|stream| {
+                let stream_step_ms = stream
+                    .as_kline_stream()
+                    .map(|(_, tf)| tf.to_milliseconds())
+                    .unwrap_or(step_size_ms);
+                let range = super::super::compute_load_range(start_ms, end_ms, stream_step_ms);
+                Task::perform(loader::load_klines(stream, range), |result| match result {
+                    Ok(r) => ReplayMessage::Load(ReplayLoadEvent::KlinesLoadCompleted(
+                        r.stream, r.range, r.klines,
+                    )),
+                    Err(e) => ReplayMessage::Load(ReplayLoadEvent::DataLoadFailed(e)),
+                })
+            })
+            .collect::<Vec<_>>();
+
+        Ok(Task::batch(tasks))
+    }
+
     pub fn handle_load_event(
         &mut self,
         event: ReplayLoadEvent,
@@ -53,11 +101,6 @@ impl ReplayController {
     ) -> Option<Toast> {
         match event {
             ReplayLoadEvent::KlinesLoadCompleted(stream, range, klines) => {
-                // 空 klines でも EventStore に登録してストリームをロード済みとマークする。
-                // klines が空 = データなし（市場休場・範囲外）であり「ロード未完了」ではない。
-                // Idle なら DataLoadFailed 後の遅延 KlinesLoadCompleted → サイレントドロップ。
-
-                // Step 1: ミュータブルボローで内部を更新し、遷移すべきかを bool で返す
                 let should_activate = if let ReplaySession::Loading {
                     pending_count,
                     store,
@@ -75,11 +118,9 @@ impl ReplayController {
                     *pending_count = pending_count.saturating_sub(1);
                     *pending_count == 0
                 } else {
-                    // Idle: DataLoadFailed 後の遅延 KlinesLoadCompleted → 無視
                     false
                 };
 
-                // Step 2: ボローが解放されてから mem::replace で Loading → Active に遷移
                 if should_activate {
                     let old = std::mem::replace(&mut self.state.session, ReplaySession::Idle);
                     if let ReplaySession::Loading {
@@ -97,9 +138,6 @@ impl ReplayController {
                     }
                 }
 
-                // Start 時刻より前のバーのみを注入する（pre_start_history バー）。
-                // Start 以降のバーは dispatch_tick が逐次注入するため、ここで注入すると
-                // dedup で無視されてバーが増えなくなる。
                 let start_ms = match &self.state.session {
                     ReplaySession::Loading { clock, .. } | ReplaySession::Active { clock, .. } => {
                         clock.full_range().start
@@ -114,18 +152,13 @@ impl ReplayController {
             }
 
             ReplayLoadEvent::DataLoadFailed(err) => {
-                // session をリセットして残留状態を除去する。
-                // これがないと次回 Play 時に古いデータが混入する可能性がある。
                 self.reset_session();
                 Some(Toast::error(format!("Replay data load failed: {err}")))
             }
         }
     }
 
-    /// session を Idle にリセットする。
-    /// `DataLoadFailed` 時に呼ぶことで次回 Play 時に残留状態が混入しないようにする。
     fn reset_session(&mut self) {
         self.state.session = ReplaySession::Idle;
-        self.state.resume_pending = false;
     }
 }

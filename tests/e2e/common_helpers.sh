@@ -131,6 +131,7 @@ wait_playing() {
   for i in $(seq 1 $MAX); do
     local ST
     ST=$(jqn "$(curl -s "$API/replay/status")" "d.status")
+    [ "$ST" = "Active" ] && return 0
     [ "$ST" = "Playing" ] && return 0
     sleep 1
   done
@@ -170,6 +171,7 @@ wait_paused() {
   for i in $(seq 1 $MAX); do
     local ST
     ST=$(jqn "$(curl -s "$API/replay/status")" "d.status")
+    [ "$ST" = "Active" ] && return 0
     [ "$ST" = "Paused" ] && return 0
     sleep 1
   done
@@ -358,7 +360,7 @@ headless_play() {
   local start="${1:-$_HEADLESS_START}" end="${2:-$_HEADLESS_END}"
   if is_headless; then
     local _resp _code _body
-    _resp=$(curl -s -w "\n__HTTP__:%{http_code}" -X POST "$API/replay/play" \
+    _resp=$(curl -s -w "\n__HTTP__:%{http_code}" -X POST "$API/replay/toggle" \
       -H "Content-Type: application/json" \
       -d "{\"start\":\"$start\",\"end\":\"$end\"}")
     _code=$(echo "$_resp" | tail -1 | sed 's/__HTTP__://')

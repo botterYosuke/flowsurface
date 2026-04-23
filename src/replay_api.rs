@@ -7,120 +7,83 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 
-/// API ハンドラーが実行するコマンド。既存 ReplayCommand と新規 PaneCommand の union。
+/// Union of commands exposed through the local replay API server.
 #[derive(Debug, Clone)]
 pub enum ApiCommand {
     Replay(ReplayCommand),
     Pane(PaneCommand),
-    /// 認証状態確認コマンド（テスト・デバッグ用、本番ビルドにも含まれる）。
     Auth(AuthCommand),
-    /// 仮想約定エンジンコマンド（Phase 2 互換）。
     VirtualExchange(VirtualExchangeCommand),
-    /// ナラティブ API コマンド（Phase 4a）。
     Narrative(NarrativeCommand),
-    /// Agent 専用 Replay API コマンド（Phase 4b-1）。
     AgentSession(AgentSessionCommand),
-    /// 立花証券余力情報を取得する（GET /api/buying-power）。
     FetchBuyingPower,
-    /// 立花証券新規注文を発注する（POST /api/tachibana/order）。
     TachibanaNewOrder {
         req: Box<exchange::adapter::tachibana::NewOrderRequest>,
     },
-    /// 立花証券注文一覧を取得する（GET /api/tachibana/orders）。
-    /// `eig_day`: 執行予定日 YYYYMMDD。空文字=全件。
     FetchTachibanaOrders {
         eig_day: String,
     },
-    /// 立花証券約定明細を取得する（GET /api/tachibana/order/{order_num}）。
     FetchTachibanaOrderDetail {
         order_num: String,
         eig_day: String,
     },
-    /// 立花証券訂正注文を発注する（POST /api/tachibana/order/correct）。
     TachibanaCorrectOrder {
         req: Box<exchange::adapter::tachibana::CorrectOrderRequest>,
     },
-    /// 立花証券取消注文を発注する（POST /api/tachibana/order/cancel）。
     TachibanaOrderCancel {
         req: Box<exchange::adapter::tachibana::CancelOrderRequest>,
     },
-    /// 保有現物株数を取得する（GET /api/tachibana/holdings?issue_code=XXXX）。
     FetchTachibanaHoldings {
         issue_code: String,
     },
-    /// E2E テスト用コマンド（debug ビルドで有効）。
     #[cfg(debug_assertions)]
     Test(TestCommand),
 }
 
-/// 仮想約定エンジン API コマンド。
 #[derive(Debug, Clone)]
 pub enum VirtualExchangeCommand {
-    /// 仮想注文を登録する（POST /api/replay/order）
     PlaceOrder {
         ticker: String,
-        side: String, // "buy" | "sell"
+        side: String,
         qty: f64,
-        order_type: String, // "market" | "limit"
+        order_type: String,
         limit_price: Option<f64>,
     },
-    /// ポートフォリオスナップショットを取得する（GET /api/replay/portfolio）
     GetPortfolio,
-    /// 観測データを取得する（GET /api/replay/state）— Phase 1 骨格のみ
     GetState,
-    /// pending 注文の一覧を取得する（GET /api/replay/orders）
     GetOrders,
 }
 
-/// Agent 専用 Replay API コマンド（Phase 4b-1）。
-///
-/// ADR-0001 / phase4b_agent_replay_api.md §4 に基づく。UI リモコン API
-/// （`/api/replay/*`）とは別経路で、型契約と決定論性を担保する。
 #[derive(Debug, Clone)]
 pub enum AgentSessionCommand {
-    /// `POST /api/agent/session/:id/step`: 1 バー進行 + 副作用同梱。
-    Step { session_id: String },
-    /// `POST /api/agent/session/:id/order`: 仮想注文（冪等性あり）。
+    Step {
+        session_id: String,
+    },
     PlaceOrder {
         session_id: String,
         request: Box<crate::api::order_request::AgentOrderRequest>,
     },
-    /// `POST /api/agent/session/:id/advance`: 任意区間を instant 実行。
-    /// ADR-0001 §3: GUI / Headless 両方で受理（旧 GUI 400 ガードは Q で撤廃済）。
     Advance {
         session_id: String,
         request: Box<crate::api::advance_request::AgentAdvanceRequest>,
     },
-    /// `POST /api/agent/session/:id/rewind-to-start`: 先頭巻き戻し (ADR-0001 §4)。
-    /// body なし → 現 session の clock を range.start に戻す（未初期化時は 400）。
-    /// body `{start, end}` → 未初期化時のみ新 session 初期化（初期化済時は無視）。
     RewindToStart {
         session_id: String,
-        /// `{start, end}` ボディが渡された場合のみ値が入る（初期化経路）。
         init_range: Option<(String, String)>,
     },
 }
 
-/// ナラティブ API コマンド（Phase 4a）。
 #[derive(Debug, Clone)]
 pub enum NarrativeCommand {
-    /// `POST /api/agent/narrative`: ナラティブを新規作成する。
     Create(Box<NarrativeCreateRequest>),
-    /// `GET /api/agent/narratives?agent_id=&ticker=&since_ms=&limit=`
     List(NarrativeListQuery),
-    /// `GET /api/agent/narrative/:id`: メタ JSON を返す。
     Get { id: uuid::Uuid },
-    /// `GET /api/agent/narrative/:id/snapshot`: 本体 JSON を返す（gzip 解凍 + sha256 検証）。
     GetSnapshot { id: uuid::Uuid },
-    /// `PATCH /api/agent/narrative/:id {"public": bool}`.
     Patch { id: uuid::Uuid, public: bool },
-    /// `GET /api/agent/narratives/storage`.
     StorageStats,
-    /// `GET /api/agent/narratives/orphans`.
     Orphans,
 }
 
-/// `POST /api/agent/narrative` のリクエストボディ（バリデーション済み）。
 #[derive(Debug, Clone)]
 pub struct NarrativeCreateRequest {
     pub agent_id: String,
@@ -132,12 +95,10 @@ pub struct NarrativeCreateRequest {
     pub action: NarrativeAction,
     pub confidence: f64,
     pub linked_order_id: Option<String>,
-    /// クライアント指定がなければサーバー側の `StepClock::now_ms()` を使う。
     pub timestamp_ms: Option<i64>,
     pub idempotency_key: Option<String>,
 }
 
-/// `GET /api/agent/narratives` のクエリパラメータ。
 #[derive(Debug, Clone, Default)]
 pub struct NarrativeListQuery {
     pub agent_id: Option<String>,
@@ -146,68 +107,56 @@ pub struct NarrativeListQuery {
     pub limit: Option<usize>,
 }
 
-/// 認証状態確認コマンド。
 #[derive(Debug, Clone)]
 pub enum AuthCommand {
-    /// 現在の立花証券セッション有無を返す（`{"session":"present"|"none"}`）。
     TachibanaSessionStatus,
-    /// 立花証券セッションを明示的にログアウトする（`POST /api/auth/tachibana/logout`）。
-    /// メモリセッション + keyring を両方クリアする。CI teardown での競合防止用。
     TachibanaLogout,
 }
 
-/// E2E テスト fixture 注入コマンド。
 #[cfg(debug_assertions)]
 #[derive(Debug, Clone)]
 pub enum TestCommand {
-    /// メモリセッション + keyring セッションを両方クリアする（debug ビルドで有効）。
     TachibanaDeletePersistedSession,
 }
 
-/// ペイン CRUD 系コマンド（§6.2 #2/#5/#6/#7/#8 テスト用）。
 #[derive(Debug, Clone)]
 pub enum PaneCommand {
-    /// 全ペインのメタ情報 + リプレイバッファ状態を返す
     ListPanes,
-    /// ペインを分割する。axis: "Vertical" | "Horizontal"
-    /// new_content は無視（既存 pane::Message::SplitPane は Starter しか生成しない）
-    Split { pane_id: uuid::Uuid, axis: String },
-    /// ペインを閉じる
-    Close { pane_id: uuid::Uuid },
-    /// ペインのストリームを別 ticker に差し替える（SerTicker 形式 "BinanceLinear:BTCUSDT"）
-    SetTicker { pane_id: uuid::Uuid, ticker: String },
-    /// ペインのタイムフレームを変更する（"M1" 〜 "D1"）
+    Split {
+        pane_id: uuid::Uuid,
+        axis: String,
+    },
+    Close {
+        pane_id: uuid::Uuid,
+    },
+    SetTicker {
+        pane_id: uuid::Uuid,
+        ticker: String,
+    },
     SetTimeframe {
         pane_id: uuid::Uuid,
         timeframe: String,
     },
-    /// Sidebar::TickerSelected 経路（Phase 8 Fix 4 検証用）。
-    /// `kind` が None → `switch_tickers_in_group` 経路、Some → `init_focused_pane` 経路。
-    /// どちらの経路でも `SyncReplayBuffers` chain が発火する（main.rs 内の `Message::Sidebar` ハンドラと同じコード）。
     SidebarSelectTicker {
         pane_id: uuid::Uuid,
         ticker: String,
         kind: Option<String>,
     },
-    /// 現在の通知（Toast）一覧を取得する。§6.2 #10 backfill 失敗検証用。
     ListNotifications,
-    /// 指定ペインのチャートスナップショット（バー数・タイムスタンプ範囲・OHLCV バー配列）を返す。
-    /// クエリパラメータ: `?pane_id=<uuid>[&limit=N][&since_ts=<ms>]`
     GetChartSnapshot {
         pane_id: uuid::Uuid,
         limit: Option<usize>,
         since_ts: Option<u64>,
     },
-    /// 注文ペインを開く（POST /api/sidebar/open-order-pane）
-    /// kind: "OrderEntry" | "OrderList" | "BuyingPower"
-    OpenOrderPane { kind: String },
+    OpenOrderPane {
+        kind: String,
+    },
 }
 
 type ReplySenderInner = Arc<Mutex<Option<oneshot::Sender<(u16, String)>>>>;
 
-/// oneshot::Sender を Clone 可能にするラッパー（iced の Message は Clone が必要）
-/// レスポンスは main.rs 側でシリアライズ済み JSON を送る。
-/// タプル (status_code, body) でステータスコードを指定できる。
+/// oneshot::Sender 繧・Clone 蜿ｯ閭ｽ縺ｫ縺吶ｋ繝ｩ繝・ヱ繝ｼ・・ced 縺ｮ Message 縺ｯ Clone 縺悟ｿ・ｦ・ｼ・/// 繝ｬ繧ｹ繝昴Φ繧ｹ縺ｯ main.rs 蛛ｴ縺ｧ繧ｷ繝ｪ繧｢繝ｩ繧､繧ｺ貂医∩ JSON 繧帝√ｋ縲・/// 繧ｿ繝励Ν (status_code, body) 縺ｧ繧ｹ繝・・繧ｿ繧ｹ繧ｳ繝ｼ繝峨ｒ謖・ｮ壹〒縺阪ｋ縲・
+
 #[derive(Debug, Clone)]
 pub struct ReplySender(ReplySenderInner);
 
@@ -216,7 +165,8 @@ impl ReplySender {
         Self(Arc::new(Mutex::new(Some(tx))))
     }
 
-    /// HTTP 200 でレスポンスを送信する。2回目以降の呼び出しは何もしない。
+    /// HTTP 200 縺ｧ繝ｬ繧ｹ繝昴Φ繧ｹ繧帝∽ｿ｡縺吶ｋ縲・蝗樒岼莉･髯阪・蜻ｼ縺ｳ蜃ｺ縺励・菴輔ｂ縺励↑縺・・    
+
     pub fn send(self, body: String) {
         if let Ok(mut guard) = self.0.lock()
             && let Some(tx) = guard.take()
@@ -225,7 +175,8 @@ impl ReplySender {
         }
     }
 
-    /// 任意のステータスコードでレスポンスを送信する。2回目以降の呼び出しは何もしない。
+    /// 莉ｻ諢上・繧ｹ繝・・繧ｿ繧ｹ繧ｳ繝ｼ繝峨〒繝ｬ繧ｹ繝昴Φ繧ｹ繧帝∽ｿ｡縺吶ｋ縲・蝗樒岼莉･髯阪・蜻ｼ縺ｳ蜃ｺ縺励・菴輔ｂ縺励↑縺・・    
+
     pub fn send_status(self, status: u16, body: String) {
         if let Ok(mut guard) = self.0.lock()
             && let Some(tx) = guard.take()
@@ -235,23 +186,26 @@ impl ReplySender {
     }
 }
 
-/// API サーバーから iced に送るメッセージ（コマンド + 応答用チャネル）
+/// API 繧ｵ繝ｼ繝舌・縺九ｉ iced 縺ｫ騾√ｋ繝｡繝・そ繝ｼ繧ｸ・医さ繝槭Φ繝・+ 蠢懃ｭ皮畑繝√Ε繝阪Ν・・
+
 pub type ApiMessage = (ApiCommand, ReplySender);
 
-/// channel() パターンで API サーバーを起動し、Message ストリームを返す。
-/// exchange/src/connect.rs:111-122 の再利用パターン。
+/// channel() 繝代ち繝ｼ繝ｳ縺ｧ API 繧ｵ繝ｼ繝舌・繧定ｵｷ蜍輔＠縲｀essage 繧ｹ繝医Μ繝ｼ繝繧定ｿ斐☆縲・/// exchange/src/connect.rs:111-122 縺ｮ蜀榊茜逕ｨ繝代ち繝ｼ繝ｳ縲・
+
 pub fn subscription() -> impl futures::Stream<Item = ApiMessage> {
     exchange::connect::channel(32, |sender| async move {
         run_server(sender).await;
     })
 }
 
-/// headless モード向け: 外部から sender を渡して HTTP サーバーを起動する。
+/// headless 繝｢繝ｼ繝牙髄縺・ 螟夜Κ縺九ｉ sender 繧呈ｸ｡縺励※ HTTP 繧ｵ繝ｼ繝舌・繧定ｵｷ蜍輔☆繧九・
+
 pub async fn start_server(sender: futures::channel::mpsc::Sender<ApiMessage>) {
     run_server(sender).await;
 }
 
-/// ポート番号を環境変数または デフォルト 9876 から取得
+/// 繝昴・繝育分蜿ｷ繧堤腸蠅・､画焚縺ｾ縺溘・ 繝・ヵ繧ｩ繝ｫ繝・9876 縺九ｉ蜿門ｾ・
+
 fn api_port() -> u16 {
     std::env::var("FLOWSURFACE_API_PORT")
         .ok()
@@ -259,7 +213,8 @@ fn api_port() -> u16 {
         .unwrap_or(9876)
 }
 
-/// Content-Length ヘッダーの値をパースする（見つからなければ 0）。
+/// Content-Length 繝倥ャ繝繝ｼ縺ｮ蛟､繧偵ヱ繝ｼ繧ｹ縺吶ｋ・郁ｦ九▽縺九ｉ縺ｪ縺代ｌ縺ｰ 0・峨・
+
 fn parse_content_length_from_headers(headers: &str) -> usize {
     for line in headers.lines() {
         if line.to_ascii_lowercase().starts_with("content-length:")
@@ -272,21 +227,22 @@ fn parse_content_length_from_headers(headers: &str) -> usize {
     0
 }
 
-/// 上限: ヘッダー 64KB + ボディ 16MB（Phase 4a のスナップショット 10MB ＋余裕を見た値）。
+/// 荳企剞: 繝倥ャ繝繝ｼ 64KB + 繝懊ョ繧｣ 16MB・・hase 4a 縺ｮ繧ｹ繝翫ャ繝励す繝ｧ繝・ヨ 10MB ・倶ｽ呵｣輔ｒ隕九◆蛟､・峨・
+
 const MAX_HEADER_BYTES: usize = 64 * 1024;
 const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 
 pub(crate) enum ReadRequestOutcome {
-    /// リクエストを全量受信した（ヘッダー + ボディ）
+    /// 繝ｪ繧ｯ繧ｨ繧ｹ繝医ｒ蜈ｨ驥丞女菫｡縺励◆・医・繝・ム繝ｼ + 繝懊ョ繧｣・・    
     Ok(String),
-    /// Content-Length がサーバー上限を超えた → 413 を返すべき
+    /// Request body exceeded the accepted size.
     TooLarge,
-    /// 接続断・ヘッダー解析失敗など。呼び出し側は 400/黙って切断を選べる
+    /// Invalid request bytes or malformed HTTP framing.
     Invalid,
 }
 
-/// HTTP リクエストを完全に読み込む（Content-Length に従ってボディも確保）。
-/// TCP が分割して届いても正しく結合し、ボディサイズに応じてバッファを動的拡張する。
+/// HTTP 繝ｪ繧ｯ繧ｨ繧ｹ繝医ｒ螳悟・縺ｫ隱ｭ縺ｿ霎ｼ繧・・ontent-Length 縺ｫ蠕薙▲縺ｦ繝懊ョ繧｣繧ら｢ｺ菫晢ｼ峨・/// TCP 縺悟・蜑ｲ縺励※螻翫＞縺ｦ繧よｭ｣縺励￥邨仙粋縺励√・繝・ぅ繧ｵ繧､繧ｺ縺ｫ蠢懊§縺ｦ繝舌ャ繝輔ぃ繧貞虚逧・僑蠑ｵ縺吶ｋ縲・
+
 pub(crate) async fn read_full_request(stream: &mut tokio::net::TcpStream) -> ReadRequestOutcome {
     let mut buf = vec![0u8; 16 * 1024];
     let mut total = 0usize;
@@ -350,9 +306,8 @@ async fn run_server(mut sender: mpsc::Sender<ApiMessage>) {
             l
         }
         Err(e) => {
-            // bind 失敗を silent にすると、E2E テスト並走でのポート衝突時に
-            // メインループは API 受信だけ止まったまま生き続け、デバッグが
-            // 非常に困難になる。即時プロセス終了して失敗を明確にする。
+            // bind 螟ｱ謨励ｒ silent 縺ｫ縺吶ｋ縺ｨ縲・2E 繝・せ繝井ｸｦ襍ｰ縺ｧ縺ｮ繝昴・繝郁｡晉ｪ∵凾縺ｫ
+            // 繝｡繧､繝ｳ繝ｫ繝ｼ繝励・ API 蜿嶺ｿ｡縺縺第ｭ｢縺ｾ縺｣縺溘∪縺ｾ逕溘″邯壹￠縲√ョ繝舌ャ繧ｰ縺・            // 髱槫ｸｸ縺ｫ蝗ｰ髮｣縺ｫ縺ｪ繧九ょ叉譎ゅ・繝ｭ繧ｻ繧ｹ邨ゆｺ・＠縺ｦ螟ｱ謨励ｒ譏守｢ｺ縺ｫ縺吶ｋ縲・
             log::error!("Failed to bind replay API server on {addr}: {e}");
             eprintln!("fatal: failed to bind replay API server on {addr}: {e}");
             std::process::exit(1);
@@ -368,8 +323,8 @@ async fn run_server(mut sender: mpsc::Sender<ApiMessage>) {
             }
         };
 
-        // 1 リクエスト / 接続（keep-alive なし）
-        // ヘッダー 64KB / ボディ 16MB まで動的に拡張する（Phase 4a のスナップショット 10MB 対応）
+        // 1 繝ｪ繧ｯ繧ｨ繧ｹ繝・/ 謗･邯夲ｼ・eep-alive 縺ｪ縺暦ｼ・        // 繝倥ャ繝繝ｼ 64KB / 繝懊ョ繧｣ 16MB 縺ｾ縺ｧ蜍慕噪縺ｫ諡｡蠑ｵ縺吶ｋ・・hase 4a 縺ｮ繧ｹ繝翫ャ繝励す繝ｧ繝・ヨ 10MB 蟇ｾ蠢懶ｼ・
+
         let request_string = match read_full_request(&mut stream).await {
             ReadRequestOutcome::Ok(s) => s,
             ReadRequestOutcome::TooLarge => {
@@ -387,7 +342,8 @@ async fn run_server(mut sender: mpsc::Sender<ApiMessage>) {
             }
         };
 
-        // スクリーンショット: iced app state 不要なため直接ここで処理
+        // 繧ｹ繧ｯ繝ｪ繝ｼ繝ｳ繧ｷ繝ｧ繝・ヨ: iced app state 荳崎ｦ√↑縺溘ａ逶ｴ謗･縺薙％縺ｧ蜃ｦ逅・
+
         if method == "POST" && path == "/api/app/screenshot" {
             let json = tokio::task::spawn_blocking(capture_screenshot)
                 .await
@@ -426,7 +382,7 @@ async fn run_server(mut sender: mpsc::Sender<ApiMessage>) {
             }
         };
 
-        // oneshot で iced app からのレスポンスを待つ
+        // oneshot 縺ｧ iced app 縺九ｉ縺ｮ繝ｬ繧ｹ繝昴Φ繧ｹ繧貞ｾ・▽
         let (reply_tx, reply_rx) = oneshot::channel::<(u16, String)>();
         if sender
             .send((command, ReplySender::new(reply_tx)))
@@ -437,10 +393,8 @@ async fn run_server(mut sender: mpsc::Sender<ApiMessage>) {
             continue;
         }
 
-        // 30s タイムアウト。将来 handle_command が reply を返し忘れた場合や、
-        // panic による early drop で oneshot が閉じられずに永久待機しないよう
-        // 防御層を張る。通常の narrative 処理でも p95 で数百 ms 以内のため
-        // 30s は十分マージンがある。
+        // 30s 繧ｿ繧､繝繧｢繧ｦ繝医ょｰ・擂 handle_command 縺・reply 繧定ｿ斐＠蠢倥ｌ縺溷ｴ蜷医ｄ縲・        // panic 縺ｫ繧医ｋ early drop 縺ｧ oneshot 縺碁哩縺倥ｉ繧後★縺ｫ豌ｸ荵・ｾ・ｩ溘＠縺ｪ縺・ｈ縺・        // 髦ｲ蠕｡螻､繧貞ｼｵ繧九る壼ｸｸ縺ｮ narrative 蜃ｦ逅・〒繧・p95 縺ｧ謨ｰ逋ｾ ms 莉･蜀・・縺溘ａ
+        // 30s 縺ｯ蜊∝・繝槭・繧ｸ繝ｳ縺後≠繧九・
         match tokio::time::timeout(std::time::Duration::from_secs(30), reply_rx).await {
             Ok(Ok((status, json))) => {
                 let _ = write_response(&mut stream, status, &json).await;
@@ -464,16 +418,15 @@ async fn run_server(mut sender: mpsc::Sender<ApiMessage>) {
     }
 }
 
-/// 簡易 HTTP リクエストパーサー。(method, path, body) を返す。
+/// 邁｡譏・HTTP 繝ｪ繧ｯ繧ｨ繧ｹ繝医ヱ繝ｼ繧ｵ繝ｼ縲・method, path, body) 繧定ｿ斐☆縲・
+
 fn parse_request(raw: &str) -> Option<(String, String, String)> {
     let mut lines = raw.split("\r\n");
     let request_line = lines.next()?;
     let mut parts = request_line.split_whitespace();
     let method = parts.next()?.to_string();
     let path = parts.next()?.to_string();
-    // HTTP/1.x は無視
-
-    // body はヘッダー後の空行の後
+    // HTTP/1.x is ignored. The body starts after the blank line.
     let body = if let Some(pos) = raw.find("\r\n\r\n") {
         raw[pos + 4..].to_string()
     } else {
@@ -487,22 +440,22 @@ fn parse_request(raw: &str) -> Option<(String, String, String)> {
 enum RouteError {
     NotFound,
     BadRequest,
-    /// BadRequest と同じ 400 ステータスを返すが、レスポンス本文に具体的な
-    /// エラーメッセージを含める（Phase 4b-1 サブフェーズ F）。agent API の
-    /// silent failure 回避のため、原因を明示して返す。
+    /// BadRequest 縺ｨ蜷後§ 400 繧ｹ繝・・繧ｿ繧ｹ繧定ｿ斐☆縺後√Ξ繧ｹ繝昴Φ繧ｹ譛ｬ譁・↓蜈ｷ菴鍋噪縺ｪ
+    /// 繧ｨ繝ｩ繝ｼ繝｡繝・そ繝ｼ繧ｸ繧貞性繧√ｋ・・hase 4b-1 繧ｵ繝悶ヵ繧ｧ繝ｼ繧ｺ F・峨Ｂgent API 縺ｮ
+    /// silent failure 蝗樣∩縺ｮ縺溘ａ縲∝次蝗繧呈・遉ｺ縺励※霑斐☆縲・    
     BadRequestWithMessage(String),
     PayloadTooLarge,
-    /// 501 Not Implemented — Phase 4b-1 時点で `session_id != "default"` を
-    /// 明示拒否する。詳細は ADR-0001 §Risks。
+    /// Multi-session routes are reserved until a future phase.
     NotImplemented,
 }
 
-/// `RouteError::NotImplemented` に対応する 501 レスポンス本文。
-/// ADR-0001 / phase4b_agent_replay_api.md §4.5 で固定文言として定義。
+/// `RouteError::NotImplemented` 縺ｫ蟇ｾ蠢懊☆繧・501 繝ｬ繧ｹ繝昴Φ繧ｹ譛ｬ譁・・/// ADR-0001 / phase4b_agent_replay_api.md ﾂｧ4.5 縺ｧ蝗ｺ螳壽枚險縺ｨ縺励※螳夂ｾｩ縲・
+
 pub(crate) const NOT_IMPLEMENTED_MULTI_SESSION_BODY: &str =
     r#"{"error":"multi-session not yet implemented; use 'default' until Phase 4c"}"#;
 
-/// body から文字列フィールドを取り出す
+/// body 縺九ｉ譁・ｭ怜・繝輔ぅ繝ｼ繝ｫ繝峨ｒ蜿悶ｊ蜃ｺ縺・
+
 fn body_str_field(body: &str, key: &str) -> Result<String, RouteError> {
     let parsed: serde_json::Value =
         serde_json::from_str(body).map_err(|_| RouteError::BadRequest)?;
@@ -513,15 +466,15 @@ fn body_str_field(body: &str, key: &str) -> Result<String, RouteError> {
         .ok_or(RouteError::BadRequest)
 }
 
-/// body から uuid フィールドを取り出す
+/// body 縺九ｉ uuid 繝輔ぅ繝ｼ繝ｫ繝峨ｒ蜿悶ｊ蜃ｺ縺・
+
 fn body_uuid_field(body: &str, key: &str) -> Result<uuid::Uuid, RouteError> {
     let s = body_str_field(body, key)?;
     uuid::Uuid::parse_str(&s).map_err(|_| RouteError::BadRequest)
 }
 
-/// `/api/agent/session/:id/<suffix>` 形式のパスから `:id` を抽出する。
-/// `:id` が空・`/` を含むなどの場合は `BadRequest`。
-/// ADR-0001 に基づき `:id != "default"` は `NotImplemented`（501）。
+/// `/api/agent/session/:id/<suffix>` 蠖｢蠑上・繝代せ縺九ｉ `:id` 繧呈歓蜃ｺ縺吶ｋ縲・/// `:id` 縺檎ｩｺ繝ｻ`/` 繧貞性繧縺ｪ縺ｩ縺ｮ蝣ｴ蜷医・ `BadRequest`縲・/// ADR-0001 縺ｫ蝓ｺ縺･縺・`:id != "default"` 縺ｯ `NotImplemented`・・01・峨・
+
 fn extract_agent_session_id<'a>(path: &'a str, suffix: &str) -> Result<&'a str, RouteError> {
     let after_prefix = path
         .strip_prefix("/api/agent/session/")
@@ -559,22 +512,23 @@ fn parse_agent_session_advance(path: &str, body: &str) -> Result<ApiCommand, Rou
     }))
 }
 
+fn parse_init_range_body(body: &str) -> Result<Option<(String, String)>, RouteError> {
+    if body.trim().is_empty() {
+        return Ok(None);
+    }
+    let start = body_str_field(body, "start")
+        .map_err(|_| RouteError::BadRequestWithMessage("start field required".to_string()))?;
+    let end = body_str_field(body, "end")
+        .map_err(|_| RouteError::BadRequestWithMessage("end field required".to_string()))?;
+    Ok(Some((start, end)))
+}
+
 fn parse_agent_session_rewind(path: &str, body: &str) -> Result<ApiCommand, RouteError> {
     let session_id = extract_agent_session_id(path, "rewind-to-start")?;
     if session_id != "default" {
         return Err(RouteError::NotImplemented);
     }
-    // body は任意。空なら「初期化済 session の rewind」、`{start, end}` 付きなら
-    // 「未初期化時の初期化経路」を意図する（ADR-0001 §4）。
-    let init_range = if body.trim().is_empty() {
-        None
-    } else {
-        let start = body_str_field(body, "start")
-            .map_err(|_| RouteError::BadRequestWithMessage("start field required".to_string()))?;
-        let end = body_str_field(body, "end")
-            .map_err(|_| RouteError::BadRequestWithMessage("end field required".to_string()))?;
-        Some((start, end))
-    };
+    let init_range = parse_init_range_body(body)?;
     Ok(ApiCommand::AgentSession(
         AgentSessionCommand::RewindToStart {
             session_id: session_id.to_string(),
@@ -596,23 +550,23 @@ fn parse_agent_session_order(path: &str, body: &str) -> Result<ApiCommand, Route
     }))
 }
 
-/// パスとメソッドから ApiCommand にルーティング
+/// 繝代せ縺ｨ繝｡繧ｽ繝・ラ縺九ｉ ApiCommand 縺ｫ繝ｫ繝ｼ繝・ぅ繝ｳ繧ｰ
 ///
-/// C-3: 以前は `return` を使った 2 つの match ブロックに分かれていた。
-/// 単一の match 式に統合し、複雑な body パースは専用ヘルパー関数に切り出した。
+/// C-3: 莉･蜑阪・ `return` 繧剃ｽｿ縺｣縺・2 縺､縺ｮ match 繝悶Ο繝・け縺ｫ蛻・°繧後※縺・◆縲・/// 蜊倅ｸ縺ｮ match 蠑上↓邨ｱ蜷医＠縲∬､・尅縺ｪ body 繝代・繧ｹ縺ｯ蟆ら畑繝倥Ν繝代・髢｢謨ｰ縺ｫ蛻・ｊ蜃ｺ縺励◆縲・
 fn route(method: &str, path: &str, body: &str) -> Result<ApiCommand, RouteError> {
     match (method, path) {
-        // ── Replay 制御 ────────────────────────────────────────────────────
-        // ADR-0001 §3: play / pause / resume / speed / step-forward / step-backward は
-        // 削除済み。セッション内の時刻操作は /api/agent/session/:id/{step,advance,rewind-to-start} を使う。
+        // 笏笏 Replay 蛻ｶ蠕｡ 笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏
+        // ADR-0001: old play/pause/resume/speed/step-* routes are removed.
         ("GET", "/api/replay/status") => Ok(ApiCommand::Replay(ReplayCommand::GetStatus)),
-        ("POST", "/api/replay/toggle") => Ok(ApiCommand::Replay(ReplayCommand::Toggle)),
+        ("POST", "/api/replay/toggle") => Ok(ApiCommand::Replay(ReplayCommand::Toggle {
+            init_range: parse_init_range_body(body)?,
+        })),
 
-        // ── App 制御 ───────────────────────────────────────────────────────
+        // 笏笏 App 蛻ｶ蠕｡ 笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏
         ("POST", "/api/app/save") => Ok(ApiCommand::Replay(ReplayCommand::SaveState)),
         ("POST", "/api/app/set-mode") => parse_set_mode_command(body),
 
-        // ── 認証（本番ビルドにも含まれる）────────────────────────────────
+        // 笏笏 隱崎ｨｼ・域悽逡ｪ繝薙Ν繝峨↓繧ょ性縺ｾ繧後ｋ・俄楳笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏
         ("GET", "/api/auth/tachibana/status") => {
             Ok(ApiCommand::Auth(AuthCommand::TachibanaSessionStatus))
         }
@@ -620,7 +574,7 @@ fn route(method: &str, path: &str, body: &str) -> Result<ApiCommand, RouteError>
             Ok(ApiCommand::Auth(AuthCommand::TachibanaLogout))
         }
 
-        // ── ペイン CRUD ────────────────────────────────────────────────────
+        // 笏笏 繝壹う繝ｳ CRUD 笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏
         ("GET", "/api/pane/list") => Ok(ApiCommand::Pane(PaneCommand::ListPanes)),
         ("GET", p) if p.starts_with("/api/pane/chart-snapshot") => parse_chart_snapshot_command(p),
         ("POST", "/api/pane/split") => parse_split_command(body),
@@ -642,12 +596,12 @@ fn route(method: &str, path: &str, body: &str) -> Result<ApiCommand, RouteError>
             }))
         }
 
-        // ── その他 ────────────────────────────────────────────────────────
+        // 笏笏 縺昴・莉・笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏
         ("GET", "/api/notification/list") => Ok(ApiCommand::Pane(PaneCommand::ListNotifications)),
         ("POST", "/api/sidebar/select-ticker") => parse_sidebar_select_ticker(body),
         ("POST", "/api/sidebar/open-order-pane") => parse_open_order_pane(body),
 
-        // ── 仮想約定エンジン（Phase 2 互換）──────────────────────────────
+        // 笏笏 莉ｮ諠ｳ邏・ｮ壹お繝ｳ繧ｸ繝ｳ・・hase 2 莠呈鋤・俄楳笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏
         ("POST", "/api/replay/order") => parse_virtual_order_command(body),
         ("GET", "/api/replay/portfolio") => Ok(ApiCommand::VirtualExchange(
             VirtualExchangeCommand::GetPortfolio,
@@ -659,7 +613,7 @@ fn route(method: &str, path: &str, body: &str) -> Result<ApiCommand, RouteError>
             VirtualExchangeCommand::GetOrders,
         )),
 
-        // ── ナラティブ API（Phase 4a）──────────────────────────────────────
+        // 笏笏 繝翫Λ繝・ぅ繝・API・・hase 4a・俄楳笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏
         ("POST", "/api/agent/narrative") => parse_narrative_create(body),
         ("GET", "/api/agent/narratives/storage") => {
             Ok(ApiCommand::Narrative(NarrativeCommand::StorageStats))
@@ -676,7 +630,7 @@ fn route(method: &str, path: &str, body: &str) -> Result<ApiCommand, RouteError>
         ("GET", p) if p.starts_with("/api/agent/narrative/") => parse_narrative_get(p),
         ("PATCH", p) if p.starts_with("/api/agent/narrative/") => parse_narrative_patch(p, body),
 
-        // ── Agent 専用 Replay API（Phase 4b-1）────────────────────────────
+        // 笏笏 Agent 蟆ら畑 Replay API・・hase 4b-1・俄楳笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏
         ("POST", p) if p.starts_with("/api/agent/session/") && p.ends_with("/step") => {
             parse_agent_session_step(p)
         }
@@ -690,13 +644,13 @@ fn route(method: &str, path: &str, body: &str) -> Result<ApiCommand, RouteError>
             parse_agent_session_rewind(p, body)
         }
 
-        // ── 立花証券余力情報 ──────────────────────────────────────────────
+        // 笏笏 遶玖干險ｼ蛻ｸ菴吝鴨諠・ｱ 笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏
         ("GET", "/api/buying-power") => Ok(ApiCommand::FetchBuyingPower),
 
-        // ── 立花証券新規注文 ──────────────────────────────────────────────
+        // 笏笏 遶玖干險ｼ蛻ｸ譁ｰ隕乗ｳｨ譁・笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏
         ("POST", "/api/tachibana/order") => parse_tachibana_new_order(body),
 
-        // ── 立花証券注文管理 ──────────────────────────────────────────────
+        // 笏笏 遶玖干險ｼ蛻ｸ豕ｨ譁・ｮ｡逅・笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏
         ("GET", p) if p == "/api/tachibana/orders" || p.starts_with("/api/tachibana/orders?") => {
             let eig_day = query_param(p, "eig_day").unwrap_or_default();
             Ok(ApiCommand::FetchTachibanaOrders { eig_day })
@@ -707,7 +661,7 @@ fn route(method: &str, path: &str, body: &str) -> Result<ApiCommand, RouteError>
         ("POST", "/api/tachibana/order/correct") => parse_tachibana_correct_order(body),
         ("POST", "/api/tachibana/order/cancel") => parse_tachibana_cancel_order(body),
 
-        // ── 立花証券保有現物株数 ──────────────────────────────────────────
+        // 笏笏 遶玖干險ｼ蛻ｸ菫晄怏迴ｾ迚ｩ譬ｪ謨ｰ 笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏
         ("GET", p)
             if p == "/api/tachibana/holdings" || p.starts_with("/api/tachibana/holdings?") =>
         {
@@ -715,7 +669,7 @@ fn route(method: &str, path: &str, body: &str) -> Result<ApiCommand, RouteError>
             Ok(ApiCommand::FetchTachibanaHoldings { issue_code })
         }
 
-        // ── debug ビルドで有効（keyring クリア） ─────────────────────────
+        // 笏笏 debug 繝薙Ν繝峨〒譛牙柑・・eyring 繧ｯ繝ｪ繧｢・・笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏
         #[cfg(debug_assertions)]
         ("POST", "/api/test/tachibana/delete-persisted-session") => Ok(ApiCommand::Test(
             TestCommand::TachibanaDeletePersistedSession,
@@ -725,7 +679,8 @@ fn route(method: &str, path: &str, body: &str) -> Result<ApiCommand, RouteError>
     }
 }
 
-/// `POST /api/replay/order` のボディをパースして ApiCommand を返す。
+/// `POST /api/replay/order` 縺ｮ繝懊ョ繧｣繧偵ヱ繝ｼ繧ｹ縺励※ ApiCommand 繧定ｿ斐☆縲・
+
 fn parse_virtual_order_command(body: &str) -> Result<ApiCommand, RouteError> {
     let parsed: serde_json::Value =
         serde_json::from_str(body).map_err(|_| RouteError::BadRequest)?;
@@ -734,9 +689,9 @@ fn parse_virtual_order_command(body: &str) -> Result<ApiCommand, RouteError> {
         .get("ticker")
         .and_then(|v| v.as_str())
         .ok_or(RouteError::BadRequest)?;
-    // SerTicker 形式 `"Exchange:Symbol"` で来ても受け付ける。内部の
-    // `on_tick` 比較は Symbol 単体（`Ticker::Display`）なので、ここで
-    // prefix を剥がさないとサイレントに Pending のまま残る。
+    // SerTicker 蠖｢蠑・`"Exchange:Symbol"` 縺ｧ譚･縺ｦ繧ょ女縺台ｻ倥￠繧九ょ・驛ｨ縺ｮ
+    // `on_tick` 豈碑ｼ・・ Symbol 蜊倅ｽ難ｼ・Ticker::Display`・峨↑縺ｮ縺ｧ縲√％縺薙〒
+    // prefix 繧貞翁縺後＆縺ｪ縺・→繧ｵ繧､繝ｬ繝ｳ繝医↓ Pending 縺ｮ縺ｾ縺ｾ谿九ｋ縲・
     let ticker = ticker_raw
         .split_once(':')
         .map(|(_, sym)| sym.to_string())
@@ -773,7 +728,7 @@ fn parse_virtual_order_command(body: &str) -> Result<ApiCommand, RouteError> {
             _ => return Err(RouteError::BadRequest),
         }
     } else {
-        // order_type 省略 → market
+        // order_type 逵∫払 竊・market
         ("market".to_string(), None)
     };
 
@@ -788,8 +743,7 @@ fn parse_virtual_order_command(body: &str) -> Result<ApiCommand, RouteError> {
     ))
 }
 
-/// URL パスのクエリ文字列から指定キーの値を取り出す。
-/// 例: `/api/pane/chart-snapshot?pane_id=xxx` → `Some("xxx")`
+/// Returns a decoded query parameter from a URL path.
 fn query_param(path: &str, key: &str) -> Option<String> {
     let query = path.split('?').nth(1)?;
     query.split('&').find_map(|pair| {
@@ -802,7 +756,8 @@ fn query_param(path: &str, key: &str) -> Option<String> {
     })
 }
 
-/// `GET /api/pane/chart-snapshot?pane_id=<uuid>[&limit=N][&since_ts=<ms>]` をパースして ApiCommand を返す。
+/// `GET /api/pane/chart-snapshot?pane_id=<uuid>[&limit=N][&since_ts=<ms>]` 繧偵ヱ繝ｼ繧ｹ縺励※ ApiCommand 繧定ｿ斐☆縲・
+
 fn parse_chart_snapshot_command(path: &str) -> Result<ApiCommand, RouteError> {
     let id_str = query_param(path, "pane_id").ok_or(RouteError::BadRequest)?;
     let pane_id = uuid::Uuid::parse_str(&id_str).map_err(|_| RouteError::BadRequest)?;
@@ -815,8 +770,7 @@ fn parse_chart_snapshot_command(path: &str) -> Result<ApiCommand, RouteError> {
     }))
 }
 
-/// `POST /api/app/set-mode` のボディをパースして ApiCommand を返す。
-/// body: `{"mode": "live" | "replay"}`
+/// `POST /api/app/set-mode` 縺ｮ繝懊ョ繧｣繧偵ヱ繝ｼ繧ｹ縺励※ ApiCommand 繧定ｿ斐☆縲・/// body: `{"mode": "live" | "replay"}`
 fn parse_set_mode_command(body: &str) -> Result<ApiCommand, RouteError> {
     let mode = body_str_field(body, "mode")?;
     match mode.to_lowercase().as_str() {
@@ -827,7 +781,8 @@ fn parse_set_mode_command(body: &str) -> Result<ApiCommand, RouteError> {
     }
 }
 
-/// `POST /api/pane/split` のボディをパースして ApiCommand を返す。
+/// `POST /api/pane/split` 縺ｮ繝懊ョ繧｣繧偵ヱ繝ｼ繧ｹ縺励※ ApiCommand 繧定ｿ斐☆縲・
+
 fn parse_split_command(body: &str) -> Result<ApiCommand, RouteError> {
     let pane_id = body_uuid_field(body, "pane_id")?;
     let axis = body_str_field(body, "axis")?;
@@ -838,7 +793,8 @@ fn parse_split_command(body: &str) -> Result<ApiCommand, RouteError> {
     Ok(ApiCommand::Pane(PaneCommand::Split { pane_id, axis }))
 }
 
-/// `POST /api/sidebar/open-order-pane` のボディをパースして ApiCommand を返す。
+/// `POST /api/sidebar/open-order-pane` 縺ｮ繝懊ョ繧｣繧偵ヱ繝ｼ繧ｹ縺励※ ApiCommand 繧定ｿ斐☆縲・
+
 fn parse_open_order_pane(body: &str) -> Result<ApiCommand, RouteError> {
     let kind = body_str_field(body, "kind")?;
     match kind.as_str() {
@@ -848,8 +804,8 @@ fn parse_open_order_pane(body: &str) -> Result<ApiCommand, RouteError> {
     Ok(ApiCommand::Pane(PaneCommand::OpenOrderPane { kind }))
 }
 
-/// `POST /api/tachibana/order` のボディをパースして ApiCommand を返す。
-/// `second_password` は本文中のフィールドか `DEV_SECOND_PASSWORD` 環境変数から取得する。
+/// `POST /api/tachibana/order` 縺ｮ繝懊ョ繧｣繧偵ヱ繝ｼ繧ｹ縺励※ ApiCommand 繧定ｿ斐☆縲・/// `second_password` 縺ｯ譛ｬ譁・ｸｭ縺ｮ繝輔ぅ繝ｼ繝ｫ繝峨° `DEV_SECOND_PASSWORD` 迺ｰ蠅・､画焚縺九ｉ蜿門ｾ励☆繧九・
+
 fn parse_tachibana_new_order(body: &str) -> Result<ApiCommand, RouteError> {
     let parsed: serde_json::Value =
         serde_json::from_str(body).map_err(|_| RouteError::BadRequest)?;
@@ -892,7 +848,7 @@ fn parse_tachibana_new_order(body: &str) -> Result<ApiCommand, RouteError> {
         .unwrap_or("0")
         .to_string();
 
-    // DEV_SECOND_PASSWORD フォールバックは debug ビルド（E2E テスト）専用
+    // DEV_SECOND_PASSWORD 繝輔か繝ｼ繝ｫ繝舌ャ繧ｯ縺ｯ debug 繝薙Ν繝会ｼ・2E 繝・せ繝茨ｼ牙ｰら畑
     let second_password = {
         let from_body = parsed
             .get("second_password")
@@ -920,9 +876,10 @@ fn parse_tachibana_new_order(body: &str) -> Result<ApiCommand, RouteError> {
     Ok(ApiCommand::TachibanaNewOrder { req: Box::new(req) })
 }
 
-/// `GET /api/tachibana/order/{order_num}[?eig_day=YYYYMMDD]` をパースして ApiCommand を返す。
+/// `GET /api/tachibana/order/{order_num}[?eig_day=YYYYMMDD]` 繧偵ヱ繝ｼ繧ｹ縺励※ ApiCommand 繧定ｿ斐☆縲・
+
 fn parse_tachibana_order_detail_command(path: &str) -> Result<ApiCommand, RouteError> {
-    // パス部分とクエリ部分を分離する
+    // 繝代せ驛ｨ蛻・→繧ｯ繧ｨ繝ｪ驛ｨ蛻・ｒ蛻・屬縺吶ｋ
     let (path_part, _) = path.split_once('?').unwrap_or((path, ""));
     let order_num = path_part
         .strip_prefix("/api/tachibana/order/")
@@ -933,8 +890,8 @@ fn parse_tachibana_order_detail_command(path: &str) -> Result<ApiCommand, RouteE
     Ok(ApiCommand::FetchTachibanaOrderDetail { order_num, eig_day })
 }
 
-/// `POST /api/tachibana/order/correct` のボディをパースして ApiCommand を返す。
-/// `second_password` は本文または `DEV_SECOND_PASSWORD` 環境変数から取得する。
+/// `POST /api/tachibana/order/correct` 縺ｮ繝懊ョ繧｣繧偵ヱ繝ｼ繧ｹ縺励※ ApiCommand 繧定ｿ斐☆縲・/// `second_password` 縺ｯ譛ｬ譁・∪縺溘・ `DEV_SECOND_PASSWORD` 迺ｰ蠅・､画焚縺九ｉ蜿門ｾ励☆繧九・
+
 fn parse_tachibana_correct_order(body: &str) -> Result<ApiCommand, RouteError> {
     let parsed: serde_json::Value =
         serde_json::from_str(body).map_err(|_| RouteError::BadRequest)?;
@@ -967,7 +924,7 @@ fn parse_tachibana_correct_order(body: &str) -> Result<ApiCommand, RouteError> {
         .and_then(|v| v.as_str())
         .unwrap_or("*")
         .to_string();
-    // DEV_SECOND_PASSWORD フォールバックは debug ビルド（E2E テスト）専用
+    // DEV_SECOND_PASSWORD 繝輔か繝ｼ繝ｫ繝舌ャ繧ｯ縺ｯ debug 繝薙Ν繝会ｼ・2E 繝・せ繝茨ｼ牙ｰら畑
     let second_password = {
         let from_body = parsed
             .get("second_password")
@@ -991,8 +948,8 @@ fn parse_tachibana_correct_order(body: &str) -> Result<ApiCommand, RouteError> {
     Ok(ApiCommand::TachibanaCorrectOrder { req: Box::new(req) })
 }
 
-/// `POST /api/tachibana/order/cancel` のボディをパースして ApiCommand を返す。
-/// `second_password` は本文または `DEV_SECOND_PASSWORD` 環境変数から取得する。
+/// `POST /api/tachibana/order/cancel` 縺ｮ繝懊ョ繧｣繧偵ヱ繝ｼ繧ｹ縺励※ ApiCommand 繧定ｿ斐☆縲・/// `second_password` 縺ｯ譛ｬ譁・∪縺溘・ `DEV_SECOND_PASSWORD` 迺ｰ蠅・､画焚縺九ｉ蜿門ｾ励☆繧九・
+
 fn parse_tachibana_cancel_order(body: &str) -> Result<ApiCommand, RouteError> {
     let parsed: serde_json::Value =
         serde_json::from_str(body).map_err(|_| RouteError::BadRequest)?;
@@ -1005,7 +962,7 @@ fn parse_tachibana_cancel_order(body: &str) -> Result<ApiCommand, RouteError> {
     };
     let order_number = str_field("order_number")?;
     let eig_day = str_field("eig_day")?;
-    // DEV_SECOND_PASSWORD フォールバックは debug ビルド（E2E テスト）専用
+    // DEV_SECOND_PASSWORD 繝輔か繝ｼ繝ｫ繝舌ャ繧ｯ縺ｯ debug 繝薙Ν繝会ｼ・2E 繝・せ繝茨ｼ牙ｰら畑
     let second_password = {
         let from_body = parsed
             .get("second_password")
@@ -1025,7 +982,8 @@ fn parse_tachibana_cancel_order(body: &str) -> Result<ApiCommand, RouteError> {
     Ok(ApiCommand::TachibanaOrderCancel { req: Box::new(req) })
 }
 
-/// `POST /api/sidebar/select-ticker` のボディをパースして ApiCommand を返す。
+/// `POST /api/sidebar/select-ticker` 縺ｮ繝懊ョ繧｣繧偵ヱ繝ｼ繧ｹ縺励※ ApiCommand 繧定ｿ斐☆縲・
+
 fn parse_sidebar_select_ticker(body: &str) -> Result<ApiCommand, RouteError> {
     let pane_id = body_uuid_field(body, "pane_id")?;
     let ticker = body_str_field(body, "ticker")?;
@@ -1037,7 +995,8 @@ fn parse_sidebar_select_ticker(body: &str) -> Result<ApiCommand, RouteError> {
     }))
 }
 
-/// `POST /api/agent/narrative` のボディを `NarrativeCreateRequest` にパースする。
+/// `POST /api/agent/narrative` 縺ｮ繝懊ョ繧｣繧・`NarrativeCreateRequest` 縺ｫ繝代・繧ｹ縺吶ｋ縲・
+
 fn parse_narrative_create(body: &str) -> Result<ApiCommand, RouteError> {
     let parsed: serde_json::Value =
         serde_json::from_str(body).map_err(|_| RouteError::BadRequest)?;
@@ -1069,7 +1028,7 @@ fn parse_narrative_create(body: &str) -> Result<ApiCommand, RouteError> {
     if !observation_snapshot.is_object() && !observation_snapshot.is_array() {
         return Err(RouteError::BadRequest);
     }
-    // 早期サイズチェック（圧縮前）。計画 §3.2 ハード上限 10 MB。
+    // 譌ｩ譛溘し繧､繧ｺ繝√ぉ繝・け・亥悸邵ｮ蜑搾ｼ峨りｨ育判 ﾂｧ3.2 繝上・繝我ｸ企剞 10 MB縲・
     let serialized =
         serde_json::to_vec(&observation_snapshot).map_err(|_| RouteError::BadRequest)?;
     if serialized.len() as u64 > crate::narrative::snapshot_store::MAX_UNCOMPRESSED_BYTES {
@@ -1147,7 +1106,7 @@ fn parse_narrative_id_from_path(path: &str) -> Result<uuid::Uuid, RouteError> {
         .strip_prefix("/api/agent/narrative/")
         .filter(|s| !s.is_empty())
         .ok_or(RouteError::BadRequest)?;
-    // /api/agent/narrative/{id}/snapshot などのサフィックスを落とす
+    // /api/agent/narrative/{id}/snapshot 縺ｪ縺ｩ縺ｮ繧ｵ繝輔ぅ繝・け繧ｹ繧定誠縺ｨ縺・
     let id_str = tail.split('/').next().ok_or(RouteError::BadRequest)?;
     uuid::Uuid::parse_str(id_str).map_err(|_| RouteError::BadRequest)
 }
@@ -1176,9 +1135,8 @@ fn parse_narrative_patch(path: &str, body: &str) -> Result<ApiCommand, RouteErro
     }))
 }
 
-/// body から省略可能な文字列フィールドを取り出す。
-/// フィールドが存在しない場合、または値が JSON `null` の場合は `None` を返す。
-/// （必須フィールド用の `body_str_field` は null を 400 として拒否する。）
+/// body 縺九ｉ逵∫払蜿ｯ閭ｽ縺ｪ譁・ｭ怜・繝輔ぅ繝ｼ繝ｫ繝峨ｒ蜿悶ｊ蜃ｺ縺吶・/// 繝輔ぅ繝ｼ繝ｫ繝峨′蟄伜惠縺励↑縺・ｴ蜷医√∪縺溘・蛟､縺・JSON `null` 縺ｮ蝣ｴ蜷医・ `None` 繧定ｿ斐☆縲・/// ・亥ｿ・医ヵ繧｣繝ｼ繝ｫ繝臥畑縺ｮ `body_str_field` 縺ｯ null 繧・400 縺ｨ縺励※諡貞凄縺吶ｋ縲ゑｼ・
+
 fn body_opt_str_field(body: &str, key: &str) -> Result<Option<String>, RouteError> {
     let parsed: serde_json::Value =
         serde_json::from_str(body).map_err(|_| RouteError::BadRequest)?;
@@ -1188,7 +1146,7 @@ fn body_opt_str_field(body: &str, key: &str) -> Result<Option<String>, RouteErro
         .map(|s| s.to_string()))
 }
 
-/// HTTP レスポンスを書き込む
+/// HTTP 繝ｬ繧ｹ繝昴Φ繧ｹ繧呈嶌縺崎ｾｼ繧
 async fn write_response(
     stream: &mut tokio::net::TcpStream,
     status_code: u16,
@@ -1221,8 +1179,8 @@ async fn write_response(
     stream.flush().await
 }
 
-/// デスクトップ全体のスクリーンショットを C:/tmp/screenshot.png に保存する。
-/// spawn_blocking から呼ぶこと（sync API）。
+/// 繝・せ繧ｯ繝医ャ繝怜・菴薙・繧ｹ繧ｯ繝ｪ繝ｼ繝ｳ繧ｷ繝ｧ繝・ヨ繧・C:/tmp/screenshot.png 縺ｫ菫晏ｭ倥☆繧九・/// spawn_blocking 縺九ｉ蜻ｼ縺ｶ縺薙→・・ync API・峨・
+
 fn capture_screenshot() -> String {
     const PATH: &str = "C:/tmp/screenshot.png";
     if let Err(e) = std::fs::create_dir_all("C:/tmp") {
@@ -1249,7 +1207,7 @@ mod tests {
     use super::*;
     use crate::replay::ReplayCommand;
 
-    // ── parse_request tests ──
+    // 笏笏 parse_request tests 笏笏
 
     #[test]
     fn parse_request_valid_get() {
@@ -1292,7 +1250,7 @@ mod tests {
 
     #[test]
     fn parse_request_no_double_crlf_body_empty() {
-        // No \r\n\r\n separator → body should be empty
+        // No \r\n\r\n separator 竊・body should be empty
         let raw = "GET /api/replay/status HTTP/1.1\r\nHost: localhost";
         let result = parse_request(raw);
         assert!(result.is_some());
@@ -1300,7 +1258,7 @@ mod tests {
         assert!(body.is_empty());
     }
 
-    // ── route tests: replay ──
+    // 笏笏 route tests: replay 笏笏
 
     fn unwrap_replay(cmd: ApiCommand) -> ReplayCommand {
         match cmd {
@@ -1316,7 +1274,7 @@ mod tests {
         }
     }
 
-    // ── route tests: agent session (Phase 4b-1 サブフェーズ B) ──
+    // 笏笏 route tests: agent session (Phase 4b-1 繧ｵ繝悶ヵ繧ｧ繝ｼ繧ｺ B) 笏笏
 
     #[test]
     fn route_agent_session_step_accepts_default() {
@@ -1331,7 +1289,7 @@ mod tests {
 
     #[test]
     fn route_agent_session_step_rejects_non_default_session_with_501() {
-        // ADR-0001: session_id != "default" は NotImplemented（501）で拒否。
+        // ADR-0001: session_id != "default" 縺ｯ NotImplemented・・01・峨〒諡貞凄縲・
         let result = route("POST", "/api/agent/session/other/step", "");
         assert!(
             matches!(result, Err(RouteError::NotImplemented)),
@@ -1341,7 +1299,7 @@ mod tests {
 
     #[test]
     fn route_agent_session_step_rejects_empty_session_id() {
-        // `/api/agent/session//step` — 空セッション ID は BadRequest。
+        // `/api/agent/session//step` 窶・遨ｺ繧ｻ繝・す繝ｧ繝ｳ ID 縺ｯ BadRequest縲・
         let result = route("POST", "/api/agent/session//step", "");
         assert!(
             matches!(result, Err(RouteError::BadRequest)),
@@ -1351,7 +1309,7 @@ mod tests {
 
     #[test]
     fn route_agent_session_step_rejects_get_method() {
-        // step は POST のみ。GET では NotFound にフォールバック。
+        // step 縺ｯ POST 縺ｮ縺ｿ縲・ET 縺ｧ縺ｯ NotFound 縺ｫ繝輔か繝ｼ繝ｫ繝舌ャ繧ｯ縲・
         let result = route("GET", "/api/agent/session/default/step", "");
         assert!(
             matches!(result, Err(RouteError::NotFound)),
@@ -1361,8 +1319,7 @@ mod tests {
 
     #[test]
     fn route_agent_session_rejects_unknown_suffix() {
-        // `/step` / `/advance` / `/order` 以外の suffix は NotFound。
-        // サブフェーズ B 時点では `/step` のみルーティング済み。
+        // `/step` / `/advance` / `/order` 莉･螟悶・ suffix 縺ｯ NotFound縲・        // 繧ｵ繝悶ヵ繧ｧ繝ｼ繧ｺ B 譎らせ縺ｧ縺ｯ `/step` 縺ｮ縺ｿ繝ｫ繝ｼ繝・ぅ繝ｳ繧ｰ貂医∩縲・
         let result = route("POST", "/api/agent/session/default/unknown", "");
         assert!(
             matches!(result, Err(RouteError::NotFound)),
@@ -1372,7 +1329,7 @@ mod tests {
 
     #[test]
     fn route_agent_session_step_rejects_non_default_uuid_like() {
-        // UUID 風の session_id も拒否（Phase 4c まで "default" 固定）。
+        // UUID 鬚ｨ縺ｮ session_id 繧よ拠蜷ｦ・・hase 4c 縺ｾ縺ｧ "default" 蝗ｺ螳夲ｼ峨・
         let result = route(
             "POST",
             "/api/agent/session/550e8400-e29b-41d4-a716-446655440000/step",
@@ -1381,7 +1338,7 @@ mod tests {
         assert!(matches!(result, Err(RouteError::NotImplemented)));
     }
 
-    // ── route tests: agent session order (Phase 4b-1 サブフェーズ E) ──
+    // 笏笏 route tests: agent session order (Phase 4b-1 繧ｵ繝悶ヵ繧ｧ繝ｼ繧ｺ E) 笏笏
 
     const VALID_ORDER_BODY: &str = r#"{
         "client_order_id": "cli_42",
@@ -1490,7 +1447,7 @@ mod tests {
         assert!(matches!(result, Err(RouteError::NotFound)));
     }
 
-    // ── route tests: agent session advance (Phase 4b-1 サブフェーズ G) ──
+    // 笏笏 route tests: agent session advance (Phase 4b-1 繧ｵ繝悶ヵ繧ｧ繝ｼ繧ｺ G) 笏笏
 
     #[test]
     fn route_agent_session_advance_accepts_default_with_valid_body() {
@@ -1523,10 +1480,10 @@ mod tests {
 
     #[test]
     fn route_agent_session_advance_rejects_end_in_stop_on() {
-        // plan §4.3: "end" は不正値（範囲終端は常に停止するため明示不要）
+        // plan ﾂｧ4.3: "end" 縺ｯ荳肴ｭ｣蛟､・育ｯ・峇邨らｫｯ縺ｯ蟶ｸ縺ｫ蛛懈ｭ｢縺吶ｋ縺溘ａ譏守､ｺ荳崎ｦ・ｼ・
         let body = r#"{"until_ms": 100, "stop_on": ["end"]}"#;
         let result = route("POST", "/api/agent/session/default/advance", body);
-        // serde の unknown variant エラーには "end" 値が含まれる。
+        // serde reports "end" as an unknown variant.
         assert_bad_request_with_keyword(result, "end");
     }
 
@@ -1539,7 +1496,6 @@ mod tests {
 
     #[test]
     fn not_implemented_body_matches_adr_spec() {
-        // ADR-0001 / phase4b_agent_replay_api.md §4.5 固定文言。
         assert_eq!(
             NOT_IMPLEMENTED_MULTI_SESSION_BODY,
             r#"{"error":"multi-session not yet implemented; use 'default' until Phase 4c"}"#
@@ -1555,7 +1511,28 @@ mod tests {
     #[test]
     fn route_post_toggle() {
         let cmd = route("POST", "/api/replay/toggle", "").unwrap();
-        assert!(matches!(unwrap_replay(cmd), ReplayCommand::Toggle));
+        assert!(matches!(
+            unwrap_replay(cmd),
+            ReplayCommand::Toggle { init_range: None }
+        ));
+    }
+
+    #[test]
+    fn route_post_toggle_with_init_range() {
+        let body = r#"{"start":"2026-04-01 09:00","end":"2026-04-01 15:00"}"#;
+        let cmd = route("POST", "/api/replay/toggle", body).unwrap();
+        assert!(matches!(
+            unwrap_replay(cmd),
+            ReplayCommand::Toggle {
+                init_range: Some((start, end))
+            } if start == "2026-04-01 09:00" && end == "2026-04-01 15:00"
+        ));
+    }
+
+    #[test]
+    fn route_post_toggle_rejects_missing_end() {
+        let body = r#"{"start":"2026-04-01 09:00"}"#;
+        assert_bad_request_with_keyword(route("POST", "/api/replay/toggle", body), "end");
     }
 
     #[test]
@@ -1566,7 +1543,7 @@ mod tests {
 
     #[test]
     fn route_get_on_post_endpoint_not_found() {
-        // GET on POST-only endpoints should return NotFound
+        // GET on POST-only endpoints should return NotFound.
         let result = route("GET", "/api/replay/toggle", "");
         assert!(matches!(result, Err(RouteError::NotFound)));
     }
@@ -1622,7 +1599,7 @@ mod tests {
         assert!(matches!(result, Err(RouteError::BadRequest)));
     }
 
-    // ── route tests: narrative（Phase 4a）──
+    // 笏笏 route tests: narrative・・hase 4a・俄楳笏
 
     fn unwrap_narrative(cmd: ApiCommand) -> NarrativeCommand {
         match cmd {
@@ -1709,7 +1686,7 @@ mod tests {
 
     #[test]
     fn route_post_narrative_create_rejects_oversized_snapshot() {
-        // 11MB of JSON string content → exceeds MAX_UNCOMPRESSED_BYTES (10MB)
+        // 11MB of JSON string content 竊・exceeds MAX_UNCOMPRESSED_BYTES (10MB)
         let big = "x".repeat(11 * 1024 * 1024);
         let body = serde_json::json!({
             "agent_id": "a",
@@ -1836,7 +1813,7 @@ mod tests {
         assert!(matches!(result, Err(RouteError::BadRequest)));
     }
 
-    // ── route tests: pane ──
+    // 笏笏 route tests: pane 笏笏
 
     #[test]
     fn route_get_pane_list() {
@@ -1967,7 +1944,7 @@ mod tests {
         assert!(matches!(unwrap_pane(cmd), PaneCommand::ListNotifications));
     }
 
-    // ── route tests: chart-snapshot ──
+    // 笏笏 route tests: chart-snapshot 笏笏
 
     #[test]
     fn route_get_chart_snapshot_valid_uuid() {
@@ -2033,7 +2010,7 @@ mod tests {
         }
     }
 
-    // ── query_param ──
+    // 笏笏 query_param 笏笏
 
     #[test]
     fn query_param_extracts_single_value() {
@@ -2068,7 +2045,7 @@ mod tests {
         assert!(matches!(result, Err(RouteError::BadRequest)));
     }
 
-    // ── route tests: open-order-pane ──
+    // 笏笏 route tests: open-order-pane 笏笏
 
     #[test]
     fn route_post_sidebar_open_order_pane_order_entry() {
@@ -2114,7 +2091,7 @@ mod tests {
         assert!(matches!(result, Err(RouteError::BadRequest)));
     }
 
-    // ── route tests: auth ──
+    // 笏笏 route tests: auth 笏笏
 
     #[test]
     fn route_get_auth_tachibana_status() {
@@ -2127,12 +2104,12 @@ mod tests {
 
     #[test]
     fn route_post_auth_tachibana_status_not_found() {
-        // POST はマッチしない（GET のみ）
+        // POST 縺ｯ繝槭ャ繝√＠縺ｪ縺・ｼ・ET 縺ｮ縺ｿ・・
         let result = route("POST", "/api/auth/tachibana/status", "");
         assert!(matches!(result, Err(RouteError::NotFound)));
     }
 
-    // ── inject-* エンドポイントは存在しないため 404 ──
+    // 笏笏 inject-* 繧ｨ繝ｳ繝峨・繧､繝ｳ繝医・蟄伜惠縺励↑縺・◆繧・404 笏笏
 
     #[test]
     fn route_test_inject_endpoints_not_found() {
@@ -2148,7 +2125,7 @@ mod tests {
         assert!(matches!(r5, Err(RouteError::NotFound)));
     }
 
-    // ── route tests: GET /api/replay/orders ──
+    // 笏笏 route tests: GET /api/replay/orders 笏笏
 
     #[test]
     fn route_get_replay_orders() {
@@ -2161,16 +2138,15 @@ mod tests {
 
     #[test]
     fn route_post_replay_orders_not_found() {
-        // POST はマッチしない（GET のみ）
+        // POST 縺ｯ繝槭ャ繝√＠縺ｪ縺・ｼ・ET 縺ｮ縺ｿ・・
         let result = route("POST", "/api/replay/orders", "");
         assert!(matches!(result, Err(RouteError::NotFound)));
     }
 
-    /// SerTicker 形式（"Exchange:Symbol"）も bare symbol に正規化して受ける。
-    /// `/api/replay/state` が `"stream":"BinanceLinear:BTCUSDT:1m"` を返すため
-    /// エージェントが自然に SerTicker を送り返すパスがある。on_tick 側は
-    /// bare symbol でしか比較しないので、ここで剥がさないとサイレントに
-    /// Pending のまま fill せず、linked narrative の outcome も埋まらない。
+    /// SerTicker 蠖｢蠑擾ｼ・Exchange:Symbol"・峨ｂ bare symbol 縺ｫ豁｣隕丞喧縺励※蜿励￠繧九・    /// `/api/replay/state` 縺・`"stream":"BinanceLinear:BTCUSDT:1m"` 繧定ｿ斐☆縺溘ａ
+    /// 繧ｨ繝ｼ繧ｸ繧ｧ繝ｳ繝医′閾ｪ辟ｶ縺ｫ SerTicker 繧帝√ｊ霑斐☆繝代せ縺後≠繧九Ｐn_tick 蛛ｴ縺ｯ
+    /// bare symbol 縺ｧ縺励°豈碑ｼ・＠縺ｪ縺・・縺ｧ縲√％縺薙〒蜑･縺後＆縺ｪ縺・→繧ｵ繧､繝ｬ繝ｳ繝医↓
+    /// Pending 縺ｮ縺ｾ縺ｾ fill 縺帙★縲〕inked narrative 縺ｮ outcome 繧ょ沂縺ｾ繧峨↑縺・・    
     #[test]
     fn place_order_normalizes_ser_ticker_prefix() {
         let body =
@@ -2184,7 +2160,8 @@ mod tests {
         }
     }
 
-    /// bare symbol はそのまま通す（既存 E2E との後方互換）。
+    /// bare symbol 縺ｯ縺昴・縺ｾ縺ｾ騾壹☆・域里蟄・E2E 縺ｨ縺ｮ蠕梧婿莠呈鋤・峨・    
+
     #[test]
     fn place_order_accepts_bare_symbol() {
         let body = r#"{"ticker":"BTCUSDT","side":"sell","qty":0.01,"order_type":"market"}"#;
@@ -2202,7 +2179,8 @@ mod tests {
         }
     }
 
-    /// プレフィックスだけの "Exchange:" は空文字 ticker として 400。
+    /// 繝励Ξ繝輔ぅ繝・け繧ｹ縺縺代・ "Exchange:" 縺ｯ遨ｺ譁・ｭ・ticker 縺ｨ縺励※ 400縲・    
+
     #[test]
     fn place_order_rejects_empty_symbol_after_prefix() {
         let body = r#"{"ticker":"BinanceLinear:","side":"buy","qty":0.005}"#;
@@ -2210,7 +2188,7 @@ mod tests {
         assert!(matches!(result, Err(RouteError::BadRequest)));
     }
 
-    // ── body_opt_str_field tests ──
+    // 笏笏 body_opt_str_field tests 笏笏
 
     #[test]
     fn opt_str_field_present() {
@@ -2226,7 +2204,7 @@ mod tests {
 
     #[test]
     fn opt_str_field_null_equals_omission() {
-        // 仕様: JSON null はフィールド省略と等価 → None
+        // 莉墓ｧ・ JSON null 縺ｯ繝輔ぅ繝ｼ繝ｫ繝臥怐逡･縺ｨ遲我ｾ｡ 竊・None
         let r = body_opt_str_field(r#"{"kind":null}"#, "kind").unwrap();
         assert_eq!(r, None);
     }
@@ -2237,21 +2215,21 @@ mod tests {
         assert!(matches!(r, Err(RouteError::BadRequest)));
     }
 
-    // ── Phase 3: 注文管理 4 ルート RED テスト ──────────────────────────────────
+    // 笏笏 Phase 3: 豕ｨ譁・ｮ｡逅・4 繝ｫ繝ｼ繝・RED 繝・せ繝・笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏
 
-    /// GET /api/tachibana/orders → FetchTachibanaOrders { eig_day: "" }
+    /// GET /api/tachibana/orders -> FetchTachibanaOrders { eig_day: "" }.
     #[test]
     fn route_get_tachibana_orders_no_param() {
         let cmd = route("GET", "/api/tachibana/orders", "").unwrap();
         match cmd {
             ApiCommand::FetchTachibanaOrders { eig_day } => {
-                assert_eq!(eig_day, "", "クエリなしは eig_day=空文字");
+                assert_eq!(eig_day, "");
             }
             _ => panic!("Expected FetchTachibanaOrders, got {cmd:?}"),
         }
     }
 
-    /// GET /api/tachibana/orders?eig_day=20260417 → eig_day が取れる
+    /// GET /api/tachibana/orders?eig_day=20260417 竊・eig_day 縺悟叙繧後ｋ
     #[test]
     fn route_get_tachibana_orders_with_eig_day() {
         let cmd = route("GET", "/api/tachibana/orders?eig_day=20260417", "").unwrap();
@@ -2263,20 +2241,21 @@ mod tests {
         }
     }
 
-    /// GET /api/tachibana/order/12345678 → FetchTachibanaOrderDetail
+    /// GET /api/tachibana/order/12345678 竊・FetchTachibanaOrderDetail
     #[test]
     fn route_get_tachibana_order_detail() {
         let cmd = route("GET", "/api/tachibana/order/12345678", "").unwrap();
         match cmd {
             ApiCommand::FetchTachibanaOrderDetail { order_num, eig_day } => {
                 assert_eq!(order_num, "12345678");
-                assert_eq!(eig_day, "", "クエリなしは eig_day=空文字");
+                assert_eq!(eig_day, "");
             }
             _ => panic!("Expected FetchTachibanaOrderDetail, got {cmd:?}"),
         }
     }
 
-    /// GET /api/tachibana/order/12345678?eig_day=20260417 → eig_day クエリパラメータ取得
+    /// GET /api/tachibana/order/12345678?eig_day=20260417 竊・eig_day 繧ｯ繧ｨ繝ｪ繝代Λ繝｡繝ｼ繧ｿ蜿門ｾ・    
+
     #[test]
     fn route_get_tachibana_order_detail_with_eig_day() {
         let cmd = route("GET", "/api/tachibana/order/12345678?eig_day=20260417", "").unwrap();
@@ -2289,14 +2268,14 @@ mod tests {
         }
     }
 
-    /// GET /api/tachibana/order/ (order_num 空) → BadRequest
+    /// GET /api/tachibana/order/ (order_num 遨ｺ) 竊・BadRequest
     #[test]
     fn route_get_tachibana_order_detail_empty_order_num_bad_request() {
         let result = route("GET", "/api/tachibana/order/", "");
         assert!(matches!(result, Err(RouteError::BadRequest)));
     }
 
-    /// POST /api/tachibana/order/correct → TachibanaCorrectOrder
+    /// POST /api/tachibana/order/correct 竊・TachibanaCorrectOrder
     #[test]
     fn route_post_tachibana_order_correct_valid() {
         let body = r#"{
@@ -2319,7 +2298,7 @@ mod tests {
         }
     }
 
-    /// POST /api/tachibana/order/correct: 必須フィールド欠落 → BadRequest
+    /// POST /api/tachibana/order/correct: 蠢・医ヵ繧｣繝ｼ繝ｫ繝画ｬ關ｽ 竊・BadRequest
     #[test]
     fn route_post_tachibana_order_correct_missing_field() {
         let body = r#"{"price":"2600"}"#;
@@ -2327,7 +2306,7 @@ mod tests {
         assert!(matches!(result, Err(RouteError::BadRequest)));
     }
 
-    /// POST /api/tachibana/order/cancel → TachibanaOrderCancel
+    /// POST /api/tachibana/order/cancel 竊・TachibanaOrderCancel
     #[test]
     fn route_post_tachibana_order_cancel_valid() {
         let body = r#"{
@@ -2345,7 +2324,7 @@ mod tests {
         }
     }
 
-    /// POST /api/tachibana/order/cancel: 必須フィールド欠落 → BadRequest
+    /// POST /api/tachibana/order/cancel: 蠢・医ヵ繧｣繝ｼ繝ｫ繝画ｬ關ｽ 竊・BadRequest
     #[test]
     fn route_post_tachibana_order_cancel_missing_order_number() {
         let body = r#"{"eig_day":"20260417"}"#;
@@ -2353,14 +2332,14 @@ mod tests {
         assert!(matches!(result, Err(RouteError::BadRequest)));
     }
 
-    /// POST /api/tachibana/order/cancel: 不正 JSON → BadRequest
+    /// POST /api/tachibana/order/cancel: 荳肴ｭ｣ JSON 竊・BadRequest
     #[test]
     fn route_post_tachibana_order_cancel_invalid_json() {
         let result = route("POST", "/api/tachibana/order/cancel", "not json");
         assert!(matches!(result, Err(RouteError::BadRequest)));
     }
 
-    /// GET /api/tachibana/holdings?issue_code=7203 → FetchTachibanaHoldings
+    /// GET /api/tachibana/holdings?issue_code=7203 竊・FetchTachibanaHoldings
     #[test]
     fn route_get_tachibana_holdings_with_issue_code() {
         let cmd = route("GET", "/api/tachibana/holdings?issue_code=7203", "").unwrap();
@@ -2372,26 +2351,21 @@ mod tests {
         }
     }
 
-    /// GET /api/tachibana/holdings (issue_code なし) → BadRequest
+    /// GET /api/tachibana/holdings (issue_code 縺ｪ縺・ 竊・BadRequest
     #[test]
     fn route_get_tachibana_holdings_missing_issue_code_bad_request() {
         let result = route("GET", "/api/tachibana/holdings", "");
         assert!(matches!(result, Err(RouteError::BadRequest)));
     }
 
-    // ── Sub-phase L (ADR-0001 §3): Deleted routes must return NotFound ──
-    //
-    // 自動再生機構の全廃と agent session API への一本化に伴い、以下のルートは削除される。
-    // これらのテストは RED 段階では Ok(...) を返すため失敗する。サブフェーズ M で
-    // ReplayCommand variant 削除 + route 行削除によって GREEN 化する。
-
+    // Sub-phase L: deleted routes must return NotFound.
     #[test]
     fn route_post_replay_play_is_deleted() {
         let body = r#"{"start":"2026-04-01 09:00","end":"2026-04-01 15:00"}"#;
         let result = route("POST", "/api/replay/play", body);
         assert!(
             matches!(result, Err(RouteError::NotFound)),
-            "POST /api/replay/play must be deleted per ADR-0001 §3, got {result:?}"
+            "POST /api/replay/play must be deleted per ADR-0001 ﾂｧ3, got {result:?}"
         );
     }
 
@@ -2400,7 +2374,7 @@ mod tests {
         let result = route("POST", "/api/replay/pause", "");
         assert!(
             matches!(result, Err(RouteError::NotFound)),
-            "POST /api/replay/pause must be deleted per ADR-0001 §3, got {result:?}"
+            "POST /api/replay/pause must be deleted per ADR-0001 ﾂｧ3, got {result:?}"
         );
     }
 
@@ -2409,7 +2383,7 @@ mod tests {
         let result = route("POST", "/api/replay/resume", "");
         assert!(
             matches!(result, Err(RouteError::NotFound)),
-            "POST /api/replay/resume must be deleted per ADR-0001 §3, got {result:?}"
+            "POST /api/replay/resume must be deleted per ADR-0001 ﾂｧ3, got {result:?}"
         );
     }
 
@@ -2418,7 +2392,7 @@ mod tests {
         let result = route("POST", "/api/replay/speed", "");
         assert!(
             matches!(result, Err(RouteError::NotFound)),
-            "POST /api/replay/speed must be deleted per ADR-0001 §3, got {result:?}"
+            "POST /api/replay/speed must be deleted per ADR-0001 ﾂｧ3, got {result:?}"
         );
     }
 
@@ -2427,7 +2401,7 @@ mod tests {
         let result = route("POST", "/api/replay/step-forward", "");
         assert!(
             matches!(result, Err(RouteError::NotFound)),
-            "POST /api/replay/step-forward must be deleted per ADR-0001 §3, got {result:?}"
+            "POST /api/replay/step-forward must be deleted per ADR-0001 ﾂｧ3, got {result:?}"
         );
     }
 
@@ -2436,11 +2410,11 @@ mod tests {
         let result = route("POST", "/api/replay/step-backward", "");
         assert!(
             matches!(result, Err(RouteError::NotFound)),
-            "POST /api/replay/step-backward must be deleted per ADR-0001 §3, got {result:?}"
+            "POST /api/replay/step-backward must be deleted per ADR-0001 ﾂｧ3, got {result:?}"
         );
     }
 
-    // ── Sub-phase Q hotfix: rewind-to-start HTTP route ───────────────────────
+    // 笏笏 Sub-phase Q hotfix: rewind-to-start HTTP route 笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏
     #[test]
     fn route_post_agent_rewind_default_empty_body() {
         let cmd = route("POST", "/api/agent/session/default/rewind-to-start", "").unwrap();
@@ -2450,7 +2424,7 @@ mod tests {
                 init_range,
             }) => {
                 assert_eq!(session_id, "default");
-                assert!(init_range.is_none(), "empty body → init_range None");
+                assert!(init_range.is_none(), "empty body 竊・init_range None");
             }
             other => panic!("expected RewindToStart, got {other:?}"),
         }
@@ -2492,7 +2466,7 @@ mod tests {
 
     #[test]
     fn route_post_agent_rewind_rejects_partial_body() {
-        // start のみ → BadRequest
+        // start 縺ｮ縺ｿ 竊・BadRequest
         let body = r#"{"start":"2026-04-01 09:00"}"#;
         let result = route("POST", "/api/agent/session/default/rewind-to-start", body);
         assert!(
