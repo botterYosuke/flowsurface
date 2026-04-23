@@ -22,6 +22,7 @@ from .agent_session import (
     AgentAdvanceResponse,
     AgentFill,
     AgentOrderResponse,
+    AgentRewindResponse,
     AgentSessionApi,
     AgentStepResponse,
 )
@@ -43,6 +44,7 @@ __all__ = [
     "AgentSessionApi",
     "AgentStepResponse",
     "AgentAdvanceResponse",
+    "AgentRewindResponse",
     "AgentOrderResponse",
     "AgentFill",
     "FlowsurfaceNotRunningError",

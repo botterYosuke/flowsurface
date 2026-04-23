@@ -9,7 +9,7 @@
 > | ナラティブ API（Phase 4a）| [narrative.md](narrative.md) |
 > | Python SDK | [python.md](python.md) |
 
-**最終更新**: 2026-04-22
+**最終更新**: 2026-04-23
 **対象ブランチ**: `feat/phase4b-subphase-*`（Phase 4b-1 完了時点）
 
 本書は agent 専用 Replay API `/api/agent/session/:id/*` を、実装・利用・運用に十分な
@@ -45,16 +45,16 @@ agent 専用 API を別経路として分離した。
 |---|---|
 | 型契約の厳格化 | `Ticker = { exchange, symbol }` 構造体必須、`order_type` 明示必須 |
 | 決定論性 | `step` レスポンスに当該 tick の全副作用（fills / updated_narrative_ids）を同梱、polling 不要 |
-| Wall-time 非依存 | `advance { until_ms }` で任意区間を instant 実行（Headless 限定） |
+| Wall-time 非依存 | `advance { until_ms }` で任意区間を instant 実行（GUI / Headless 両対応） |
 | 冪等性 | `client_order_id` による重複発注抑止、body 相違時は 409 |
 | セッション契約 | path `:id` を先行確定、Phase 4b-1 では `"default"` 固定 |
 
 ### 1.2 非ゴール（Phase 4b-1）
 
-- **UI リモコン API の置き換え**: `/api/replay/*` は Phase 4c まで並存。facade 化は Phase 4c
+- **UI リモコン API の拡張**: `/api/replay/*` は mode toggle / status に縮小。新規ルートは追加しない
 - **複数 session 並行**: Phase 4c（本 Phase では `"default"` のみ受理、非 default は 501）
 - **`step-backward` の agent 契約化**: ADR-0001 でスコープ外と確定（forward-only）
-- **GUI ランタイムからの agent API 利用**: `step` / `order` は 501 スタブ、`advance` は 400
+- **複数 GUI session**: GUI / Headless とも `"default"` session のみ扱う
 
 ---
 
@@ -113,7 +113,8 @@ API 境界で `u64` として扱うタイムスタンプ。レスポンス JSON 
 | Method | Path | 用途 | 実装サブフェーズ |
 |---|---|---|:-:|
 | `POST` | `/api/agent/session/:id/step` | 1 bar 進行 + 副作用同梱 | C, D |
-| `POST` | `/api/agent/session/:id/advance` | 任意区間 instant 実行（Headless のみ）| G |
+| `POST` | `/api/agent/session/:id/advance` | 任意区間 instant 実行（GUI / Headless）| G, Q |
+| `POST` | `/api/agent/session/:id/rewind-to-start` | 先頭へ巻き戻し。未初期化時は `{start,end}` で初期化 | Q |
 | `POST` | `/api/agent/session/:id/order` | 仮想注文（冪等性あり） | E |
 
 ### 4.1 `POST /api/agent/session/:id/step`
@@ -177,9 +178,34 @@ API 境界で `u64` として扱うタイムスタンプ。レスポンス JSON 
 **不変条件**:
 - `observation` は返さない（数万 tick のシリアライズコストを避ける）。必要なら直後に `step` or 別 API で取得
 - `stop_on` は `["fill", "narrative"]` の部分集合。`"end"` は不正値（範囲終端は常に停止）
-- **Headless ランタイムでのみ受理**。GUI で叩くと `400 {"error":"instant mode requires headless runtime (pass --headless)"}`
+- GUI / Headless の両方で受理する。未初期化時は 404、Loading 中は 409。
 
-### 4.3 `POST /api/agent/session/:id/order`
+### 4.3 `POST /api/agent/session/:id/rewind-to-start`
+
+**リクエスト**:
+
+```jsonc
+// セッション未初期化時のみ必須
+{"start": "2024-01-15 09:00", "end": "2024-01-15 15:30"}
+```
+
+**レスポンス 200（未初期化時）**:
+
+```jsonc
+{"ok": true, "status": "loading", "start": "2024-01-15 09:00", "end": "2024-01-15 15:30"}
+```
+
+**レスポンス 200（初期化済み）**:
+
+```jsonc
+{"ok": true, "clock_ms": 1705299600000, "final_portfolio": {...}}
+```
+
+**不変条件**:
+- 未初期化かつ body なしは 400。
+- Active 中は clock を range.start に戻し、VirtualExchange / client_order_id map / fills を reset generation 経由で初期化する。
+
+### 4.4 `POST /api/agent/session/:id/order`
 
 **リクエスト**:
 
@@ -217,11 +243,10 @@ API 境界で `u64` として扱うタイムスタンプ。レスポンス JSON 
 |---|---|---|
 | 200 | 新規受付 / 冪等再送 | `{..., "idempotent_replay": bool}` |
 | 400 | 型違反（`ticker` 文字列・`order_type` 欠落・`client_order_id` regex 違反等） | `{"error": "<具体的メッセージ>"}` |
-| 400 | `advance` が GUI ランタイム | `{"error":"instant mode requires headless runtime (pass --headless)"}` |
 | 404 | セッション未初期化 | `{"error":"session not started", "hint":"start a replay session first (see agent_replay_api.md Getting Started)"}` |
 | 409 | `client_order_id` 重複 & body 相違 | `{"error":"client_order_id conflict with different request body", "existing_order_id": "..."}` |
+| 409 | セッション loading 中 | `{"error":"session loading"}` |
 | 501 | `session_id != "default"` | `{"error":"multi-session not yet implemented; use 'default' until Phase 4c"}` |
-| 503 | セッション loading 中 | `{"error":"session loading"}` |
 
 ---
 
@@ -232,9 +257,9 @@ ADR-0001 の核不変条件: UI リモコン API ハンドラは agent API state
 （`Started` / `Reset` / `Terminated`）を購読する。
 
 ```
-UI /api/replay/play       → virtual_engine.mark_session_started()  → generation + 1
-UI /api/replay/step-backward → virtual_engine.mark_session_reset() → generation + 1
-UI /api/replay/toggle (Live) → virtual_engine.mark_session_terminated() → generation + 1
+POST /api/replay/toggle {start,end} → virtual_engine.mark_session_started() → generation + 1
+POST /api/agent/session/default/rewind-to-start → mark_session_reset() → generation + 1
+POST /api/replay/toggle (Replay→Live) → mark_session_terminated() → generation + 1
 ```
 
 Agent API の state (`AgentSessionState`) は発注・観測のたびに
@@ -242,23 +267,23 @@ Agent API の state (`AgentSessionState`) は発注・観測のたびに
 `client_order_id` map を自動クリアする。
 
 **実用的な帰結**:
-- UI 経由で `/play` を再実行すると、agent が保持していた `client_order_id → order_id`
+- UI 経由で `/api/replay/toggle {start,end}` を再実行すると、agent が保持していた `client_order_id → order_id`
   の紐付けはクリアされる（同じ `client_order_id` を別注文に再利用可能）
-- `step-backward` / `seek` も同様（巻き戻した tick で異なる戦略を試せる）
+- `rewind-to-start` も同様（巻き戻した tick で異なる戦略を試せる）
 
 ---
 
 ## 7. Getting Started
 
-Phase 4b-1 時点では、agent API を使う前に **UI リモコン API でリプレイセッションを起動**する必要がある
-（本 Phase では agent API 側の `session start` エンドポイントは実装していない — plan §5.1 の妥協点）。
+agent API を使う前に、`/api/replay/toggle {start,end}` または
+`/api/agent/session/default/rewind-to-start {start,end}` でリプレイセッションを初期化する。
 
 ```bash
-# 1. アプリを起動（--headless 推奨。advance は headless 限定）
+# 1. アプリを起動
 ./target/release/flowsurface --headless --ticker BinanceLinear:BTCUSDT --timeframe M1
 
-# 2. リプレイセッションを起動（UI リモコン API 経由）
-curl -X POST http://127.0.0.1:9876/api/replay/play \
+# 2. リプレイセッションを起動
+curl -X POST http://127.0.0.1:9876/api/replay/toggle \
   -H "Content-Type: application/json" \
   -d '{"start": "2024-01-15 09:00", "end": "2024-01-15 15:30"}'
 
@@ -276,7 +301,7 @@ curl -X POST http://127.0.0.1:9876/api/agent/session/default/order \
     "order_type": {"market": {}}
   }'
 
-# 5. Headless のみ: 任意区間 instant 実行
+# 5. 任意区間 instant 実行
 curl -X POST http://127.0.0.1:9876/api/agent/session/default/advance \
   -H "Content-Type: application/json" \
   -d '{"until_ms": 1706659200000, "stop_on": ["fill"]}'
@@ -287,9 +312,8 @@ curl -X POST http://127.0.0.1:9876/api/agent/session/default/advance \
 ```python
 import flowsurface as fs
 
-# セッション起動（UI リモコン API 経由、Phase 4b-1 の現状）
-fs._client.post("/api/replay/play",
-                {"start": "2024-01-15 09:00", "end": "2024-01-15 15:30"})
+# セッション起動
+fs.replay.toggle(start="2024-01-15 09:00", end="2024-01-15 15:30")
 
 # agent API（型付きレスポンス）
 resp = fs.agent_session.step()
@@ -325,7 +349,7 @@ fs.agent_session.place_order(
 | 2 | `Ticker` は構造体 JSON 必須、文字列拒否 | Phase 4a silent failure #3 の再発 |
 | 3 | `order_type` 省略は 400（silent market default 禁止） | Phase 4a silent failure パターンの再発 |
 | 4 | `step` レスポンスの `fills` / `updated_narrative_ids` は同期確定 | polling ループが必要になり決定論が失われる |
-| 5 | `advance` は Headless runtime のみ（GUI は 400） | iced 再描画と競合して UI が凍結 |
+| 5 | `advance` は GUI / Headless 両対応。GUI は 1 tick ずつ進めて fill 時刻を揃える | 実行環境差分で E2E が分岐する |
 | 6 | `stop_on` に `"end"` を含めると 400 | 既に常時停止する条件を明示指定する混乱を招く |
 | 7 | UI リモコン API ハンドラは agent state を直接触らない | Phase 4c の facade 化で購読経路が壊れる |
 | 8 | `/api/replay/*` に新規ルートを追加しない（ADR-0001） | 2 系統 API が定着し facade 化が不可能になる |

@@ -3,7 +3,7 @@ on: [pull_request]
 
 # ADR-0001 §Risks の mitigation:
 # 「/api/replay/* への新規ルート追加は禁止」を CI で検知する。
-# 既存ルートの内部実装変更は許可し、routing table tuple リテラル
+# 既存ルートの内部実装変更・削除は許可し、routing table tuple リテラル
 # ('POST', '/api/replay/...') の新規追加のみを fail させる。
 jobs:
     ui-remote-api-freeze:

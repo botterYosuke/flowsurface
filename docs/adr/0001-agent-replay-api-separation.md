@@ -1,7 +1,7 @@
 # ADR-0001: Agent 専用 Replay API の新設と自動再生機構の廃止
 
 **Date**: 2026-04-22
-**Status**: proposed
+**Status**: accepted
 **Deciders**: sasaicco@gmail.com
 **Reviewers**: Claude（設計レビュー・下書き補助）
 

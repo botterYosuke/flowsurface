@@ -182,7 +182,6 @@ def test_non_default_session_id_returns_501():
 
 # 笏笏 advance (headless only) 笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏
 
-_HEADLESS = _is_headless()
 _skip_if_gui = pytest.mark.skipif(
     False,
     reason="advance now runs on both GUI and headless runtimes",
@@ -224,15 +223,17 @@ def test_advance_include_fills_false_omits_fills_array():
 
 def test_rewind_to_start_initializes_session_when_idle():
     _post("/api/app/set-mode", {"mode": "live"})
-    r = httpx.post(
-        f"{BASE_URL}/api/agent/session/default/rewind-to-start",
-        json={"start": START, "end": END},
-        timeout=5.0,
-    )
-    assert r.status_code == 200, r.text
-    body = r.json()
-    assert body["ok"] is True
-    assert body["status"] == "loading"
+    resp = fs.agent_session.rewind_to_start(start=START, end=END)
+    assert isinstance(resp, fs.AgentRewindResponse)
+    assert resp.ok is True
+    assert resp.status == "loading"
+    assert resp.start == START
+    assert resp.end == END
+
+
+def test_rewind_to_start_rejects_partial_init_range_in_sdk():
+    with pytest.raises(ValueError):
+        fs.agent_session.rewind_to_start(start=START)
 
 
 # 笏笏 繧ｪ繝輔Λ繧､繝ｳ dataclass 繝・せ繝茨ｼ・pp 譛ｪ襍ｷ蜍輔〒繧りｵｰ繧具ｼ俄楳笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏
@@ -341,3 +342,14 @@ def test_dataclass_order_response_roundtrip():
     })
     assert resp.idempotent_replay is True
     assert resp.order_id == "ord_server_uuid"
+
+
+def test_dataclass_rewind_response_for_initialized_session():
+    resp = fs.AgentRewindResponse.from_dict({
+        "ok": True,
+        "clock_ms": 1_704_067_260_000,
+        "final_portfolio": {"cash": 1_000_000.0},
+    })
+    assert resp.ok is True
+    assert resp.clock_ms == 1_704_067_260_000
+    assert resp.final_portfolio == {"cash": 1_000_000.0}

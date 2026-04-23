@@ -19,6 +19,7 @@ Usage::
         stop_on=["fill"],
         include_fills=True,
     )
+    fs.agent_session.rewind_to_start()
 """
 from __future__ import annotations
 
@@ -109,6 +110,34 @@ class AgentAdvanceResponse:
 
 
 @dataclass
+class AgentRewindResponse:
+    """Response from ``POST /api/agent/session/:id/rewind-to-start``."""
+
+    ok: bool
+    status: str | None = None
+    clock_ms: int | None = None
+    start: str | None = None
+    end: str | None = None
+    final_portfolio: dict[str, Any] | None = None
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "AgentRewindResponse":
+        clock_raw = d.get("clock_ms")
+        return cls(
+            ok=bool(d["ok"]),
+            status=str(d["status"]) if d.get("status") is not None else None,
+            clock_ms=int(clock_raw) if clock_raw is not None else None,
+            start=str(d["start"]) if d.get("start") is not None else None,
+            end=str(d["end"]) if d.get("end") is not None else None,
+            final_portfolio=(
+                dict(d["final_portfolio"])
+                if isinstance(d.get("final_portfolio"), dict)
+                else None
+            ),
+        )
+
+
+@dataclass
 class AgentOrderResponse:
     """Response from ``POST /api/agent/session/:id/order``."""
 
@@ -156,6 +185,27 @@ class AgentSessionApi:
             body["include_fills"] = True
         resp = self._post_raw(path, body=body)
         return AgentAdvanceResponse.from_dict(resp)
+
+    def rewind_to_start(
+        self,
+        *,
+        start: str | None = None,
+        end: str | None = None,
+    ) -> AgentRewindResponse:
+        """Rewind the active session to its range start, or initialize one.
+
+        Pass both ``start`` and ``end`` when no replay session is active. When a
+        session is already active, omit them to reset clock, virtual fills, and
+        order idempotency state to the beginning of the current range.
+        """
+        path = f"/api/agent/session/{self._session_id}/rewind-to-start"
+        body: dict[str, Any] | None = None
+        if start is not None or end is not None:
+            if start is None or end is None:
+                raise ValueError("start and end must be provided together")
+            body = {"start": start, "end": end}
+        resp = self._post_raw(path, body=body)
+        return AgentRewindResponse.from_dict(resp)
 
     def place_order(
         self,

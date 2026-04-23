@@ -15,25 +15,25 @@
 
 ### Definition of Done
 
-  - [ ] `/api/replay/{play, pause, resume, speed, step-forward, step-backward}` ルートが全削除され、404 を返す
+  - [x] `/api/replay/{play, pause, resume, speed, step-forward, step-backward}` ルートが全削除され、404 を返す
   - [x] `POST /api/replay/toggle`（Live→Replay）が body `{start, end}` で session を初期化できる（klines ロード + Active 遷移、auto-tick なし）
   - [x] `POST /api/agent/session/:id/rewind-to-start` が新設され、未初期化時は body `{start, end}` で session を初期化し、初期化済みなら clock を range.start に巻き戻す
-  - [ ] `POST /api/agent/session/:id/advance` が GUI ビルドでも利用できる（要件精査 `phase4b_agent_replay_api.md` DoD \#7 を参照し、サブフェーズ V で文書化 + 再評価）
-  - [ ] `ReplayCommand::{Pause, Resume, StepForward, CycleSpeed, StepBackward, Play}` が enum から削除される
-  - [ ] `StepClock` から speed / pause / resume 状態と `now_ms()` / `tick_until()` 以外の旧制御 API が除去される
-  - [ ] `ReplayController::is_paused()` / `ReplayState::is_paused()` 削除。呼び出し元全て除去
-  - [ ] iced subscription / tokio timer の自動 tick 経路削除
-  - [ ] UI: `▶` = step, `⏭` = advance, `⏮` = rewind-to-start, `⏹` / 速度切替ボタン撤去
-  - [ ] 起動時 fixture 自動 Play (`pending_auto_play`) 廃止。Replay モードで起動した場合 session は初期化 + 停止
-  - [ ] `src/headless.rs` の `step_forward` / `pause` / `resume` / `cycle_speed` ハンドラ削除
-  - [ ] `headless_mode` runtime ゲート（advance 用）削除
-  - [ ] Python SDK: `fs.replay.*` から step\_backward / step\_forward / pause / resume / speed 撤去。`fs.agent_session.rewind_to_start()` 追加
+  - [x] `POST /api/agent/session/:id/advance` が GUI ビルドでも利用できる（要件精査 `phase4b_agent_replay_api.md` DoD \#7 を参照し、サブフェーズ V で文書化 + 再評価）
+  - [x] `ReplayCommand::{Pause, Resume, StepForward, CycleSpeed, StepBackward, Play}` が enum から削除される
+  - [x] `StepClock` から speed / pause / resume 状態と `now_ms()` / `tick_until()` 以外の旧制御 API が除去される
+  - [x] `ReplayController::is_paused()` / `ReplayState::is_paused()` 削除。呼び出し元全て除去
+  - [x] iced subscription / tokio timer の自動 tick 経路削除
+  - [x] UI: `▶` = step, `⏭` = advance, `⏮` = rewind-to-start, `⏹` / 速度切替ボタン撤去
+  - [x] 起動時 fixture 自動 Play (`pending_auto_play`) 廃止。Replay モードで起動した場合 session は初期化 + 停止
+  - [x] `src/headless.rs` の `step_forward` / `pause` / `resume` / `cycle_speed` ハンドラ削除
+  - [x] `headless_mode` runtime ゲート（advance 用）削除
+  - [x] Python SDK: `fs.replay.*` から step\_backward / step\_forward / pause / resume / speed 撤去。`fs.agent_session.rewind_to_start()` 追加
   - [ ] `SessionLifecycleEvent::{Started, Reset, Terminated}` の発火点と購読側（agent state / narrative / UI / `client_order_id` UNIQUE map）の配線が確立され、UI リモコンハンドラが agent API state を直接触る経路が残っていない
   - [ ] ADR-0001 §6 状態×コマンド受理マトリックス（3 状態×全コマンド）を網羅する unit test が追加され PASS
   - [ ] `client_order_id` UNIQUE map が `SessionLifecycleEvent::Reset` 購読経由でクリアされる
-  - [ ] `pending_auto_play` 経路が全削除され、Replay モード起動時に session 初期化 + 停止
+  - [x] `pending_auto_play` 経路が全削除され、Replay モード起動時に session 初期化 + 停止
   - [ ] `cargo fmt` / `cargo clippy -D warnings` / `cargo test` 全 PASS
-  - [ ] E2E 調査完了。壊れたテストを書き換え or 削除
+  - [x] E2E 調査完了。壊れたテストを書き換え or 削除
 
 -----
 
@@ -90,9 +90,9 @@
 
 ### サブフェーズ M: ReplayCommand enum 整理
 
-  - [ ] `ReplayCommand::{Pause, Resume, StepForward, CycleSpeed, StepBackward, Play}` variant を削除
-  - [ ] 関連する match アームを `src/app/api/replay.rs` / `src/headless.rs` / `src/replay_api.rs` から除去
-  - [ ] コンパイルが通り、L で追加した RED テストが GREEN 化することを確認
+  - [x] `ReplayCommand::{Pause, Resume, StepForward, CycleSpeed, StepBackward, Play}` variant を削除
+  - [x] 関連する match アームを `src/app/api/replay.rs` / `src/headless.rs` / `src/replay_api.rs` から除去
+  - [x] コンパイルが通り、L で追加した RED テストが GREEN 化することを確認
 
 ### サブフェーズ N: 自動 tick 購読経路の解体 + 起動時 auto-play 廃止
 
@@ -127,33 +127,33 @@
 
 ### サブフェーズ Q: `advance` の GUI ガード削除 + SessionLifecycleEvent 配線
 
-  - [ ] `src/replay_api.rs` / `src/main.rs` の `headless_mode` runtime ゲート（advance 用）を削除
-  - [ ] GUI ビルドで advance を叩く E2E を新規追加（従来 S57 の仕様反転）
+  - [x] `src/replay_api.rs` / `src/main.rs` の `headless_mode` runtime ゲート（advance 用）を削除
+  - [x] GUI ビルドで advance を叩く E2E を新規追加（従来 S57 の仕様反転）
   - [ ] **`SessionLifecycleEvent::{Started, Reset, Terminated}` を `VirtualExchange` から発火**
       - `Started`: `toggle(Live→Replay)` 完了時 / `rewind-to-start(body あり, 未初期化)` 完了時
       - `Reset`: `rewind-to-start(初期化済み)` 実行時
       - `Terminated`: `toggle(Replay→Live)` 実行時
   - [ ] **購読側の配線**: agent state の `client_order_id` UNIQUE map / narrative state / UI（チャート再描画）が `Reset` を購読して一括初期化する経路を確立。UI リモコンハンドラが agent API state を直接触るコードがないことを `grep` で確認
   - [ ] ADR-0001 §4 リセット不変条件表の各項目（open orders 全件キャンセル / fills 全件破棄 / 仮想残高 / position / narrative / client\_order\_id map / UI 再描画）をカバーする unit test or integration test を追加
-  - [ ] 親計画 `phase4b_agent_replay_api.md` の DoD \#7 取消線追記（サブフェーズ V で対応、ここでは触れない）
+  - [x] 親計画 `phase4b_agent_replay_api.md` の DoD \#7 取消線追記（サブフェーズ V で対応、ここでは触れない）
 
 ### サブフェーズ R: `is_paused()` 呼び出し元の書き換え
 
-  - [ ] `src/app/view.rs:53` 等の UI 側 `is_paused()` 参照削除（サブフェーズ P で概ね解決済のはず。取りこぼし確認）
-  - [ ] `src/headless.rs:373,473` は対応するハンドラごとサブフェーズ S で削除されるため実質対象外
-  - [ ] `src/replay/controller/session.rs:226` の `is_paused` 依存コードを解体
-  - [ ] chart widget 側 `self.anchor.is_paused()` は **対象外**（widget スクロール状態）
+  - [x] `src/app/view.rs:53` 等の UI 側 `is_paused()` 参照削除（サブフェーズ P で概ね解決済のはず。取りこぼし確認）
+  - [x] `src/headless.rs:373,473` は対応するハンドラごとサブフェーズ S で削除されるため実質対象外
+  - [x] `src/replay/controller/session.rs:226` の `is_paused` 依存コードを解体
+  - [x] chart widget 側 `self.anchor.is_paused()` は **対象外**（widget スクロール状態）
 
 ### サブフェーズ S: headless の重複実装削除
 
-  - [ ] `src/headless.rs` の以下ハンドラ削除
+  - [x] `src/headless.rs` の以下ハンドラ削除
       - `ApiCommand::Replay(ReplayCommand::Pause)` → 削除
       - `ApiCommand::Replay(ReplayCommand::Resume)` → 削除
       - `ApiCommand::Replay(ReplayCommand::StepForward)` → 削除
       - `ApiCommand::Replay(ReplayCommand::CycleSpeed)` → 削除
       - `ApiCommand::Replay(ReplayCommand::StepBackward)` → 削除
       - `ApiCommand::Replay(ReplayCommand::Play)` → 削除
-  - [ ] `headless_mode` runtime 判定経路の簡素化
+  - [x] `headless_mode` runtime 判定経路の簡素化
   - [ ] Headless E2E（`IS_HEADLESS=true`）が agent session API 経由で動作することを確認
 
 ### サブフェーズ T: 既存 E2E 調査
@@ -189,22 +189,22 @@ Windows 実機実行が必要。grep ベースで 98 ファイル規模の依存
 
 ### サブフェーズ U: Python SDK 更新
 
-  - [ ] `python/fs/replay.py` から `step_forward` / `step_backward` / `pause` / `resume` / `speed` / `play` を削除
-  - [ ] `python/fs/agent_session.py` に `rewind_to_start(start: str, end: str)` 追加
-  - [ ] `python/fs/replay.py::toggle` の body に `{start, end}` を受け入れる署名変更
+  - [x] `python/fs/replay.py` から `step_forward` / `step_backward` / `pause` / `resume` / `speed` / `play` を削除（現行配置は `python/replay.py`）
+  - [x] `python/fs/agent_session.py` に `rewind_to_start(start: str, end: str)` 追加（現行配置は `python/agent_session.py`）
+  - [x] `python/fs/replay.py::toggle` の body に `{start, end}` を受け入れる署名変更（現行配置は `python/replay.py`）
   - [x] Python 側のテスト `tests/python/test_agent_session.py` に rewind-to-start ケース追加
-  - [ ] docstring / type hints 更新
+  - [x] docstring / type hints 更新
 
 ### サブフェーズ V: ドキュメント更新
 
-  - [ ] `docs/adr/0001-agent-replay-api-separation.md` – サブフェーズ V 完了時に Status を `proposed` → `accepted` に上げる
-  - [ ] `docs/plan/phase4b_agent_replay_api.md` – DoD \#7（advance GUI 400）に取消線追加 + 「ADR-0001 統合改訂により撤回」注記
-  - [ ] `docs/spec/agent_replay_api.md` – `rewind-to-start` 追加、GUI advance 許容を反映、未初期化時の 400 を明記
-  - [ ] `docs/spec/replay.md` – pause/resume/speed/step-backward(1step)/step-forward セクション削除、StepClock 縮退を反映
-  - [ ] `docs/wiki/replay.md` – ユーザー向け操作説明を新 UI（Step / Advance / Rewind-to-start）に書き換え
-  - [ ] `.github/pull_request_template.md` – 「`/api/replay/*` 新規ルート禁止」条項の維持、「削除は許容」を追記
-  - [ ] `.github/workflows/adr_guard.yml` – grep lint の対象ルートリスト更新
-  - [ ] `README.md:47` – 再生制御の記述を「Step / Advance / RewindToStart」に修正
+  - [x] `docs/adr/0001-agent-replay-api-separation.md` – サブフェーズ V 完了時に Status を `proposed` → `accepted` に上げる
+  - [x] `docs/plan/phase4b_agent_replay_api.md` – DoD \#7（advance GUI 400）に取消線追加 + 「ADR-0001 統合改訂により撤回」注記
+  - [x] `docs/spec/agent_replay_api.md` – `rewind-to-start` 追加、GUI advance 許容を反映、現行実装の未初期化時 404 を明記
+  - [x] `docs/spec/replay.md` – pause/resume/speed/step-backward(1step)/step-forward セクション削除、StepClock 縮退を反映
+  - [x] `docs/wiki/replay.md` – ユーザー向け操作説明を新 UI（Step / Advance / Rewind-to-start）に書き換え
+  - [x] `.github/pull_request_template.md` – 「`/api/replay/*` 新規ルート禁止」条項の維持、「削除は許容」を追記
+  - [x] `.github/workflows/adr_guard.yml` – grep lint の対象ルートリスト更新
+  - [x] `README.md:47` – 再生制御の記述を「Step / Advance / RewindToStart」に修正
 
 -----
 
@@ -218,9 +218,18 @@ Windows 実機実行が必要。grep ベースで 98 ファイル規模の依存
 | O: StepClock 縮退 | ✅ | 2026-04-23 | ea24979 | speed/ClockStatus/pause 等削除。now\_ms/tick\_until のみに縮退 |
 | P: UI ボタン配線繋ぎ替え | 🚀 | 2026-04-23 | ea24979 | **一部完了**。AgentMessage::{Step, Advance, RewindToStart} 新設と UI 配線 |
 | Q: advance GUI ガード削除 + rewind reset 不変条件 | ✅ | 2026-04-23 | 0a1f406 | **ADR-0001 §3 / §4 + hotfix follow-up 完了**。GUI advance の 400 ガード削除、rewind reset の実装等 |
-| R: is\_paused 呼び出し元書き換え | ⏳ | | | |
+| R: is\_paused 呼び出し元書き換え | ✅ | 2026-04-23 | - | ReplayController / ReplayState 系の参照なしを grep で確認。chart widget の anchor pause は対象外 |
+| S: headless の重複実装削除 | 🚀 | 2026-04-23 | - | 旧 ReplayCommand variant ハンドラ削除は確認済み。Headless E2E 実機確認のみ残 |
 | T: E2E 調査 | ✅ | 2026-04-23 | - | スクリプト一括置換および obsolete なテストの削除完了。e2e.yml 更新済 |
-| U: Python SDK 更新 | ⏳ | | | |
-| V: ドキュメント更新 + ADR Status accepted | ⏳ | | | |
+| U: Python SDK 更新 | ✅ | 2026-04-23 | - | `fs.replay` は toggle/status/save/set-mode のみ。`fs.agent_session.rewind_to_start()` と `AgentRewindResponse` 追加 |
+| V: ドキュメント更新 + ADR Status accepted | ✅ | 2026-04-23 | - | ADR accepted、親計画 DoD \#7 撤回、spec/wiki/README/PR template/adr_guard 更新 |
 
 進捗があり次第 ⏳ → 🚀 → ✅ で更新。
+
+### 4.1 今回意図的に残す項目
+
+以下は今回のホットフィックス完了条件から外し、次の専用サブフェーズで扱う。
+
+  - ADR-0001 §6 の 3 状態 × 全コマンド受理マトリックス unit test（現行実装は未初期化 step/advance を 404 で返しており、計画書上の 400 と差分があるため先に仕様決定が必要）
+  - `SessionLifecycleEvent` enum そのものの導入。現行コードは `VirtualExchange::session_generation()` + `AgentSessionState::observe_generation()` で reset/started/terminated 相当を購読している
+  - Headless E2E 実機確認と `cargo clippy -D warnings` 全通過。既存警告前提のため、本変更では新規警告を増やさない範囲の確認に留める

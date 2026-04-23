@@ -44,11 +44,11 @@ Binance、Bybit、Hyperliquid、OKX、MEXC、および **立花証券 e支店** 
 |---|---|
 | モード切替 | LIVE / REPLAY をヘッダーバー or F5 or HTTP API でトグル |
 | 範囲指定 | `YYYY-MM-DD HH:MM` 形式で開始・終了（UTC 解釈）|
-| 再生制御 | Play / Pause / Resume / StepForward / StepBackward / CycleSpeed |
-| 再生速度 | 1x / 2x / 5x / 10x の循環切替 |
+| 再生制御 | Step / Advance / RewindToStart |
+| 再生速度 | 自動再生と速度切替は廃止。agent session API で明示的に進行 |
 | mid-replay ペイン操作 | リプレイ中のペイン追加・削除・timeframe / ticker 変更 |
 | HTTP 制御 API | `127.0.0.1:9876` でリプレイ・ペイン操作を外部から駆動 |
-| 起動時自動再生 | `saved-state.json` に replay 構成が含まれる場合、起動後に自動 Play |
+| 起動時リプレイ復元 | `saved-state.json` に replay 構成が含まれる場合、停止状態で復元 |
 
 **取引所別リプレイ対応状況:**
 

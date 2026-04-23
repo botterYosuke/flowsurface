@@ -15,7 +15,7 @@
 
 [ADR-0001](docs/adr/0001-agent-replay-api-separation.md) により、新規 API は
 `/api/agent/session/:id/*` に追加する。`/api/replay/*`（UI リモコン API）への
-**新規ルート追加は禁止**（既存ルートの内部実装変更は可）。
+**新規ルート追加は禁止**（既存ルートの内部実装変更・削除は可）。
 
 - [ ] `/api/replay/*` に新規ルートを**追加していない**
   （追加が必要な場合は `/api/agent/session/:id/*` に追加し、

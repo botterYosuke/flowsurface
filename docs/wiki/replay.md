@@ -150,9 +150,9 @@ curl -X POST http://127.0.0.1:9876/api/replay/order \
 
 ---
 
-## 起動時の自動再生
+## 起動時のリプレイ復元
 
-`POST /api/app/save` または通常終了で保存した状態に REPLAY 構成が含まれている場合、次回起動時に自動で同じ区間を再生開始する。
+`POST /api/app/save` または通常終了で保存した状態に REPLAY 構成が含まれている場合、次回起動時に同じ区間を停止状態で復元する。
 
 手動で無効にするには: LIVE モードに切り替えてから状態を保存する。
 
@@ -166,21 +166,21 @@ curl -X POST http://127.0.0.1:9876/api/replay/order \
 # 現在の状態を確認
 curl http://127.0.0.1:9876/api/replay/status
 
-# 再生開始
-curl -X POST http://127.0.0.1:9876/api/replay/play \
+# リプレイ範囲を初期化
+curl -X POST http://127.0.0.1:9876/api/replay/toggle \
   -H "Content-Type: application/json" \
   -d '{"start":"2026-04-01 09:00","end":"2026-04-01 15:00"}'
 
-# 一時停止 / 再開
-curl -X POST http://127.0.0.1:9876/api/replay/pause
-curl -X POST http://127.0.0.1:9876/api/replay/resume
+# 1 バー進む
+curl -X POST http://127.0.0.1:9876/api/agent/session/default/step
 
-# 1 バー進む / 戻る
-curl -X POST http://127.0.0.1:9876/api/replay/step-forward
-curl -X POST http://127.0.0.1:9876/api/replay/step-backward
+# 指定時刻まで進む
+curl -X POST http://127.0.0.1:9876/api/agent/session/default/advance \
+  -H "Content-Type: application/json" \
+  -d '{"until_ms":1775008800000}'
 
-# 速度循環
-curl -X POST http://127.0.0.1:9876/api/replay/speed
+# 範囲の先頭へ戻る
+curl -X POST http://127.0.0.1:9876/api/agent/session/default/rewind-to-start
 ```
 
 全エンドポイントは [開発者仕様書 (GitHub)](https://github.com/flowsurface-rs/flowsurface/blob/main/docs/spec/replay_header.md#11-http-制御-api) を参照。

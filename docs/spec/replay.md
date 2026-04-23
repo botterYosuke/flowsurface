@@ -778,13 +778,9 @@ fn subscription(&self) -> Subscription<Message> {
 | メソッド | パス | リクエストボディ | レスポンス | 対応コマンド |
 |---|---|---|---|---|
 | GET | `/api/replay/status` | — | `ReplayStatus` | `GetStatus` |
-| POST | `/api/replay/toggle` | — | `ReplayStatus` | `Toggle` |
-| POST | `/api/replay/play` | `{"start": "YYYY-MM-DD HH:MM", "end": "YYYY-MM-DD HH:MM"}` | `ReplayStatus` | `Play` |
-| POST | `/api/replay/pause` | — | `ReplayStatus` | `Pause` |
-| POST | `/api/replay/resume` | — | `ReplayStatus` | `Resume` |
-| POST | `/api/replay/step-forward` | — | `ReplayStatus` | `StepForward` |
-| POST | `/api/replay/step-backward` | — | `ReplayStatus` | `StepBackward` |
-| POST | `/api/replay/speed` | — | `ReplayStatus` | `CycleSpeed` |
+| POST | `/api/replay/toggle` | `{"start": "YYYY-MM-DD HH:MM", "end": "YYYY-MM-DD HH:MM"}`（Live→Replay 時） | `ReplayStatus` | `Toggle` |
+
+`/api/replay/{play,pause,resume,speed,step-forward,step-backward}` は ADR-0001 により削除済み。時刻操作は `/api/agent/session/default/{step,advance,rewind-to-start}` を使う。
 
 #### 仮想約定エンジン (`/api/replay/order`, `/api/replay/portfolio`, `/api/replay/state`)
 
@@ -1177,15 +1173,12 @@ pub struct ReplayStatus {
 # モード確認
 curl http://127.0.0.1:9876/api/replay/status
 
-# Replay に切替
-curl -X POST http://127.0.0.1:9876/api/replay/toggle
-
-# 再生開始
-curl -X POST http://127.0.0.1:9876/api/replay/play \
+# Replay に切替 + 範囲初期化
+curl -X POST http://127.0.0.1:9876/api/replay/toggle \
   -d '{"start":"2026-04-01 09:00","end":"2026-04-01 15:00"}'
 
-# 一時停止
-curl -X POST http://127.0.0.1:9876/api/replay/pause
+# 1 バー進める
+curl -X POST http://127.0.0.1:9876/api/agent/session/default/step
 
 # ペイン一覧
 curl http://127.0.0.1:9876/api/pane/list
@@ -1379,6 +1372,6 @@ Phase 8 までの実装（`process_tick` + `COARSE_CUTOFF_MS` 境界 + `FireStat
 
 ### 15.3 Fixture 直接起動の設計判断
 
-以前の E2E テストは「Live fixture で起動 → 15s 待機 → `POST /api/replay/toggle` → `POST /api/replay/play`」という 4 ステップを強制されていた。これを `saved-state.json` に replay 構成を含めた fixture を置くだけで自動再生できるように改修した。
+以前の E2E テストは「Live fixture で起動 → 15s 待機 → `POST /api/replay/toggle` → 旧 play ルート」という 4 ステップを強制されていた。ADR-0001 以降は `POST /api/replay/toggle {start,end}` または `POST /api/agent/session/default/rewind-to-start {start,end}` で session を初期化し、`step` / `advance` を明示的に呼んで進行する。
 
-**方針選定**: `ReplayState` に `pending_auto_play` フラグを transient フィールドとして追加し、全ペインが `Ready` になった瞬間に `ReplayMessage::Play` を dispatch する。既存の `prepare_replay()` / `start()` / kline load パスを一切変更しないため、UI でのPlay操作と完全等価な経路を通る。詳細は [docs/plan/replay_fixture_direct_boot.md](plan/replay_fixture_direct_boot.md) を参照。
+**現行方針**: 起動時の `pending_auto_play` は廃止。保存状態に replay 構成が含まれていても、自動 tick は発火せず、session は停止状態で復元される。詳細は [docs/plan/phase4b_agent_replay_api_followup.md](plan/phase4b_agent_replay_api_followup.md) を参照。

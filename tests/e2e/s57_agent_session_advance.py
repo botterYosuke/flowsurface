@@ -1,13 +1,9 @@
 ﻿#!/usr/bin/env python3
-"""s57_agent_session_advance.py 窶・Phase 4b-1 繧ｵ繝悶ヵ繧ｧ繝ｼ繧ｺ J: agent session advance E2E
+"""S57: agent session advance E2E.
 
-讀懆ｨｼ繧ｷ繝翫Μ繧ｪ (ADR-0001 / plan ﾂｧ4.3):
-- Headless runtime: advance 縺ｧ 100 tick 逶ｸ蠖薙ｒ instant 螳溯｡・竊・stopped_reason="until_reached"
-- Headless runtime: stop_on=["fill"] 縺ｧ譛蛻昴・邏・ｮ壽凾轤ｹ縺ｧ蛛懈ｭ｢ 竊・stopped_reason="fill"
-- Headless runtime: include_fills=true 縺ｧ fills 驟榊・蜷梧｢ｱ縲’alse 縺ｧ逵∫払
-- GUI runtime: advance 縺ｧ 400 + "headless" 繝｡繝・そ繝ｼ繧ｸ
-
-GUI 譎ゅ・ 400 縺ｮ譁ｹ縺ｮ縺ｿ讀懆ｨｼ縲・
+ADR-0001 follow-up changed the old GUI rejection rule: advance must now be
+accepted by both GUI and headless runtimes. This test verifies the shared
+behavior with until_ms, stop_on, and include_fills=false.
 """
 from __future__ import annotations
 
